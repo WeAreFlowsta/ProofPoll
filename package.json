@@ -1,0 +1,39 @@
+{
+  "name": "proofpoll",
+  "description": "ProofPoll - Verified polls with Flowsta identity linking",
+  "version": "0.1.0",
+  "engines": {
+    "node": "^18.17.0 || ^20.3.0 || >=21.0.0"
+  },
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "vite build && vite build -c adapters/static/vite.config.ts",
+    "build.client": "vite build",
+    "dev": "vite --mode ssr",
+    "fmt": "prettier --write .",
+    "lint": "eslint \"src/**/*.ts*\"",
+    "start": "vite --open --mode ssr",
+    "qwik": "qwik"
+  },
+  "devDependencies": {
+    "@builder.io/qwik": "^1.19.0",
+    "@builder.io/qwik-city": "^1.19.0",
+    "@tailwindcss/vite": "^4.2.0",
+    "@tauri-apps/api": "^2.10.1",
+    "@tauri-apps/cli": "^2.10.0",
+    "@types/node": "20.19.0",
+    "prettier": "3.6.2",
+    "tailwindcss": "^4.2.0",
+    "typescript": "5.4.5",
+    "typescript-plugin-css-modules": "latest",
+    "undici": "*",
+    "vite": "7.3.1",
+    "vite-tsconfig-paths": "^4.2.1"
+  },
+  "dependencies": {
+    "@flowsta/holochain": "file:../sdk-monorepo/packages/holochain",
+    "@tailwindcss/postcss": "^4.2.1",
+    "@tauri-apps/plugin-shell": "^2.3.5"
+  }
+}
