@@ -1,0 +1,23 @@
+services:
+  holochain:
+    image: ghcr.io/holo-host/edgenode:v0.0.10-hc0.6.0-go-pion
+    container_name: proofpoll-node
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    volumes:
+      - proofpoll-data:/data
+      # Default config already uses dev-test-bootstrap2.holochain.org
+      # Uncomment to override with custom config:
+      # - ./conductor-config.template.yaml:/usr/local/share/holochain/conductor-config.template.yaml:ro
+    # No ports exposed — the conductor communicates via kitsune2 QUIC
+    # and discovers peers through the bootstrap server.
+    # Uncomment below only if you need admin access for debugging:
+    # ports:
+    #   - "127.0.0.1:4444:4444"
+
+volumes:
+  proofpoll-data:

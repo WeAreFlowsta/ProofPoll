@@ -1,0 +1,17 @@
+{
+  "app": {
+    "name": "proofpoll_v1_0",
+    "version": "1.0.0",
+    "happUrl": "file:///data/happ/proofpoll_v1_0_happ.happ",
+    "modifiers": {
+      "networkSeed": "proofpoll-network-v1.0",
+      "properties": {}
+    }
+  },
+  "env": {
+    "holochain": {
+      "bootstrapUrl": "https://dev-test-bootstrap2.holochain.org/",
+      "signalServerUrl": "wss://dev-test-bootstrap2.holochain.org/"
+    }
+  }
+}
