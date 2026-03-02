@@ -1,8 +1,10 @@
-import { component$, useSignal, $ } from "@builder.io/qwik";
+import { component$, useContext, useSignal, $ } from "@builder.io/qwik";
 import { useNavigate } from "@builder.io/qwik-city";
+import { linkedContext } from "~/lib/context";
 import { createPoll } from "~/lib/holochain";
 
 export default component$(() => {
+  const linked = useContext(linkedContext);
   const nav = useNavigate();
   const title = useSignal("");
   const description = useSignal("");
@@ -63,10 +65,30 @@ export default component$(() => {
 
       await nav(`/poll/${hash}/`);
     } catch (e: any) {
-      error.value = e.message || "Failed to create poll";
+      error.value = e.message || String(e) || "Failed to create poll";
       submitting.value = false;
     }
   });
+
+  if (!linked.value) {
+    return (
+      <div class="max-w-xl mx-auto text-center py-16">
+        <h1 class="text-2xl font-bold mb-4">Create Poll</h1>
+        <p class="text-gray-400 mb-6">
+          Sign in with Flowsta to create polls with verified identity.
+        </p>
+        <a href="/identity/?link=true&returnTo=/create/">
+          <img
+            src="/assets/flowsta-signin.svg"
+            alt="Sign in with Flowsta"
+            width={158}
+            height={36}
+            class="hover:opacity-80 transition-opacity mx-auto"
+          />
+        </a>
+      </div>
+    );
+  }
 
   return (
     <div class="max-w-xl mx-auto">
@@ -165,7 +187,7 @@ export default component$(() => {
           type="button"
           onClick$={submit}
           disabled={submitting.value}
-          class="w-full bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white font-medium py-2.5 rounded-lg"
+          class="w-full bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white font-medium py-2.5 rounded-full"
         >
           {submitting.value ? "Creating..." : "Create Poll"}
         </button>

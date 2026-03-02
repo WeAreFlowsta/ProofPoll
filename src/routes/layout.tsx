@@ -1,6 +1,8 @@
-import { component$, Slot, useSignal, useVisibleTask$ } from "@builder.io/qwik";
+import { component$, Slot, useContextProvider, useSignal, useVisibleTask$ } from "@builder.io/qwik";
 import { Link, useLocation } from "@builder.io/qwik-city";
 import { invoke } from "@tauri-apps/api/core";
+import { linkedContext, displayNameContext, profilePictureContext } from "~/lib/context";
+import { getLinkedAgents } from "~/lib/holochain";
 
 interface AppStatus {
   ready: boolean;
@@ -15,7 +17,14 @@ interface AppStatus {
 
 export default component$(() => {
   const status = useSignal<AppStatus | null>(null);
+  const displayName = useSignal<string | null>(null);
+  const profilePicture = useSignal<string | null>(null);
+  const linked = useSignal(false);
+  useContextProvider(linkedContext, linked);
+  useContextProvider(displayNameContext, displayName);
+  useContextProvider(profilePictureContext, profilePicture);
   const loc = useLocation();
+  const showSignIn = useSignal(false);
 
   useVisibleTask$(({ cleanup }) => {
     let active = true;
@@ -25,7 +34,53 @@ export default component$(() => {
         try {
           const s = await invoke<AppStatus>("get_app_status");
           status.value = s;
-          if (s.ready) break;
+          if (s.ready) {
+            // Check DHT link status + verify with Vault
+            if (s.agent_pub_key) {
+              try {
+                const agents = await getLinkedAgents(s.agent_pub_key);
+                if (agents.length > 0) {
+                  // DHT says linked — verify Vault still agrees
+                  try {
+                    const linkResp = await fetch(
+                      `http://127.0.0.1:27777/link-status?app_agent_pub_key=${encodeURIComponent(s.agent_pub_key)}`,
+                      { signal: AbortSignal.timeout(2000) },
+                    );
+                    if (linkResp.ok) {
+                      const linkData = await linkResp.json();
+                      linked.value = linkData.linked === true;
+                    } else {
+                      // Vault running but endpoint error — trust DHT
+                      linked.value = true;
+                    }
+                  } catch {
+                    // Vault not running — trust DHT
+                    linked.value = true;
+                  }
+                }
+              } catch {
+                // Not linked or zome call failed
+              }
+            }
+
+            // Try to get profile from Vault (only needed if linked)
+            if (linked.value) {
+              try {
+                const resp = await fetch("http://127.0.0.1:27777/status", {
+                  signal: AbortSignal.timeout(2000),
+                });
+                if (resp.ok) {
+                  const vault = await resp.json();
+                  if (vault.display_name) displayName.value = vault.display_name;
+                  if (vault.profile_picture)
+                    profilePicture.value = vault.profile_picture;
+                }
+              } catch {
+                // Vault not running — use fallback
+              }
+            }
+            break;
+          }
         } catch (e) {
           console.error("Status poll failed:", e);
         }
@@ -34,8 +89,64 @@ export default component$(() => {
     };
 
     poll();
+
+    // Poll link status so header updates after link/unlink on identity page
+    const linkPoll = setInterval(async () => {
+      const s = status.value;
+      if (!s?.ready || !s.agent_pub_key) return;
+      try {
+        const agents = await getLinkedAgents(s.agent_pub_key);
+        const wasLinked = linked.value;
+        let nowLinked = agents.length > 0;
+
+        // Verify with Vault if DHT says linked
+        if (nowLinked) {
+          try {
+            const linkResp = await fetch(
+              `http://127.0.0.1:27777/link-status?app_agent_pub_key=${encodeURIComponent(s.agent_pub_key)}`,
+              { signal: AbortSignal.timeout(2000) },
+            );
+            if (linkResp.ok) {
+              const linkData = await linkResp.json();
+              if (linkData.linked === false) nowLinked = false;
+            }
+          } catch {
+            // Vault not running — trust DHT
+          }
+        }
+
+        linked.value = nowLinked;
+
+        // Fetch profile when linked but profile is missing
+        if (nowLinked && !displayName.value) {
+          try {
+            const resp = await fetch("http://127.0.0.1:27777/status", {
+              signal: AbortSignal.timeout(2000),
+            });
+            if (resp.ok) {
+              const vault = await resp.json();
+              if (vault.display_name) displayName.value = vault.display_name;
+              if (vault.profile_picture)
+                profilePicture.value = vault.profile_picture;
+            }
+          } catch {
+            // Vault not running
+          }
+        }
+
+        // Clear profile when unlinked
+        if (wasLinked && !nowLinked) {
+          displayName.value = null;
+          profilePicture.value = null;
+        }
+      } catch {
+        // Ignore errors
+      }
+    }, 3000);
+
     cleanup(() => {
       active = false;
+      clearInterval(linkPoll);
     });
   });
 
@@ -56,12 +167,22 @@ export default component$(() => {
               >
                 Polls
               </Link>
-              <Link
-                href="/create/"
-                class={`text-sm ${isActive("/create/") ? "text-indigo-400 font-medium" : "text-gray-400 hover:text-gray-200"}`}
-              >
-                Create
-              </Link>
+              {linked.value ? (
+                <Link
+                  href="/create/"
+                  class={`text-sm ${isActive("/create/") ? "text-indigo-400 font-medium" : "text-gray-400 hover:text-gray-200"}`}
+                >
+                  Create
+                </Link>
+              ) : (
+                <button
+                  type="button"
+                  onClick$={() => (showSignIn.value = true)}
+                  class={`text-sm ${isActive("/create/") ? "text-indigo-400 font-medium" : "text-gray-400 hover:text-gray-200"}`}
+                >
+                  Create
+                </button>
+              )}
               <Link
                 href="/identity/"
                 class={`text-sm ${isActive("/identity/") ? "text-indigo-400 font-medium" : "text-gray-400 hover:text-gray-200"}`}
@@ -71,11 +192,36 @@ export default component$(() => {
             </nav>
           )}
         </div>
-        {status.value?.ready && status.value.agent_pub_key && (
-          <div class="text-xs text-gray-500 font-mono">
-            {status.value.agent_pub_key.slice(0, 12)}...
-          </div>
-        )}
+        {status.value?.ready &&
+          status.value.agent_pub_key &&
+          (linked.value && displayName.value ? (
+            <div class="flex items-center gap-2">
+              <span class="text-sm text-gray-300">{displayName.value}</span>
+              {profilePicture.value ? (
+                <img
+                  src={profilePicture.value}
+                  alt="Profile"
+                  class="h-8 w-8 rounded-full object-cover border border-gray-600"
+                  width={32}
+                  height={32}
+                />
+              ) : (
+                <div class="flex h-8 w-8 items-center justify-center rounded-full bg-indigo-600 text-sm font-medium text-white">
+                  {displayName.value.charAt(0).toUpperCase()}
+                </div>
+              )}
+            </div>
+          ) : (
+            <a href="/identity/?link=true">
+              <img
+                src="/assets/flowsta-signin.svg"
+                alt="Sign in with Flowsta"
+                width={158}
+                height={36}
+                class="hover:opacity-80 transition-opacity"
+              />
+            </a>
+          ))}
       </header>
 
       <main class="flex-1 p-6">
@@ -98,6 +244,43 @@ export default component$(() => {
           <Slot />
         )}
       </main>
+
+      {/* Sign-in dialog */}
+      {showSignIn.value && (
+        <div
+          class="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
+          onClick$={() => (showSignIn.value = false)}
+        >
+          <div
+            class="bg-gray-900 border border-gray-700 rounded-xl p-8 max-w-sm w-full mx-4 text-center"
+            onClick$={(e) => e.stopPropagation()}
+          >
+            <h2 class="text-lg font-semibold text-white mb-2">Sign in required</h2>
+            <p class="text-gray-400 text-sm mb-6">
+              Sign in with Flowsta to create and vote on polls.
+            </p>
+            <a
+              href="/identity/?link=true&returnTo=/create/"
+              class="inline-block"
+            >
+              <img
+                src="/assets/flowsta-signin.svg"
+                alt="Sign in with Flowsta"
+                width={158}
+                height={36}
+                class="hover:opacity-80 transition-opacity mx-auto"
+              />
+            </a>
+            <button
+              type="button"
+              onClick$={() => (showSignIn.value = false)}
+              class="mt-4 text-sm text-gray-500 hover:text-gray-300 block mx-auto"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 });

@@ -1,10 +1,12 @@
-import { component$, useSignal, useVisibleTask$, $ } from "@builder.io/qwik";
-import { useLocation } from "@builder.io/qwik-city";
+import { component$, useContext, useSignal, useVisibleTask$, $ } from "@builder.io/qwik";
+import { Link, useLocation, useNavigate } from "@builder.io/qwik-city";
+import { linkedContext } from "~/lib/context";
 import { invoke } from "@tauri-apps/api/core";
 import {
   getPoll,
   getPollVotes,
   castVote,
+  deletePoll,
   getLinkedAgents,
   type Poll,
   type VoteData,
@@ -17,7 +19,9 @@ interface VerifiedResults {
 }
 
 export default component$(() => {
+  const linked = useContext(linkedContext);
   const loc = useLocation();
+  const nav = useNavigate();
   const poll = useSignal<Poll | null>(null);
   const pollAuthor = useSignal<string | null>(null);
   const votes = useSignal<VoteData[]>([]);
@@ -30,6 +34,9 @@ export default component$(() => {
   const voteError = useSignal<string | null>(null);
   const verified = useSignal<VerifiedResults | null>(null);
   const verifiedLoading = useSignal(false);
+  const confirmDelete = useSignal(false);
+  const deleting = useSignal(false);
+  const deleteError = useSignal<string | null>(null);
 
   const pollHash = loc.params.id;
 
@@ -170,6 +177,18 @@ export default component$(() => {
     }
   });
 
+  const confirmDeletePoll = $(async () => {
+    deleting.value = true;
+    deleteError.value = null;
+    try {
+      await deletePoll(pollHash);
+      await nav("/");
+    } catch (e: any) {
+      deleteError.value = e.message || String(e) || "Failed to delete poll";
+      deleting.value = false;
+    }
+  });
+
   if (loading.value) {
     return <div class="text-gray-400">Loading poll...</div>;
   }
@@ -211,7 +230,7 @@ export default component$(() => {
           {verified.value && verified.value.identityCount > 0 && (
             <span>
               {" "}
-              · {verified.value.verifiedVoteCount} verified
+              · {verified.value.identityCount} verified
             </span>
           )}
           {p.closes_at && (
@@ -221,52 +240,110 @@ export default component$(() => {
             </span>
           )}
         </div>
+
+        {/* Delete button — only visible to poll creator */}
+        {linked.value && myAgent.value && pollAuthor.value === myAgent.value && (
+          <div class="mt-3">
+            {!confirmDelete.value ? (
+              <button
+                type="button"
+                onClick$={() => (confirmDelete.value = true)}
+                class="text-red-400 hover:text-red-300 text-xs"
+              >
+                Delete poll
+              </button>
+            ) : (
+              <div class="bg-red-900/20 border border-red-800 rounded-lg p-3">
+                <p class="text-sm text-gray-300 mb-3">
+                  Are you sure you want to delete this poll? This cannot be undone.
+                </p>
+                {deleteError.value && (
+                  <div class="text-red-300 text-sm mb-2">{deleteError.value}</div>
+                )}
+                <div class="flex gap-2">
+                  <button
+                    type="button"
+                    onClick$={confirmDeletePoll}
+                    disabled={deleting.value}
+                    class="bg-red-700 hover:bg-red-600 disabled:opacity-50 text-white font-medium px-4 py-1.5 rounded-full text-sm"
+                  >
+                    {deleting.value ? "Deleting..." : "Delete"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick$={() => (confirmDelete.value = false)}
+                    class="bg-gray-700 hover:bg-gray-600 text-gray-200 font-medium px-4 py-1.5 rounded-full text-sm"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Voting form */}
       {isOpen && !hasVoted.value && (
-        <div class="bg-gray-900 border border-gray-800 rounded-lg p-5 mb-6">
-          <h2 class="text-sm font-medium text-gray-300 mb-3">
-            Cast your vote
-          </h2>
+        linked.value ? (
+          <div class="bg-gray-900 border border-gray-800 rounded-lg p-5 mb-6">
+            <h2 class="text-sm font-medium text-gray-300 mb-3">
+              Cast your vote
+            </h2>
 
-          {voteError.value && (
-            <div class="bg-red-900/50 border border-red-700 text-red-300 px-3 py-2 rounded text-sm mb-3">
-              {voteError.value}
+            {voteError.value && (
+              <div class="bg-red-900/50 border border-red-700 text-red-300 px-3 py-2 rounded text-sm mb-3">
+                {voteError.value}
+              </div>
+            )}
+
+            <div class="space-y-2 mb-4">
+              {p.options.map((option, i) => (
+                <label
+                  key={i}
+                  class={`flex items-center gap-3 p-3 rounded-lg border cursor-pointer transition-colors ${
+                    selectedOption.value === i
+                      ? "border-indigo-500 bg-indigo-950/50"
+                      : "border-gray-700 hover:border-gray-600"
+                  }`}
+                >
+                  <input
+                    type="radio"
+                    name="vote"
+                    checked={selectedOption.value === i}
+                    onChange$={() => (selectedOption.value = i)}
+                    class="accent-indigo-500"
+                  />
+                  <span class="text-white">{option}</span>
+                </label>
+              ))}
             </div>
-          )}
 
-          <div class="space-y-2 mb-4">
-            {p.options.map((option, i) => (
-              <label
-                key={i}
-                class={`flex items-center gap-3 p-3 rounded-lg border cursor-pointer transition-colors ${
-                  selectedOption.value === i
-                    ? "border-indigo-500 bg-indigo-950/50"
-                    : "border-gray-700 hover:border-gray-600"
-                }`}
-              >
-                <input
-                  type="radio"
-                  name="vote"
-                  checked={selectedOption.value === i}
-                  onChange$={() => (selectedOption.value = i)}
-                  class="accent-indigo-500"
-                />
-                <span class="text-white">{option}</span>
-              </label>
-            ))}
+            <button
+              type="button"
+              onClick$={submitVote}
+              disabled={selectedOption.value === null || voting.value}
+              class="bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white font-medium px-4 py-2 rounded-full text-sm"
+            >
+              {voting.value ? "Voting..." : "Vote"}
+            </button>
           </div>
-
-          <button
-            type="button"
-            onClick$={submitVote}
-            disabled={selectedOption.value === null || voting.value}
-            class="bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white font-medium px-4 py-2 rounded-lg text-sm"
-          >
-            {voting.value ? "Voting..." : "Vote"}
-          </button>
-        </div>
+        ) : (
+          <div class="bg-gray-900 border border-gray-800 rounded-lg p-5 mb-6 text-center">
+            <p class="text-gray-400 mb-4">
+              Sign in with Flowsta to vote on this poll.
+            </p>
+            <a href={`/identity/?link=true&returnTo=/poll/${pollHash}/`}>
+              <img
+                src="/assets/flowsta-signin.svg"
+                alt="Sign in with Flowsta to vote"
+                width={158}
+                height={36}
+                class="hover:opacity-80 transition-opacity mx-auto"
+              />
+            </a>
+          </div>
+        )
       )}
 
       {hasVoted.value && (
@@ -323,12 +400,14 @@ export default component$(() => {
       {verified.value && verified.value.identityCount > 0 && (
         <div class="bg-gray-900 border border-indigo-900 rounded-lg p-5">
           <h2 class="text-sm font-medium text-indigo-300 mb-1">
-            Verified Results ({verified.value.verifiedVoteCount} deduplicated)
+            Verified Results
           </h2>
           <p class="text-xs text-gray-500 mb-4">
-            {verified.value.identityCount} voter
-            {verified.value.identityCount !== 1 ? "s" : ""} linked to Flowsta
-            identity. Duplicate votes from the same identity are counted once.
+            {verified.value.verifiedVoteCount} verified vote
+            {verified.value.verifiedVoteCount !== 1 ? "s" : ""} from{" "}
+            {verified.value.identityCount} confirmed{" "}
+            {verified.value.identityCount !== 1 ? "people" : "person"}.
+            One vote per person.
           </p>
 
           <div class="space-y-3">

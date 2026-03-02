@@ -70,6 +70,34 @@ pub fn get_all_polls(_: ()) -> ExternResult<Vec<Record>> {
     Ok(records)
 }
 
+#[hdk_extern]
+pub fn delete_poll(action_hash: ActionHash) -> ExternResult<ActionHash> {
+    // Verify the caller is the author
+    let record = get(action_hash.clone(), GetOptions::default())?
+        .ok_or(wasm_error!("Poll not found"))?;
+    let my_agent = agent_info()?.agent_initial_pubkey;
+    if *record.action().author() != my_agent {
+        return Err(wasm_error!("Only the poll creator can delete it"));
+    }
+
+    // Delete the AllPolls link pointing to this poll
+    let anchor = all_polls_anchor()?;
+    let links = get_links(
+        LinkQuery::try_new(anchor, LinkTypes::AllPolls)?,
+        GetStrategy::default(),
+    )?;
+    for link in links {
+        if let Ok(target) = ActionHash::try_from(link.target) {
+            if target == action_hash {
+                delete_link(link.create_link_hash, GetOptions::default())?;
+            }
+        }
+    }
+
+    // Delete the poll entry
+    delete_entry(action_hash)
+}
+
 // --- Vote functions ---
 
 #[hdk_extern]

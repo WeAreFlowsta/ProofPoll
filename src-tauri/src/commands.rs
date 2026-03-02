@@ -213,8 +213,8 @@ pub async fn create_poll(
     let payload = ExternIO::encode(input).map_err(|e| e.to_string())?;
     let result = call_zome(client, POLLS_ZOME, "create_poll", payload).await?;
 
-    let record: Record = result.decode().map_err(|e| e.to_string())?;
-    Ok(record.action_address().to_string())
+    let action_hash: ActionHash = result.decode().map_err(|e| e.to_string())?;
+    Ok(action_hash.to_string())
 }
 
 #[tauri::command]
@@ -265,6 +265,23 @@ pub async fn get_all_polls(
 }
 
 #[tauri::command]
+pub async fn delete_poll(
+    state: tauri::State<'_, std::sync::Arc<AppState>>,
+    action_hash: String,
+) -> Result<String, String> {
+    let client = state.app_client.lock().await;
+    let client = client.as_ref().ok_or("Conductor not ready")?;
+
+    let hash =
+        ActionHash::try_from(action_hash).map_err(|e| format!("Invalid action hash: {:?}", e))?;
+    let payload = ExternIO::encode(hash).map_err(|e| e.to_string())?;
+    let result = call_zome(client, POLLS_ZOME, "delete_poll", payload).await?;
+
+    let delete_hash: ActionHash = result.decode().map_err(|e| e.to_string())?;
+    Ok(delete_hash.to_string())
+}
+
+#[tauri::command]
 pub async fn cast_vote(
     state: tauri::State<'_, std::sync::Arc<AppState>>,
     poll_action_hash: String,
@@ -282,8 +299,8 @@ pub async fn cast_vote(
     let payload = ExternIO::encode(input).map_err(|e| e.to_string())?;
     let result = call_zome(client, POLLS_ZOME, "cast_vote", payload).await?;
 
-    let record: Record = result.decode().map_err(|e| e.to_string())?;
-    Ok(record.action_address().to_string())
+    let action_hash: ActionHash = result.decode().map_err(|e| e.to_string())?;
+    Ok(action_hash.to_string())
 }
 
 #[tauri::command]

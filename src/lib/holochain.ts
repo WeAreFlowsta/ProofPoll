@@ -52,6 +52,10 @@ export async function getAllPolls(): Promise<PollListItem[]> {
   return invoke<PollListItem[]>("get_all_polls");
 }
 
+export async function deletePoll(actionHash: string): Promise<string> {
+  return invoke<string>("delete_poll", { actionHash });
+}
+
 export async function castVote(
   pollActionHash: string,
   optionIndex: number,

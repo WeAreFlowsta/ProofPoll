@@ -92,6 +92,7 @@ pub fn run() {
             commands::create_poll,
             commands::get_poll,
             commands::get_all_polls,
+            commands::delete_poll,
             commands::cast_vote,
             commands::get_poll_votes,
             commands::commit_identity_link,
