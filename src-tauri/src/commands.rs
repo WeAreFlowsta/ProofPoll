@@ -314,6 +314,37 @@ pub async fn get_poll_votes(
     Ok(votes)
 }
 
+// --- Identity link persistence ---
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+pub struct IdentityLinkData {
+    pub vault_agent_pub_key: String,
+    pub entry_action_hash: String,
+    pub linked_at: i64,
+}
+
+fn identity_link_path(data_dir: &std::path::Path) -> PathBuf {
+    data_dir.join("identity-link.json")
+}
+
+fn load_identity_link(data_dir: &std::path::Path) -> Option<IdentityLinkData> {
+    let path = identity_link_path(data_dir);
+    let json = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&json).ok()
+}
+
+fn save_identity_link(data_dir: &std::path::Path, data: &IdentityLinkData) {
+    let path = identity_link_path(data_dir);
+    if let Ok(json) = serde_json::to_string_pretty(data) {
+        let _ = std::fs::write(path, json);
+    }
+}
+
+fn delete_identity_link(data_dir: &std::path::Path) {
+    let path = identity_link_path(data_dir);
+    let _ = std::fs::remove_file(path);
+}
+
 // --- Identity linking commands ---
 
 #[tauri::command]
@@ -347,7 +378,80 @@ pub async fn commit_identity_link(
     let result = call_zome(client, AGENT_LINKING_ZOME, "create_external_link", payload).await?;
 
     let action_hash: ActionHash = result.decode().map_err(|e| e.to_string())?;
-    Ok(action_hash.to_string())
+    let action_hash_str = action_hash.to_string();
+
+    // Persist the link data for later revocation
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    save_identity_link(
+        &state.data_dir,
+        &IdentityLinkData {
+            vault_agent_pub_key: vault_agent_pub_key.clone(),
+            entry_action_hash: action_hash_str.clone(),
+            linked_at: now,
+        },
+    );
+
+    Ok(action_hash_str)
+}
+
+#[tauri::command]
+pub fn get_identity_link(
+    state: tauri::State<'_, std::sync::Arc<AppState>>,
+) -> Option<IdentityLinkData> {
+    load_identity_link(&state.data_dir)
+}
+
+#[tauri::command]
+pub async fn revoke_identity_link(
+    state: tauri::State<'_, std::sync::Arc<AppState>>,
+) -> Result<(), String> {
+    let link_data = load_identity_link(&state.data_dir)
+        .ok_or("No identity link found to revoke")?;
+
+    // Call revoke_link on the agent_linking zome
+    let action_hash = ActionHash::try_from(link_data.entry_action_hash.clone())
+        .map_err(|e| format!("Invalid action hash: {:?}", e))?;
+
+    let client = state.app_client.lock().await;
+    let client = client.as_ref().ok_or("Conductor not ready")?;
+
+    let payload = ExternIO::encode(action_hash).map_err(|e| e.to_string())?;
+    call_zome(client, AGENT_LINKING_ZOME, "revoke_link", payload).await?;
+
+    // Delete local persistence
+    delete_identity_link(&state.data_dir);
+
+    // Best-effort: notify Vault via IPC
+    let agent_key = state.agent_pub_key.lock().unwrap().clone();
+    if let Some(agent_key) = agent_key {
+        let _ = notify_vault_revoke("ProofPoll", &agent_key).await;
+    }
+
+    Ok(())
+}
+
+/// Best-effort notification to Vault that identity link was revoked.
+async fn notify_vault_revoke(app_name: &str, app_agent_pub_key: &str) -> Result<(), String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let body = serde_json::json!({
+        "app_name": app_name,
+        "app_agent_pub_key": app_agent_pub_key,
+    });
+
+    let _ = client
+        .post("http://127.0.0.1:27777/revoke-identity")
+        .json(&body)
+        .send()
+        .await;
+
+    Ok(())
 }
 
 #[tauri::command]

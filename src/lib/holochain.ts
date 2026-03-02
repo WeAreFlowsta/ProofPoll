@@ -72,6 +72,12 @@ export async function getPollVotes(
 
 // Identity linking
 
+export interface IdentityLinkData {
+  vault_agent_pub_key: string;
+  entry_action_hash: string;
+  linked_at: number;
+}
+
 export async function commitIdentityLink(
   vaultAgentPubKey: string,
   vaultSignature: string,
@@ -88,4 +94,12 @@ export async function getLinkedAgents(
   return invoke<string[]>("get_linked_agents", {
     agentPubKey,
   });
+}
+
+export async function getIdentityLink(): Promise<IdentityLinkData | null> {
+  return invoke<IdentityLinkData | null>("get_identity_link");
+}
+
+export async function revokeIdentityLink(): Promise<void> {
+  return invoke<void>("revoke_identity_link");
 }

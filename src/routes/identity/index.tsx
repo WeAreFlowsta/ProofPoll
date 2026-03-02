@@ -1,27 +1,66 @@
 import { component$, useSignal, useVisibleTask$, $ } from "@builder.io/qwik";
 import { invoke } from "@tauri-apps/api/core";
-import { getLinkedAgents, commitIdentityLink } from "~/lib/holochain";
+import {
+  getLinkedAgents,
+  commitIdentityLink,
+  getIdentityLink,
+  revokeIdentityLink,
+} from "~/lib/holochain";
 
 export default component$(() => {
   const agentKey = useSignal<string | null>(null);
   const linkedVaultKey = useSignal<string | null>(null);
   const loading = useSignal(true);
   const linking = useSignal(false);
+  const unlinking = useSignal(false);
   const error = useSignal<string | null>(null);
   const success = useSignal<string | null>(null);
 
-  useVisibleTask$(async () => {
+  // Check if Vault revoked the link. Returns true if revoked.
+  const checkVaultRevoke = $(async (pubKey: string): Promise<boolean> => {
+    try {
+      const { checkFlowstaLinkStatus } = await import("@flowsta/holochain");
+      const vaultStatus = await checkFlowstaLinkStatus({
+        localAgentPubKey: pubKey,
+      });
+
+      if (!vaultStatus.linked) {
+        // Verify Vault is actually running (SDK returns linked:false when unreachable)
+        const statusResp = await fetch("http://127.0.0.1:27777/status", {
+          signal: AbortSignal.timeout(2000),
+        }).catch(() => null);
+
+        if (statusResp && statusResp.ok) {
+          // Vault IS running and says not linked — revoke on DHT
+          try {
+            await revokeIdentityLink();
+          } catch (revokeErr: any) {
+            console.error("DHT revoke failed:", revokeErr);
+          }
+          linkedVaultKey.value = null;
+          success.value = "Identity link was revoked from Flowsta Vault.";
+          return true;
+        }
+      }
+    } catch {
+      // SDK import or fetch failed — ignore
+    }
+    return false;
+  });
+
+  useVisibleTask$(async ({ cleanup }) => {
     try {
       const status = await invoke<{
         agent_pub_key: string | null;
       }>("get_app_status");
       agentKey.value = status.agent_pub_key;
 
-      // Check if already linked.
+      // Check if already linked on DHT.
       if (status.agent_pub_key) {
         const linked = await getLinkedAgents(status.agent_pub_key);
         if (linked.length > 0) {
           linkedVaultKey.value = linked[0];
+          await checkVaultRevoke(status.agent_pub_key);
         }
       }
     } catch (e) {
@@ -29,6 +68,14 @@ export default component$(() => {
     } finally {
       loading.value = false;
     }
+
+    // Poll Vault link status every 5s while linked
+    const interval = setInterval(async () => {
+      if (!linkedVaultKey.value || !agentKey.value) return;
+      await checkVaultRevoke(agentKey.value);
+    }, 5000);
+
+    cleanup(() => clearInterval(interval));
   });
 
   const linkIdentity = $(async () => {
@@ -70,6 +117,22 @@ export default component$(() => {
       }
     } finally {
       linking.value = false;
+    }
+  });
+
+  const unlinkIdentity = $(async () => {
+    error.value = null;
+    success.value = null;
+    unlinking.value = true;
+
+    try {
+      await revokeIdentityLink();
+      linkedVaultKey.value = null;
+      success.value = "Identity unlinked successfully.";
+    } catch (e: any) {
+      error.value = e.message || String(e);
+    } finally {
+      unlinking.value = false;
     }
   });
 
@@ -132,18 +195,39 @@ export default component$(() => {
               </div>
             )}
 
-            <button
-              type="button"
-              onClick$={linkIdentity}
-              disabled={linking.value || !agentKey.value}
-              class="bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white font-medium px-4 py-2 rounded-lg text-sm"
-            >
-              {linking.value
-                ? "Linking..."
-                : linkedVaultKey.value
-                  ? "Re-link Identity"
-                  : "Link Flowsta Identity"}
-            </button>
+            <div class="flex gap-3">
+              {!linkedVaultKey.value && (
+                <button
+                  type="button"
+                  onClick$={linkIdentity}
+                  disabled={linking.value || !agentKey.value}
+                  class="bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white font-medium px-4 py-2 rounded-lg text-sm"
+                >
+                  {linking.value ? "Linking..." : "Link Flowsta Identity"}
+                </button>
+              )}
+
+              {linkedVaultKey.value && (
+                <>
+                  <button
+                    type="button"
+                    onClick$={linkIdentity}
+                    disabled={linking.value || !agentKey.value}
+                    class="bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white font-medium px-4 py-2 rounded-lg text-sm"
+                  >
+                    {linking.value ? "Linking..." : "Re-link Identity"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick$={unlinkIdentity}
+                    disabled={unlinking.value}
+                    class="bg-red-700 hover:bg-red-600 disabled:opacity-50 text-white font-medium px-4 py-2 rounded-lg text-sm"
+                  >
+                    {unlinking.value ? "Unlinking..." : "Unlink Identity"}
+                  </button>
+                </>
+              )}
+            </div>
             <p class="text-xs text-gray-500 mt-2">
               Requires Flowsta Vault to be running and unlocked.
             </p>

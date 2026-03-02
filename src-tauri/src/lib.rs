@@ -96,6 +96,8 @@ pub fn run() {
             commands::get_poll_votes,
             commands::commit_identity_link,
             commands::get_linked_agents,
+            commands::get_identity_link,
+            commands::revoke_identity_link,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

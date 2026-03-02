@@ -41,3 +41,6 @@ rmp-serde = "1"
 
 # Base64 for signature decoding
 base64 = "0.22"
+
+# HTTP client for IPC notifications to Vault
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
