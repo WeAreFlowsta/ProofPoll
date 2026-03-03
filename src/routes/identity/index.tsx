@@ -110,6 +110,7 @@ export default component$(() => {
         const { linkFlowstaIdentity } = await import("@flowsta/holochain");
         const result = await linkFlowstaIdentity({
           appName: "ProofPoll",
+          clientId: "flowsta_app_proofpoll_staging",
           localAgentPubKey: agentKey.value,
         });
         if (!result.success) {
@@ -163,6 +164,7 @@ export default component$(() => {
 
       const result = await linkFlowstaIdentity({
         appName: "ProofPoll",
+        clientId: "flowsta_app_proofpoll_staging",
         localAgentPubKey: agentKey.value,
       });
 
