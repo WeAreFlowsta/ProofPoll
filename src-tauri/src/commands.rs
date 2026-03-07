@@ -8,6 +8,7 @@ use holochain_client::AppWebsocket;
 use holochain_types::prelude::{
     ActionHash, AgentPubKey, ExternIO, FunctionName, Record, ZomeName,
 };
+use lair_keystore_api::prelude::LairClient;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -78,6 +79,7 @@ pub struct AppState {
     pub agent_pub_key: Mutex<Option<String>>,
     pub app_client: tokio::sync::Mutex<Option<AppWebsocket>>,
     pub passphrase: Mutex<String>,
+    pub lair_client: tokio::sync::Mutex<Option<LairClient>>,
 }
 
 impl AppState {
@@ -98,6 +100,7 @@ impl AppState {
             agent_pub_key: Mutex::new(None),
             app_client: tokio::sync::Mutex::new(None),
             passphrase: Mutex::new(passphrase),
+            lair_client: tokio::sync::Mutex::new(None),
         }
     }
 }
@@ -472,6 +475,7 @@ async fn notify_vault_revoke(app_name: &str, app_agent_pub_key: &str) -> Result<
 }
 
 /// Export all ProofPoll data (polls + votes) for Vault auto-backup.
+/// Includes cryptographic key access information for CAL compliance.
 #[tauri::command]
 pub async fn get_export_data(
     state: tauri::State<'_, std::sync::Arc<AppState>>,
@@ -524,12 +528,38 @@ pub async fn get_export_data(
         }));
     }
 
+    // CAL compliance: include cryptographic key access information
+    let agent_pub_key = state.agent_pub_key.lock().unwrap().clone();
+    let passphrase = state.passphrase.lock().unwrap().clone();
+    let lair_dir = state.data_dir.join("lair");
+
+    // Include lair keystore data (store_file) for portable key backup.
+    // The store_file is a small SQLite database (~4KB) containing the encrypted seed.
+    // With the passphrase + this file, the user can reconstruct their keystore.
+    let store_file_path = lair_dir.join("store_file");
+    let lair_keystore_data = if store_file_path.exists() {
+        use base64::Engine;
+        match std::fs::read(&store_file_path) {
+            Ok(bytes) => Some(base64::engine::general_purpose::STANDARD.encode(&bytes)),
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
+
     Ok(serde_json::json!({
-        "version": 1,
+        "version": 2,
         "exported_at": std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs(),
+        "agent_pub_key": agent_pub_key,
+        "crypto_keys": {
+            "lair_passphrase": passphrase,
+            "lair_keystore_path": lair_dir.to_string_lossy(),
+            "lair_keystore_data": lair_keystore_data,
+            "note": "Your cryptographic keys are stored in the lair keystore. The passphrase unlocks the keystore. The lair_keystore_data field contains a base64-encoded backup of your encrypted keystore file. To restore: decode the base64 data, save as 'store_file' in a lair directory, and use the lair-keystore CLI with your passphrase."
+        },
         "polls": polls_json,
     }))
 }

@@ -225,7 +225,7 @@ pub async fn start_holochain(
     data_dir: PathBuf,
     resource_dir: PathBuf,
     passphrase: String,
-) -> Result<(ConductorHandle, String, holochain_client::AppWebsocket), String> {
+) -> Result<(ConductorHandle, String, holochain_client::AppWebsocket, lair_keystore_api::prelude::LairClient), String> {
     let _ = app_handle.emit(
         "conductor-status",
         ConductorStatus::Starting {
@@ -257,7 +257,7 @@ pub async fn start_holochain(
             message: "Connecting to lair-keystore...".into(),
         },
     );
-    let _lair_client = match lair::connect_to_lair(&connection_url, &passphrase).await {
+    let lair_client = match lair::connect_to_lair(&connection_url, &passphrase).await {
         Ok(c) => c,
         Err(e) => fail_with_lair_cleanup!(e),
     };
@@ -357,5 +357,5 @@ pub async fn start_holochain(
         app_port,
     };
 
-    Ok((handle, agent_key_str, app_client))
+    Ok((handle, agent_key_str, app_client, lair_client))
 }

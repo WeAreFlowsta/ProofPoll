@@ -66,7 +66,7 @@ pub fn run() {
                 )
                 .await
                 {
-                    Ok((handle, agent_key, app_client)) => {
+                    Ok((handle, agent_key, app_client, lair_client)) => {
                         log::info!("Conductor started, agent: {}", agent_key);
                         let admin_port = handle.admin_port;
                         let app_port = handle.app_port;
@@ -74,6 +74,7 @@ pub fn run() {
                         *startup_state.conductor_handle.lock().unwrap() = Some(handle);
                         *startup_state.agent_pub_key.lock().unwrap() = Some(agent_key);
                         *startup_state.app_client.lock().await = Some(app_client);
+                        *startup_state.lair_client.lock().await = Some(lair_client);
                         *startup_state.conductor_status.lock().unwrap() =
                             conductor::ConductorStatus::Ready { admin_port, app_port };
                     }
