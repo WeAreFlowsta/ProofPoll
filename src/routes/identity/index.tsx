@@ -164,7 +164,7 @@ export default component$(() => {
 
       const result = await linkFlowstaIdentity({
         appName: "ProofPoll",
-        clientId: "flowsta_app_2175c82484a64ac07b7df980c276875790b1c62491e033e13cd6ede799793b7e",
+        clientId: import.meta.env.VITE_FLOWSTA_CLIENT_ID,
         localAgentPubKey: agentKey.value,
       });
 

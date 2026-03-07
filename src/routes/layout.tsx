@@ -4,7 +4,6 @@ import { invoke } from "@tauri-apps/api/core";
 import { linkedContext, displayNameContext, profilePictureContext } from "~/lib/context";
 import { getLinkedAgents } from "~/lib/holochain";
 
-const CLIENT_ID = "flowsta_app_2175c82484a64ac07b7df980c276875790b1c62491e033e13cd6ede799793b7e";
 
 interface AppStatus {
   ready: boolean;
@@ -37,7 +36,7 @@ export default component$(() => {
       try {
         const { startAutoBackup } = await import("@flowsta/holochain");
         stopAutoBackup = startAutoBackup({
-          clientId: CLIENT_ID,
+          clientId: import.meta.env.VITE_FLOWSTA_CLIENT_ID,
           appName: "ProofPoll",
           intervalMinutes: 60,
           getData: () => invoke("get_export_data"),
