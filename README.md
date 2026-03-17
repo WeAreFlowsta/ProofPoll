@@ -57,7 +57,7 @@ Polls can be flagged by signed-in users for: Spam, Misleading, Off Topic, or Ina
 
 This section is for developers (and AIs) who want to fork ProofPoll into a completely different app — a review platform, a task tracker, a social feed, anything. The architecture is app-agnostic; the poll/vote specifics are easy to swap out.
 
-### Step 1: Rename Everything (10 minutes)
+### Step 1: Rename Everything
 
 These identifiers **must** change or your app will conflict with ProofPoll:
 
@@ -95,7 +95,7 @@ Update build scripts (`dna/build.sh`, `dna/v1.1/build.sh`, `build-all.sh`) — c
 
 **Critical**: The `network_seed` in `dna.yaml` determines which DHT your app joins. Two apps with the same network seed share a DHT. Always use a unique seed.
 
-### Step 2: Replace Entry Types (2-4 hours)
+### Step 2: Replace Entry Types
 
 ProofPoll's data model is polls and votes. Replace these with your own.
 
@@ -142,7 +142,7 @@ Keep the migration functions (`register_migrated_poll`, `get_migration_mapping`,
 - `dna/v1.1/workdir/dna.yaml` zome names and paths
 - `src-tauri/src/commands.rs`: `POLLS_ZOME` constant
 
-### Step 3: Update Tauri Commands (1-2 hours)
+### Step 3: Update Tauri Commands
 
 `src-tauri/src/commands.rs` has mirror types and Tauri commands for each zome function.
 
@@ -164,7 +164,7 @@ Keep the migration functions (`register_migrated_poll`, `get_migration_mapping`,
 
 **Register new commands** in `src-tauri/src/lib.rs` → `invoke_handler(tauri::generate_handler![...])`.
 
-### Step 4: Update Frontend (2-4 hours)
+### Step 4: Update Frontend
 
 **`src/lib/holochain.ts`** — Replace poll/vote/flag TypeScript types and `invoke()` wrappers with your own. Keep the identity and migration functions.
 
@@ -179,7 +179,7 @@ Keep the migration functions (`register_migrated_poll`, `get_migration_mapping`,
 - `src/lib/context.ts` — Qwik signals for linked state
 - `src/lib/sanitize.ts` — XSS prevention
 
-### Step 5: Update Migration (1-2 hours)
+### Step 5: Update Migration
 
 `src-tauri/src/migration.rs` exports polls and votes from v1.0 and re-creates them on v1.1. Replace the entry types and zome function names with your own. The orchestration pattern (export → create → register mapping → cast → retry loop) is identical for any data model.
 
