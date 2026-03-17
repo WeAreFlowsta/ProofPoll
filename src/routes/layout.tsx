@@ -4,7 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { linkedContext, displayNameContext, profilePictureContext } from "~/lib/context";
 import { sanitizeImageSrc } from "~/lib/sanitize";
-import { getLinkedAgents } from "~/lib/holochain";
+import { getLinkedAgents, getIdentityLink, commitIdentityLink, getMigrationStatus, getCachedProfile, saveProfileCache, type MigrationState } from "~/lib/holochain";
 
 
 interface AppStatus {
@@ -27,6 +27,8 @@ export default component$(() => {
   useContextProvider(profilePictureContext, profilePicture);
   const loc = useLocation();
   const showSignIn = useSignal(false);
+  const migration = useSignal<MigrationState | null>(null);
+  const migrationDismissed = useSignal(false);
 
   useVisibleTask$(({ cleanup }) => {
     let active = true;
@@ -103,25 +105,111 @@ export default component$(() => {
               } catch {
                 // Not linked or zome call failed
               }
+
+              // If DHT doesn't show a link yet, check local persistence.
+              // The local identity-link.json survives across DNA migrations
+              // and app restarts. If it exists AND the Vault confirms the
+              // link, trust it immediately — the DHT entry will catch up.
+              if (!linked.value && s.agent_pub_key) {
+                try {
+                  const localLink = await getIdentityLink();
+                  if (localLink) {
+                    // Ask the Vault if it still recognizes this link
+                    try {
+                      const vaultResp = await fetch(
+                        `http://127.0.0.1:27777/link-status?app_agent_pub_key=${encodeURIComponent(s.agent_pub_key)}`,
+                        { signal: AbortSignal.timeout(2000) },
+                      );
+                      if (vaultResp.ok) {
+                        const vaultData = await vaultResp.json();
+                        if (vaultData.linked === true) {
+                          // Vault confirms link — trust it, re-create DHT entry silently
+                          linked.value = true;
+                          console.log("[ProofPoll] Restored link from local state + Vault confirmation");
+
+                          // Re-create the DHT entry in the background (non-blocking)
+                          // so other peers can verify this identity link
+                          import("@flowsta/holochain").then(async ({ linkFlowstaIdentity }) => {
+                            try {
+                              const result = await linkFlowstaIdentity({
+                                appName: "ProofPoll",
+                                clientId: import.meta.env.VITE_FLOWSTA_CLIENT_ID,
+                                localAgentPubKey: s.agent_pub_key!,
+                              });
+                              if (result.success) {
+                                await commitIdentityLink(
+                                  result.payload.vaultAgentPubKey,
+                                  result.payload.vaultSignature,
+                                );
+                                console.log("[ProofPoll] DHT identity link re-created after migration");
+                              }
+                            } catch {
+                              // Vault dialog dismissed or not shown — link still works locally
+                            }
+                          }).catch(() => {});
+                        }
+                      }
+                    } catch {
+                      // Vault not running — if we have local file, trust it
+                      // (user was previously linked, Vault just isn't open right now)
+                      linked.value = true;
+                      console.log("[ProofPoll] Restored link from local state (Vault not running)");
+                    }
+                  }
+                } catch {
+                  // No local link data — user genuinely not linked
+                }
+              }
             }
 
-            // Try to get profile from Vault (only needed if linked)
+            // Load profile: cache first, then Vault refresh.
+            // The Vault only needs to be running for the FIRST identity link.
+            // After that, profile-cache.json has the display name and picture.
+            // If the Vault is running, we refresh the cache in case the user
+            // changed their name or picture. If not, cached data is fine.
             if (linked.value) {
+              // 1. Load from local cache (works without Vault)
+              try {
+                const cached = await getCachedProfile();
+                if (cached) {
+                  if (cached.display_name) displayName.value = cached.display_name;
+                  if (cached.profile_picture) profilePicture.value = cached.profile_picture;
+                }
+              } catch {
+                // No cache yet
+              }
+
+              // 2. Try to refresh from Vault (may be locked or closed)
               try {
                 const resp = await fetch("http://127.0.0.1:27777/status", {
                   signal: AbortSignal.timeout(2000),
                 });
                 if (resp.ok) {
                   const vault = await resp.json();
-                  if (vault.display_name) displayName.value = vault.display_name;
-                  if (vault.profile_picture)
-                    profilePicture.value = vault.profile_picture;
+                  if (vault.display_name) {
+                    displayName.value = vault.display_name;
+                    if (vault.profile_picture)
+                      profilePicture.value = vault.profile_picture;
+                    // Save to cache for next startup
+                    saveProfileCache(vault.display_name, vault.profile_picture || null);
+                  }
                 }
               } catch {
-                // Vault not running — use fallback
+                // Vault not running — cached profile (if any) is already loaded
               }
               startBackup();
             }
+
+            // Check migration status
+            try {
+              const ms = await getMigrationStatus();
+              if (ms.status === "InProgress" || (ms.status === "Complete" && ms.votes_pending.length > 0)) {
+                migration.value = ms;
+              }
+            } catch {
+              // Migration status unavailable — ignore
+            }
+
             break;
           }
         } catch (e) {
@@ -166,18 +254,32 @@ export default component$(() => {
 
         // Fetch profile when linked but profile is missing
         if (nowLinked && !displayName.value) {
+          // Try cache first
           try {
-            const resp = await fetch("http://127.0.0.1:27777/status", {
-              signal: AbortSignal.timeout(2000),
-            });
-            if (resp.ok) {
-              const vault = await resp.json();
-              if (vault.display_name) displayName.value = vault.display_name;
-              if (vault.profile_picture)
-                profilePicture.value = vault.profile_picture;
+            const cached = await getCachedProfile();
+            if (cached?.display_name) {
+              displayName.value = cached.display_name;
+              if (cached.profile_picture) profilePicture.value = cached.profile_picture;
             }
-          } catch {
-            // Vault not running
+          } catch {}
+          // Then try Vault
+          if (!displayName.value) {
+            try {
+              const resp = await fetch("http://127.0.0.1:27777/status", {
+                signal: AbortSignal.timeout(2000),
+              });
+              if (resp.ok) {
+                const vault = await resp.json();
+                if (vault.display_name) {
+                  displayName.value = vault.display_name;
+                  if (vault.profile_picture)
+                    profilePicture.value = vault.profile_picture;
+                  saveProfileCache(vault.display_name, vault.profile_picture || null);
+                }
+              }
+            } catch {
+              // Vault not running
+            }
           }
         }
 
@@ -243,9 +345,11 @@ export default component$(() => {
         </div>
         {status.value?.ready &&
           status.value.agent_pub_key &&
-          (linked.value && displayName.value ? (
+          (linked.value ? (
             <div class="flex items-center gap-2">
-              <span class="text-sm text-gray-300">{displayName.value}</span>
+              {displayName.value && (
+                <span class="text-sm text-gray-300">{displayName.value}</span>
+              )}
               {sanitizeImageSrc(profilePicture.value) ? (
                 <img
                   src={sanitizeImageSrc(profilePicture.value)!}
@@ -256,7 +360,9 @@ export default component$(() => {
                 />
               ) : (
                 <div class="flex h-8 w-8 items-center justify-center rounded-full bg-indigo-600 text-sm font-medium text-white">
-                  {displayName.value.charAt(0).toUpperCase()}
+                  {displayName.value
+                    ? displayName.value.charAt(0).toUpperCase()
+                    : "F"}
                 </div>
               )}
             </div>
@@ -317,7 +423,27 @@ export default component$(() => {
             )}
           </div>
         ) : (
-          <Slot />
+          <>
+            {migration.value && !migrationDismissed.value && (
+              <div class="bg-indigo-900/30 border border-indigo-800/50 rounded-lg px-4 py-2 mb-4 flex items-center justify-between">
+                <div class="text-sm text-indigo-300">
+                  {migration.value.status === "InProgress" ? (
+                    <span>Migrating your data to v1.1... ({migration.value.polls_migrated.length} polls migrated)</span>
+                  ) : migration.value.votes_pending.length > 0 ? (
+                    <span>{migration.value.votes_pending.length} vote{migration.value.votes_pending.length !== 1 ? "s" : ""} waiting for poll authors to upgrade</span>
+                  ) : null}
+                </div>
+                <button
+                  type="button"
+                  onClick$={() => (migrationDismissed.value = true)}
+                  class="text-indigo-400 hover:text-indigo-300 text-xs ml-4"
+                >
+                  Dismiss
+                </button>
+              </div>
+            )}
+            <Slot />
+          </>
         )}
       </main>
 

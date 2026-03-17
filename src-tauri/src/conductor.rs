@@ -1,17 +1,30 @@
 //! Holochain conductor lifecycle management for ProofPoll.
 //!
-//! Simplified from Flowsta Vault: single DNA, random agent key (no seed import),
-//! test bootstrap server.
+//! Starts lair-keystore and holochain as child processes, installs the DNA,
+//! and sets up WebSocket connections for zome calls.
+//!
+//! ## For forking developers
+//!
+//! This file is reusable infrastructure. The only things you might change:
+//!   - `ADMIN_WS_PORT` (4466) — change if running alongside other Holochain apps
+//!   - `BOOTSTRAP_URL` / `SIGNAL_URL` — change to your own bootstrap server
+//!     for production, or keep the test server for development
+//!   - The startup sequence calls `install_dnas()` from `dna.rs` — that's
+//!     where your app-specific hApp bundle names are configured
 
 use crate::lair;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
 use tauri::Emitter;
 
-/// Admin WebSocket port (different from Vault's 4455 so both can run simultaneously).
+/// Admin WebSocket port for the local Holochain conductor.
+/// Different from Flowsta Vault's 4455 so both can run simultaneously.
+/// Change this if running alongside other Holochain apps.
 pub const ADMIN_WS_PORT: u16 = 4466;
 
-/// Holochain test bootstrap/signaling server.
+/// Holochain bootstrap/signaling server for peer discovery.
+/// This is the public test server — for production, deploy your own
+/// kitsune2-bootstrap-srv instance and update these URLs.
 const BOOTSTRAP_URL: &str = "https://dev-test-bootstrap2.holochain.org/";
 const SIGNAL_URL: &str = "wss://dev-test-bootstrap2.holochain.org/";
 
@@ -221,12 +234,22 @@ async fn wait_for_admin_ws(
 /// Full startup sequence: lair → conductor → install DNA → attach app interface.
 ///
 /// ProofPoll uses lair's auto-generated key (no deterministic seed import).
+/// Result of the startup sequence, including migration status.
+pub struct StartupResult {
+    pub handle: ConductorHandle,
+    pub agent_key: String,
+    pub app_client: holochain_client::AppWebsocket,
+    pub app_client_v1_0: Option<holochain_client::AppWebsocket>,
+    pub lair_client: lair_keystore_api::prelude::LairClient,
+    pub needs_migration: bool,
+}
+
 pub async fn start_holochain(
     app_handle: tauri::AppHandle,
     data_dir: PathBuf,
     resource_dir: PathBuf,
     passphrase: String,
-) -> Result<(ConductorHandle, String, holochain_client::AppWebsocket, lair_keystore_api::prelude::LairClient), String> {
+) -> Result<StartupResult, String> {
     let _ = app_handle.emit(
         "conductor-status",
         ConductorStatus::Starting {
@@ -315,9 +338,9 @@ pub async fn start_holochain(
         }};
     }
 
-    let agent_pub_key =
-        match crate::dna::install_dna(ADMIN_WS_PORT, &resource_dir).await {
-            Ok(key) => key,
+    let install_result =
+        match crate::dna::install_dnas(ADMIN_WS_PORT, &resource_dir).await {
+            Ok(r) => r,
             Err(e) => fail_with_full_cleanup!(format!("DNA installation failed: {}", e)),
         };
 
@@ -328,13 +351,14 @@ pub async fn start_holochain(
             message: "Setting up app interface...".into(),
         },
     );
-    let (app_port, app_client) = match crate::dna::setup_app_interface(ADMIN_WS_PORT).await {
-        Ok(r) => r,
-        Err(e) => fail_with_full_cleanup!(format!("App interface setup failed: {}", e)),
-    };
+    let (app_port, app_client, app_client_v1_0) =
+        match crate::dna::setup_app_interface(ADMIN_WS_PORT, install_result.v1_0_available).await {
+            Ok(r) => r,
+            Err(e) => fail_with_full_cleanup!(format!("App interface setup failed: {}", e)),
+        };
 
     // 9. Get the agent key string for the frontend.
-    let agent_key_str = agent_pub_key.to_string();
+    let agent_key_str = install_result.agent_pub_key.to_string();
 
     // 10. Emit ready.
     let _ = app_handle.emit(
@@ -345,10 +369,11 @@ pub async fn start_holochain(
         },
     );
     log::info!(
-        "Holochain conductor ready (admin: {}, app: {}, agent: {})",
+        "Holochain conductor ready (admin: {}, app: {}, agent: {}, migration: {})",
         ADMIN_WS_PORT,
         app_port,
         agent_key_str,
+        install_result.needs_migration,
     );
 
     let conductor_pid = conductor_child.id();
@@ -360,7 +385,14 @@ pub async fn start_holochain(
         conductor_pid,
     };
 
-    Ok((handle, agent_key_str, app_client, lair_client))
+    Ok(StartupResult {
+        handle,
+        agent_key: agent_key_str,
+        app_client,
+        app_client_v1_0,
+        lair_client,
+        needs_migration: install_result.needs_migration,
+    })
 }
 
 /// Spawn a background task that monitors the conductor process.

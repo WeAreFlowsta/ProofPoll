@@ -1,7 +1,21 @@
 //! Tauri commands for ProofPoll.
 //!
-//! All zome calls go through the Rust backend via AppWebsocket.
-//! The frontend uses lightweight Tauri invoke() calls — no @holochain/client needed.
+//! This is the bridge between the Qwik frontend and the Holochain conductor.
+//! All zome calls go through the Rust backend via AppWebsocket — the frontend
+//! uses lightweight Tauri `invoke()` calls and never touches @holochain/client.
+//!
+//! ## For forking developers
+//!
+//! This file has three sections:
+//!   1. **Entry types + response types** (top) — Mirror your zome's Rust structs.
+//!      Change these to match your own data model.
+//!   2. **Infrastructure** (middle) — `AppState`, `call_zome`, `friendly_error`,
+//!      `decode_entry`. Keep these as-is; they work for any Holochain app.
+//!   3. **Tauri commands** (bottom) — One `#[tauri::command]` per frontend action.
+//!      Replace the poll/vote/flag commands with your own. The identity-linking
+//!      and migration commands are reusable infrastructure.
+//!
+//! After changing commands, register them in `lib.rs` → `invoke_handler`.
 
 use crate::conductor::{ConductorHandle, ConductorStatus};
 use holochain_client::AppWebsocket;
@@ -12,7 +26,12 @@ use lair_keystore_api::prelude::LairClient;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-// --- Entry types matching the zome definitions ---
+// ── Entry types matching the zome definitions ─────────────────────────
+//
+// These structs must match the entry types in your coordinator zome.
+// Holochain entries are MessagePack-encoded, so Serialize + Deserialize
+// are required. The frontend never sees these directly — they're decoded
+// in the Tauri commands and returned as response types (below).
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub struct Poll {
@@ -43,7 +62,12 @@ pub struct CastVoteInput {
     pub option_index: u32,
 }
 
-// --- Frontend response types (all hashes as strings) ---
+// ── Frontend response types ───────────────────────────────────────────
+//
+// These are what the frontend receives via Tauri invoke().
+// ActionHashes are converted to strings because TypeScript can't handle
+// Holochain's native hash types. The frontend uses these string hashes
+// to reference entries in subsequent calls.
 
 #[derive(serde::Serialize, Clone)]
 pub struct PollListItem {
@@ -77,9 +101,14 @@ pub struct AppState {
     pub conductor_handle: Mutex<Option<ConductorHandle>>,
     pub conductor_status: Mutex<ConductorStatus>,
     pub agent_pub_key: Mutex<Option<String>>,
+    /// Active (v1.1) app client for all reads and writes.
     pub app_client: tokio::sync::Mutex<Option<AppWebsocket>>,
+    /// Legacy (v1.0) app client, only used for migration reads.
+    pub app_client_v1_0: tokio::sync::Mutex<Option<AppWebsocket>>,
     pub passphrase: Mutex<String>,
     pub lair_client: tokio::sync::Mutex<Option<LairClient>>,
+    /// Current migration state (persisted to disk in migration-state.json).
+    pub migration_state: tokio::sync::Mutex<crate::migration::MigrationState>,
 }
 
 impl AppState {
@@ -93,14 +122,18 @@ impl AppState {
             p
         };
 
+        let migration_state = crate::migration::MigrationState::load(&data_dir);
+
         Self {
             data_dir,
             conductor_handle: Mutex::new(None),
             conductor_status: Mutex::new(ConductorStatus::Stopped),
             agent_pub_key: Mutex::new(None),
             app_client: tokio::sync::Mutex::new(None),
+            app_client_v1_0: tokio::sync::Mutex::new(None),
             passphrase: Mutex::new(passphrase),
             lair_client: tokio::sync::Mutex::new(None),
+            migration_state: tokio::sync::Mutex::new(migration_state),
         }
     }
 }
@@ -113,10 +146,17 @@ fn generate_passphrase() -> String {
         .collect()
 }
 
-// --- Helpers ---
+// ── Helpers (reusable infrastructure) ──────────────────────────────────
+//
+// These constants and functions work for any Holochain app.
+// Change ROLE_NAME to match your happ.yaml role id.
+// Change POLLS_ZOME to match your coordinator zome name.
 
+/// Must match the role `id` in your happ.yaml.
 const ROLE_NAME: &str = "proofpoll";
+/// Your app's coordinator zome name (from dna.yaml).
 const POLLS_ZOME: &str = "polls";
+/// Flowsta agent-linking zome — keep as-is for identity integration.
 const AGENT_LINKING_ZOME: &str = "agent_linking";
 
 fn decode_entry<T: serde::de::DeserializeOwned>(record: &Record) -> Result<T, String> {
@@ -131,6 +171,15 @@ fn decode_entry<T: serde::de::DeserializeOwned>(record: &Record) -> Result<T, St
     rmp_serde::from_slice(sb.bytes()).map_err(|e| format!("Failed to decode entry: {}", e))
 }
 
+/// Call a zome function on the active DNA version.
+///
+/// This is the core helper that all Tauri commands use. It handles:
+///   - Routing to the correct zome via ROLE_NAME
+///   - Auto-recovery from CellDisabled errors (re-enables the app and retries)
+///   - User-friendly error messages via `friendly_error()`
+///
+/// For forking: you don't need to change this function — just call it
+/// with your zome name and function name from your Tauri commands.
 async fn call_zome(
     client: &AppWebsocket,
     zome: &str,
@@ -190,7 +239,7 @@ async fn try_reenable_app() -> Result<(), String> {
     .map_err(|e| format!("Failed to connect to admin WS for recovery: {}", e))?;
 
     admin_ws
-        .enable_app(crate::dna::APP_ID.to_string())
+        .enable_app(crate::dna::ACTIVE_APP_ID.to_string())
         .await
         .map_err(|e| format!("Failed to re-enable app: {}", e))?;
 
@@ -240,7 +289,7 @@ fn parse_agent_pub_key_string(s: &str) -> Result<AgentPubKey, String> {
     Ok(AgentPubKey::from_raw_39(raw))
 }
 
-// --- Status command ---
+// ── Status command (infrastructure — keep as-is) ──────────────────────
 
 #[derive(serde::Serialize)]
 pub struct AppStatus {
@@ -262,7 +311,14 @@ pub fn get_app_status(state: tauri::State<'_, std::sync::Arc<AppState>>) -> AppS
     }
 }
 
-// --- Poll commands ---
+// ── Poll commands (replace with your app's commands) ──────────────────
+//
+// Each command follows the same pattern:
+//   1. Lock the AppWebsocket from state
+//   2. Parse input (convert string hashes to ActionHash)
+//   3. Encode payload with ExternIO::encode()
+//   4. Call call_zome() with your zome name and function
+//   5. Decode the result and return a frontend-friendly type
 
 #[tauri::command]
 pub async fn create_poll(
@@ -402,7 +458,17 @@ pub async fn get_poll_votes(
     Ok(votes)
 }
 
-// --- Identity link persistence ---
+// ── Identity link persistence (Flowsta infrastructure — keep as-is) ───
+//
+// The identity link is persisted to a JSON file so the app can detect
+// a previously-linked Vault user across restarts and DNA migrations.
+// This data is separate from the DHT — it's local to this device.
+//
+// Two files work together:
+//   - identity-link.json — stores vault_agent_pub_key + entry_action_hash
+//     (proves this user linked with Flowsta; survives DNA migrations)
+//   - profile-cache.json — stores display_name + profile_picture
+//     (allows the app to show the user's identity without Vault running)
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub struct IdentityLinkData {
@@ -428,12 +494,73 @@ fn save_identity_link(data_dir: &std::path::Path, data: &IdentityLinkData) {
     }
 }
 
+// ── Profile persistence (survives Vault being closed/locked) ──────────
+//
+// The Flowsta Vault only needs to be running for the initial identity
+// linking ceremony. After that, the display name and profile picture
+// are cached locally in profile-cache.json. On subsequent startups,
+// the app loads from cache immediately — no Vault dependency.
+//
+// The cache is refreshed whenever the Vault is available (layout.tsx
+// polls /status every 3s). If the user changes their name or picture
+// in the Vault, the cache updates automatically on next poll.
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+pub struct CachedProfile {
+    pub display_name: Option<String>,
+    pub profile_picture: Option<String>,
+}
+
+fn profile_cache_path(data_dir: &std::path::Path) -> PathBuf {
+    data_dir.join("profile-cache.json")
+}
+
+fn load_cached_profile(data_dir: &std::path::Path) -> Option<CachedProfile> {
+    let path = profile_cache_path(data_dir);
+    let json = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&json).ok()
+}
+
+fn save_cached_profile(data_dir: &std::path::Path, profile: &CachedProfile) {
+    let path = profile_cache_path(data_dir);
+    if let Ok(json) = serde_json::to_string_pretty(profile) {
+        let _ = std::fs::write(path, json);
+    }
+}
+
 fn delete_identity_link(data_dir: &std::path::Path) {
     let path = identity_link_path(data_dir);
     let _ = std::fs::remove_file(path);
 }
 
-// --- Identity linking commands ---
+#[tauri::command]
+pub fn get_cached_profile(
+    state: tauri::State<'_, std::sync::Arc<AppState>>,
+) -> Option<CachedProfile> {
+    load_cached_profile(&state.data_dir)
+}
+
+#[tauri::command]
+pub fn save_profile_cache(
+    state: tauri::State<'_, std::sync::Arc<AppState>>,
+    display_name: Option<String>,
+    profile_picture: Option<String>,
+) {
+    save_cached_profile(
+        &state.data_dir,
+        &CachedProfile {
+            display_name,
+            profile_picture,
+        },
+    );
+}
+
+// ── Identity linking commands (Flowsta infrastructure — keep as-is) ───
+//
+// These commands handle the Flowsta Vault ↔ app identity linking ceremony.
+// The Vault signs an attestation that this app's agent key belongs to the
+// same person as the Vault's agent key. This attestation is stored on the
+// DHT via the agent_linking zome so anyone can verify it.
 
 #[tauri::command]
 pub async fn commit_identity_link(
@@ -691,4 +818,171 @@ pub async fn get_linked_agents(
 
     let agents: Vec<AgentPubKey> = result.decode().map_err(|e| e.to_string())?;
     Ok(agents.iter().map(|a| a.to_string()).collect())
+}
+
+// ── Flag types and commands (v1.1 — replace with your moderation system) ──
+//
+// Community flagging: users can flag content with a reason. The UI hides
+// content that exceeds a configurable flag threshold. Data is never deleted
+// from the DHT — censorship resistance is preserved at the data layer,
+// moderation happens at the UI layer.
+
+#[derive(serde::Serialize, Clone)]
+pub struct FlagData {
+    pub hash: String,
+    pub flag: FlagResponse,
+    pub author: String,
+}
+
+#[derive(serde::Serialize, Clone)]
+pub struct FlagResponse {
+    pub poll_action_hash: String,
+    pub reason: String,
+    pub created_at: i64,
+}
+
+#[derive(serde::Deserialize)]
+struct FlagEntry {
+    poll_action_hash: ActionHash,
+    reason: FlagReason,
+    created_at: i64,
+}
+
+#[derive(serde::Deserialize, Debug)]
+enum FlagReason {
+    Spam,
+    Misleading,
+    OffTopic,
+    Inappropriate,
+}
+
+impl std::fmt::Display for FlagReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FlagReason::Spam => write!(f, "Spam"),
+            FlagReason::Misleading => write!(f, "Misleading"),
+            FlagReason::OffTopic => write!(f, "OffTopic"),
+            FlagReason::Inappropriate => write!(f, "Inappropriate"),
+        }
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Debug)]
+struct FlagPollInput {
+    poll_action_hash: ActionHash,
+    reason: String,
+}
+
+#[tauri::command]
+pub async fn flag_poll(
+    state: tauri::State<'_, std::sync::Arc<AppState>>,
+    poll_action_hash: String,
+    reason: String,
+) -> Result<String, String> {
+    let client = state.app_client.lock().await;
+    let client = client.as_ref().ok_or("Conductor not ready")?;
+
+    let hash = ActionHash::try_from(poll_action_hash)
+        .map_err(|e| format!("Invalid action hash: {:?}", e))?;
+
+    #[derive(serde::Serialize, Debug)]
+    struct ZomeFlagInput {
+        poll_action_hash: ActionHash,
+        reason: serde_json::Value,
+    }
+
+    let zome_input = ZomeFlagInput {
+        poll_action_hash: hash,
+        reason: serde_json::Value::String(reason),
+    };
+
+    let payload = ExternIO::encode(zome_input).map_err(|e| e.to_string())?;
+    let result = call_zome(client, POLLS_ZOME, "flag_poll", payload).await?;
+
+    let action_hash: ActionHash = result.decode().map_err(|e| e.to_string())?;
+    Ok(action_hash.to_string())
+}
+
+#[tauri::command]
+pub async fn get_poll_flags(
+    state: tauri::State<'_, std::sync::Arc<AppState>>,
+    poll_action_hash: String,
+) -> Result<Vec<FlagData>, String> {
+    let client = state.app_client.lock().await;
+    let client = client.as_ref().ok_or("Conductor not ready")?;
+
+    let hash = ActionHash::try_from(poll_action_hash)
+        .map_err(|e| format!("Invalid action hash: {:?}", e))?;
+    let payload = ExternIO::encode(hash).map_err(|e| e.to_string())?;
+    let result = call_zome(client, POLLS_ZOME, "get_poll_flags", payload).await?;
+
+    let records: Vec<Record> = result.decode().map_err(|e| e.to_string())?;
+    let mut flags = Vec::new();
+    for record in &records {
+        let flag: FlagEntry = decode_entry(record)?;
+        flags.push(FlagData {
+            hash: record.action_address().to_string(),
+            flag: FlagResponse {
+                poll_action_hash: flag.poll_action_hash.to_string(),
+                reason: format!("{}", flag.reason),
+                created_at: flag.created_at,
+            },
+            author: record.action().author().to_string(),
+        });
+    }
+    Ok(flags)
+}
+
+#[tauri::command]
+pub async fn remove_flag(
+    state: tauri::State<'_, std::sync::Arc<AppState>>,
+    flag_action_hash: String,
+) -> Result<String, String> {
+    let client = state.app_client.lock().await;
+    let client = client.as_ref().ok_or("Conductor not ready")?;
+
+    let hash = ActionHash::try_from(flag_action_hash)
+        .map_err(|e| format!("Invalid action hash: {:?}", e))?;
+    let payload = ExternIO::encode(hash).map_err(|e| e.to_string())?;
+    let result = call_zome(client, POLLS_ZOME, "remove_flag", payload).await?;
+
+    let delete_hash: ActionHash = result.decode().map_err(|e| e.to_string())?;
+    Ok(delete_hash.to_string())
+}
+
+#[tauri::command]
+pub async fn get_flag_threshold(
+    state: tauri::State<'_, std::sync::Arc<AppState>>,
+) -> Result<u32, String> {
+    let client = state.app_client.lock().await;
+    let client = client.as_ref().ok_or("Conductor not ready")?;
+
+    let payload = ExternIO::encode(()).map_err(|e| e.to_string())?;
+    let result = call_zome(client, POLLS_ZOME, "get_flag_threshold", payload).await?;
+
+    let threshold: u32 = result.decode().map_err(|e| e.to_string())?;
+    Ok(threshold)
+}
+
+// ── Migration status commands (infrastructure — keep as-is) ───────────
+//
+// These let the frontend show migration progress to the user.
+// The actual migration logic is in migration.rs.
+
+#[tauri::command]
+pub async fn get_migration_status(
+    state: tauri::State<'_, std::sync::Arc<AppState>>,
+) -> Result<crate::migration::MigrationState, String> {
+    let state = state.migration_state.lock().await;
+    Ok(state.clone())
+}
+
+#[tauri::command]
+pub async fn abandon_pending_votes(
+    state: tauri::State<'_, std::sync::Arc<AppState>>,
+) -> Result<(), String> {
+    let mut migration = state.migration_state.lock().await;
+    migration.votes_pending.clear();
+    migration.save(&state.data_dir);
+    Ok(())
 }

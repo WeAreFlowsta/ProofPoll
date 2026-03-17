@@ -1,6 +1,26 @@
+//! ProofPoll coordinator zome (v1.0).
+//!
+//! Contains the callable zome functions (CRUD operations). The integrity
+//! zome defines what data CAN exist; the coordinator defines what the
+//! app actually DOES with that data.
+//!
+//! ## For forking developers
+//!
+//! Replace these functions with your own. The key patterns:
+//!   - `create_entry()` + `create_link()` — store data + make it discoverable
+//!   - `get_links()` + `get()` — query by anchor or relationship
+//!   - `delete_entry()` + `delete_link()` — soft-delete (data stays on DHT)
+//!   - Double-action prevention — check link authors before creating duplicates
+//!   - Author check — only the creator can delete their own entries
+//!
+//! All `#[hdk_extern]` functions are callable from the Tauri backend via
+//! `call_zome()` in `commands.rs`.
+
 use hdk::prelude::*;
 use polls_integrity::*;
 
+/// Maps coordinator entry creation to the integrity zome's types.
+/// Required boilerplate — just change the import if you rename the integrity zome.
 #[hdk_dependent_entry_types]
 enum EntryZomes {
     Integrity(polls_integrity::EntryTypes),

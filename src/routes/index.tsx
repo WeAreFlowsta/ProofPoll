@@ -2,7 +2,7 @@ import { component$, useContext, useSignal, useComputed$, useVisibleTask$, $ } f
 import { Link } from "@builder.io/qwik-city";
 import { invoke } from "@tauri-apps/api/core";
 import { linkedContext } from "~/lib/context";
-import { getAllPolls, getPollVotes, type PollListItem } from "~/lib/holochain";
+import { getAllPolls, getPollVotes, getPollFlags, getFlagThreshold, type PollListItem } from "~/lib/holochain";
 
 type Filter = "all" | "created" | "voted";
 
@@ -18,17 +18,45 @@ export default component$(() => {
   // Set of poll hashes the user has voted in
   const votedPolls = useSignal<Set<string>>(new Set());
   const votedLoading = useSignal(false);
+  // Flag counts per poll hash
+  const flagCounts = useSignal<Map<string, number>>(new Map());
+  const flagThreshold = useSignal(3);
+  const showFlagged = useSignal(false);
+  const flagsLoaded = useSignal(false);
 
   const loadPolls = $(async () => {
     loading.value = true;
     error.value = null;
     try {
-      const [allPolls, status] = await Promise.all([
+      const [allPolls, status, threshold] = await Promise.all([
         getAllPolls(),
         invoke<{ agent_pub_key: string | null }>("get_app_status"),
+        getFlagThreshold().catch(() => 3),
       ]);
       polls.value = allPolls;
       myAgent.value = status.agent_pub_key;
+      flagThreshold.value = threshold;
+
+      // Load flag counts in background
+      if (allPolls.length > 0) {
+        Promise.all(
+          allPolls.map(async (p) => {
+            try {
+              const flags = await getPollFlags(p.hash);
+              return { hash: p.hash, count: flags.length };
+            } catch {
+              return { hash: p.hash, count: 0 };
+            }
+          }),
+        ).then((results) => {
+          const counts = new Map<string, number>();
+          for (const r of results) {
+            counts.set(r.hash, r.count);
+          }
+          flagCounts.value = counts;
+          flagsLoaded.value = true;
+        });
+      }
     } catch (e: any) {
       error.value = e.message || "Failed to load polls";
     } finally {
@@ -59,12 +87,24 @@ export default component$(() => {
   });
 
   const filteredPolls = useComputed$(() => {
-    if (filter.value === "all") return polls.value;
+    let result = polls.value;
+
+    // Apply tab filter
     if (filter.value === "created") {
-      return polls.value.filter((p) => p.author === myAgent.value);
+      result = result.filter((p) => p.author === myAgent.value);
+    } else if (filter.value === "voted") {
+      result = result.filter((p) => votedPolls.value.has(p.hash));
     }
-    // "voted"
-    return polls.value.filter((p) => votedPolls.value.has(p.hash));
+
+    // Hide flagged polls (unless user toggled "show flagged")
+    if (!showFlagged.value && flagsLoaded.value) {
+      result = result.filter((p) => {
+        const count = flagCounts.value.get(p.hash) ?? 0;
+        return count < flagThreshold.value;
+      });
+    }
+
+    return result;
   });
 
   useVisibleTask$(async ({ cleanup }) => {
@@ -137,7 +177,8 @@ export default component$(() => {
 
       {/* Filter tabs */}
       {!loading.value && !error.value && polls.value.length > 0 && (
-        <div class="flex gap-1 mb-5 bg-gray-900 rounded-lg p-1 w-fit">
+        <div class="flex items-center gap-3 mb-5">
+        <div class="flex gap-1 bg-gray-900 rounded-lg p-1 w-fit">
           {(["all", "created", "voted"] as const).map((f) => (
             <button
               key={f}
@@ -157,6 +198,20 @@ export default component$(() => {
               {f === "all" ? "All" : f === "created" ? "Created" : "Voted"}
             </button>
           ))}
+        </div>
+        {flagsLoaded.value && (
+          <button
+            type="button"
+            onClick$={() => (showFlagged.value = !showFlagged.value)}
+            class={`text-xs px-3 py-1.5 rounded-full transition-colors ${
+              showFlagged.value
+                ? "bg-amber-900/50 text-amber-300 hover:bg-amber-900/70"
+                : "bg-gray-800 text-gray-500 hover:text-gray-300"
+            }`}
+          >
+            {showFlagged.value ? "Hide flagged" : "Show flagged"}
+          </button>
+        )}
         </div>
       )}
 
@@ -267,8 +322,13 @@ export default component$(() => {
                     {p.poll.description}
                   </p>
                 )}
-                <div class="text-xs text-gray-500">
-                  {p.poll.options.length} options
+                <div class="text-xs text-gray-500 flex items-center gap-2">
+                  <span>{p.poll.options.length} options</span>
+                  {(flagCounts.value.get(p.hash) ?? 0) > 0 && (
+                    <span class="text-amber-500">
+                      {flagCounts.value.get(p.hash)} flag{(flagCounts.value.get(p.hash) ?? 0) !== 1 ? "s" : ""}
+                    </span>
+                  )}
                 </div>
               </Link>
             );

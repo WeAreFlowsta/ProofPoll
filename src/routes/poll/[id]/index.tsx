@@ -8,8 +8,13 @@ import {
   castVote,
   deletePoll,
   getLinkedAgents,
+  getPollFlags,
+  flagPoll,
+  removeFlag,
   type Poll,
   type VoteData,
+  type FlagData,
+  type FlagReason,
 } from "~/lib/holochain";
 
 interface VerifiedResults {
@@ -37,6 +42,11 @@ export default component$(() => {
   const confirmDelete = useSignal(false);
   const deleting = useSignal(false);
   const deleteError = useSignal<string | null>(null);
+  const flags = useSignal<FlagData[]>([]);
+  const myFlag = useSignal<FlagData | null>(null);
+  const flagging = useSignal(false);
+  const flagError = useSignal<string | null>(null);
+  const showFlagPicker = useSignal(false);
 
   const pollHash = loc.params.id;
 
@@ -123,9 +133,10 @@ export default component$(() => {
       );
       myAgent.value = status.agent_pub_key;
 
-      const [pollResult, votesResult] = await Promise.all([
+      const [pollResult, votesResult, flagsResult] = await Promise.all([
         getPoll(pollHash),
         getPollVotes(pollHash),
+        getPollFlags(pollHash).catch(() => [] as FlagData[]),
       ]);
 
       if (!pollResult) {
@@ -136,11 +147,15 @@ export default component$(() => {
       poll.value = pollResult.poll;
       pollAuthor.value = pollResult.author;
       votes.value = votesResult;
+      flags.value = flagsResult;
 
       if (myAgent.value) {
         hasVoted.value = votesResult.some(
           (v) => v.author === myAgent.value,
         );
+        myFlag.value = flagsResult.find(
+          (f) => f.author === myAgent.value,
+        ) ?? null;
       }
 
       // Load verified results in the background.
@@ -186,6 +201,41 @@ export default component$(() => {
     } catch (e: any) {
       deleteError.value = e.message || String(e) || "Failed to delete poll";
       deleting.value = false;
+    }
+  });
+
+  const submitFlag = $(async (reason: FlagReason) => {
+    flagError.value = null;
+    flagging.value = true;
+    showFlagPicker.value = false;
+    try {
+      await flagPoll(pollHash, reason);
+      const updatedFlags = await getPollFlags(pollHash);
+      flags.value = updatedFlags;
+      myFlag.value = updatedFlags.find(
+        (f) => f.author === myAgent.value,
+      ) ?? null;
+    } catch (e: any) {
+      flagError.value = e.message || "Failed to flag poll";
+    } finally {
+      flagging.value = false;
+    }
+  });
+
+  const unflag = $(async () => {
+    if (!myFlag.value) return;
+    flagError.value = null;
+    flagging.value = true;
+    try {
+      await removeFlag(myFlag.value.hash);
+      myFlag.value = null;
+      flags.value = flags.value.filter(
+        (f) => f.author !== myAgent.value,
+      );
+    } catch (e: any) {
+      flagError.value = e.message || "Failed to remove flag";
+    } finally {
+      flagging.value = false;
     }
   });
 
@@ -253,6 +303,12 @@ export default component$(() => {
               · {verified.value.identityCount} verified
             </span>
           )}
+          {flags.value.length > 0 && (
+            <span>
+              {" "}
+              · {flags.value.length} flag{flags.value.length !== 1 ? "s" : ""}
+            </span>
+          )}
           {p.closes_at && (
             <span>
               {" "}
@@ -260,6 +316,58 @@ export default component$(() => {
             </span>
           )}
         </div>
+
+        {/* Flag / unflag — visible to signed-in users who are NOT the author */}
+        {linked.value && myAgent.value && pollAuthor.value !== myAgent.value && (
+          <div class="mt-3">
+            {flagError.value && (
+              <div class="text-red-400 text-xs mb-2">{flagError.value}</div>
+            )}
+            {myFlag.value ? (
+              <button
+                type="button"
+                onClick$={unflag}
+                disabled={flagging.value}
+                class="text-amber-400 hover:text-amber-300 text-xs disabled:opacity-50"
+              >
+                {flagging.value ? "Removing flag..." : "You flagged this poll · Unflag"}
+              </button>
+            ) : showFlagPicker.value ? (
+              <div class="bg-gray-800 border border-gray-700 rounded-lg p-3 inline-block">
+                <p class="text-xs text-gray-400 mb-2">Why are you flagging this poll?</p>
+                <div class="flex flex-wrap gap-2">
+                  {(["Spam", "Misleading", "OffTopic", "Inappropriate"] as const).map((reason) => (
+                    <button
+                      key={reason}
+                      type="button"
+                      onClick$={() => submitFlag(reason)}
+                      disabled={flagging.value}
+                      class="text-xs bg-gray-700 hover:bg-gray-600 text-gray-200 px-3 py-1.5 rounded-full disabled:opacity-50"
+                    >
+                      {reason === "OffTopic" ? "Off Topic" : reason}
+                    </button>
+                  ))}
+                  <button
+                    type="button"
+                    onClick$={() => (showFlagPicker.value = false)}
+                    class="text-xs text-gray-500 hover:text-gray-300 px-2"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick$={() => (showFlagPicker.value = true)}
+                disabled={flagging.value}
+                class="text-gray-500 hover:text-amber-400 text-xs disabled:opacity-50"
+              >
+                {flagging.value ? "Flagging..." : "Flag this poll"}
+              </button>
+            )}
+          </div>
+        )}
 
         {/* Delete button — only visible to poll creator */}
         {linked.value && myAgent.value && pollAuthor.value === myAgent.value && (

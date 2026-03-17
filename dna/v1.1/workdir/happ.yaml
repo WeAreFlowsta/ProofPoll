@@ -1,0 +1,16 @@
+---
+manifest_version: "0"
+name: proofpoll_v1_1_happ
+description: "ProofPoll v1.1 - Verified polls with community flagging and Flowsta identity linking"
+roles:
+  - id: proofpoll
+    name: proofpoll
+    provisioning:
+      strategy: create
+      deferred: false
+    dna:
+      path: proofpoll_v1_1.dna
+      properties: ~
+      uid: ~
+      version: ~
+      clone_limit: 0

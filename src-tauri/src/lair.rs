@@ -1,7 +1,11 @@
-//! Simplified lair-keystore management for ProofPoll.
+//! Lair keystore management — reusable infrastructure.
 //!
-//! Unlike Flowsta Vault, ProofPoll doesn't import a deterministic seed.
-//! Lair auto-generates a random agent key, which is the standard Holochain approach.
+//! Lair is Holochain's key management daemon. It stores the agent's Ed25519
+//! signing key and handles cryptographic operations. This module starts
+//! lair-keystore as a child process and connects to it via Unix socket.
+//!
+//! For forking developers: this file needs no changes. It works for any
+//! Holochain app that uses the standard random agent key approach.
 
 use lair_keystore_api::prelude::*;
 use std::io::Write;

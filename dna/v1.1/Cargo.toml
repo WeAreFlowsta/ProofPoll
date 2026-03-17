@@ -1,0 +1,12 @@
+[workspace]
+members = [
+    "zomes/polls/integrity",
+    "zomes/polls/coordinator",
+]
+resolver = "2"
+
+[workspace.dependencies]
+hdi = "=0.7.0"
+hdk = "=0.6.0"
+serde = "1.0"
+holochain_serialized_bytes = "*"

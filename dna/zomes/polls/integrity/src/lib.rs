@@ -1,3 +1,18 @@
+//! ProofPoll integrity zome (v1.0).
+//!
+//! Defines the entry types, link types, and validation rules for the app's data.
+//! This is the "schema" of the app — changes here create a new DNA hash and
+//! require a migration (see v1.1 for an example).
+//!
+//! ## For forking developers
+//!
+//! Replace `Poll` and `Vote` with your own entry types. The patterns are:
+//!   - `#[hdk_entry_helper]` — makes a struct storable on the DHT
+//!   - `#[hdk_entry_types]` — registers all entry types with the conductor
+//!   - `#[hdk_link_types]` — registers link types for relationships
+//!   - Anchor pattern — deterministic hash for discovering all entries via links
+//!   - Validation — runs on every node, enforces data integrity rules
+
 use hdi::prelude::*;
 
 /// A poll with a question and multiple options.
