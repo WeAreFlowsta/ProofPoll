@@ -249,7 +249,7 @@ export default component$(() => {
               )}
               <div>
                 <p class="text-white font-medium text-lg">
-                  {displayName.value || "Flowsta User"}
+                  {displayName.value || "Flowsta Account"}
                 </p>
                 <div class="flex items-center gap-1.5 mt-0.5">
                   <span class="h-2 w-2 rounded-full bg-green-500" />
