@@ -430,6 +430,8 @@ export default component$(() => {
               const optionVoters = isPublic
                 ? votes.value.filter((v) => v.vote.option_index === i && v.display_name)
                 : [];
+              const visibleVoters = optionVoters.slice(0, 5);
+              const hiddenCount = optionVoters.length - visibleVoters.length;
 
               return (
                 <div key={i}>
@@ -445,9 +447,9 @@ export default component$(() => {
                       style={{ width: `${pct}%` }}
                     />
                   </div>
-                  {optionVoters.length > 0 && (
+                  {visibleVoters.length > 0 && (
                     <div class="flex flex-wrap gap-1.5 mt-1">
-                      {optionVoters.map((v) => (
+                      {visibleVoters.map((v) => (
                         <div key={v.author} class="flex items-center gap-1 bg-gray-800 rounded-full px-2 py-0.5">
                           {v.profile_picture && (
                             <img
@@ -461,6 +463,9 @@ export default component$(() => {
                           <span class="text-xs text-gray-300">{v.display_name}</span>
                         </div>
                       ))}
+                      {hiddenCount > 0 && (
+                        <span class="text-xs text-gray-500 self-center">+{hiddenCount} more</span>
+                      )}
                     </div>
                   )}
                 </div>

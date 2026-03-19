@@ -44,6 +44,19 @@ struct MigratedPollEntry {
     migrated_at: i64,
 }
 
+/// Mirrors PollType in the v1.2 integrity zome.
+///
+/// Must use the same serde representation so `decode_entry` works: rmp_serde
+/// encodes unit enum variants as externally-tagged maps `{"Public": nil}`, not
+/// as strings. Using a matching enum here round-trips correctly. Tauri then
+/// re-serialises to JSON (human-readable) which produces the string `"Public"`
+/// that the frontend already expects.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+pub enum PollType {
+    Anonymous,
+    Public,
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub struct Poll {
     pub title: String,
@@ -51,9 +64,9 @@ pub struct Poll {
     pub options: Vec<String>,
     pub created_at: i64,
     pub closes_at: Option<i64>,
-    /// "Anonymous" or "Public". None for v1.0/v1.1 polls (treated as Anonymous).
+    /// None for v1.0/v1.1 polls (no poll_type field — treated as Anonymous).
     #[serde(default)]
-    pub poll_type: Option<String>,
+    pub poll_type: Option<PollType>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]

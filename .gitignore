@@ -16,8 +16,13 @@ dna/v1.1/target/
 dna/v1.1/workdir/*.wasm
 dna/v1.1/workdir/*.dna
 dna/v1.1/workdir/*.happ
+dna/v1.2/target/
+dna/v1.2/workdir/*.wasm
+dna/v1.2/workdir/*.dna
+dna/v1.2/workdir/*.happ
 dna/Cargo.lock
 dna/v1.1/Cargo.lock
+dna/v1.2/Cargo.lock
 
 # Binaries (platform-specific, not committed)
 src-tauri/binaries/

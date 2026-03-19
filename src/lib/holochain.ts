@@ -66,7 +66,15 @@ export async function createPoll(input: {
   closes_at: number | null;
   poll_type: PollType;
 }): Promise<string> {
-  return invoke<string>("create_poll", input);
+  // Tauri v2 maps camelCase from JS → snake_case in Rust, so we must send
+  // camelCase keys even though the TypeScript interface uses snake_case.
+  return invoke<string>("create_poll", {
+    title: input.title,
+    description: input.description,
+    options: input.options,
+    closesAt: input.closes_at,
+    pollType: input.poll_type,
+  });
 }
 
 export async function getPoll(actionHash: string): Promise<PollDetail | null> {
