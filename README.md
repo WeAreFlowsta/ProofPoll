@@ -291,6 +291,18 @@ Other users discover the mappings via `get_links` on the migration anchor. As mo
 6. **Update `build-all.sh`** — add the v1.2 build step
 7. **Test** — create data on v1.1, upgrade, verify migration completes
 
+### Staying Visible During Migration
+
+During a migration both DNA cells are active simultaneously — v1.0 continues gossiping and v1.1 is being populated. To keep all content visible during this window, `get_all_polls` in `commands.rs` queries both cells and deduplicates:
+
+1. **Query v1.1** — fetch all polls and all migration mappings (the old→new hash index)
+2. **Query v1.0** — fetch all polls, then exclude any whose hash appears in the migration mappings (they're already on v1.1)
+3. **Return merged list** — each item carries a `dna_version` field so votes and flag fetches are routed to the correct cell
+
+This means polls are never missing from the UI, even if only one user on the network has upgraded so far. Once a poll's author migrates, the v1.0 copy is automatically hidden and the v1.1 copy takes over.
+
+The same pattern applies to any data type you migrate — the migration mapping index is the key. Deduplication prevents double-showing the same content during the transition window.
+
 ### Migration Edge Cases
 
 - **First user on new version**: Their own content migrates fine. References to others' content go to pending (retried every 60s).
@@ -308,7 +320,7 @@ These files work for **any** Holochain + Tauri app with zero or minimal changes:
 |---|---|---|
 | `src-tauri/src/conductor.rs` | Starts lair-keystore + holochain conductor, waits for readiness, health monitoring | Change ports if running multiple apps |
 | `src-tauri/src/lair.rs` | Lair keystore init, socket management, passphrase | None |
-| `src-tauri/src/dna.rs` | Multi-version DNA install, dual AppWebsocket, signing credentials | Change app IDs and hApp filenames |
+| `src-tauri/src/dna.rs` | Multi-version DNA install, dual AppWebsocket, signing credentials. Handles `CellDisabled` on startup by re-enabling the app and retrying credential authorization (Holochain can leave cells disabled after a conductor restart even when the app shows as Running) | Change app IDs and hApp filenames |
 | `src-tauri/src/migration.rs` | Migration state machine, export/import/retry pattern | Change entry types and zome names |
 | `src/lib/context.ts` | Qwik signals for linked/display state | None |
 | `src/lib/sanitize.ts` | XSS prevention for user content | None |
