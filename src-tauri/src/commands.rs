@@ -752,8 +752,10 @@ pub fn get_identity_link(
 pub async fn revoke_identity_link(
     state: tauri::State<'_, std::sync::Arc<AppState>>,
 ) -> Result<(), String> {
-    let link_data = load_identity_link(&state.data_dir)
-        .ok_or("No identity link found to revoke")?;
+    let Some(link_data) = load_identity_link(&state.data_dir) else {
+        // Already unlinked locally — nothing to do.
+        return Ok(());
+    };
 
     // Call revoke_link on the agent_linking zome
     let action_hash = ActionHash::try_from(link_data.entry_action_hash.clone())
