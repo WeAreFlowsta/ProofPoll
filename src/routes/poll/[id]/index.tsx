@@ -1,5 +1,5 @@
 import { component$, useContext, useSignal, useVisibleTask$, $ } from "@builder.io/qwik";
-import { Link, useLocation, useNavigate } from "@builder.io/qwik-city";
+import { useLocation, useNavigate } from "@builder.io/qwik-city";
 import { linkedContext } from "~/lib/context";
 import { invoke } from "@tauri-apps/api/core";
 import {
@@ -7,7 +7,6 @@ import {
   getPollVotes,
   castVote,
   deletePoll,
-  getLinkedAgents,
   getPollFlags,
   flagPoll,
   removeFlag,
@@ -16,12 +15,6 @@ import {
   type FlagData,
   type FlagReason,
 } from "~/lib/holochain";
-
-interface VerifiedResults {
-  verifiedVoteCount: number;
-  verifiedCounts: number[];
-  identityCount: number;
-}
 
 export default component$(() => {
   const linked = useContext(linkedContext);
@@ -38,8 +31,6 @@ export default component$(() => {
   const hasVoted = useSignal(false);
   const error = useSignal<string | null>(null);
   const voteError = useSignal<string | null>(null);
-  const verified = useSignal<VerifiedResults | null>(null);
-  const verifiedLoading = useSignal(false);
   const confirmDelete = useSignal(false);
   const deleting = useSignal(false);
   const deleteError = useSignal<string | null>(null);
@@ -50,82 +41,6 @@ export default component$(() => {
   const showFlagPicker = useSignal(false);
 
   const pollHash = loc.params.id;
-
-  const loadVerifiedResults = $(
-    async (currentVotes: VoteData[], optionCount: number) => {
-      if (currentVotes.length === 0) return;
-      verifiedLoading.value = true;
-
-      try {
-        // Get unique voters.
-        const voterKeys = new Map<string, VoteData>();
-        for (const v of currentVotes) {
-          if (!voterKeys.has(v.author)) {
-            voterKeys.set(v.author, v);
-          }
-        }
-
-        // For each voter, get linked agents (Vault keys).
-        // Build: vaultKey -> [voterKey1, voterKey2, ...]
-        const vaultToVoters = new Map<string, string[]>();
-        const unlinkedVoters = new Set<string>();
-
-        for (const [voterKey] of voterKeys) {
-          try {
-            const linked = await getLinkedAgents(voterKey);
-            if (linked.length > 0) {
-              // Use the first linked key as the identity cluster key.
-              const vaultKey = linked[0];
-              const existing = vaultToVoters.get(vaultKey) || [];
-              existing.push(voterKey);
-              vaultToVoters.set(vaultKey, existing);
-            } else {
-              unlinkedVoters.add(voterKey);
-            }
-          } catch {
-            // If get_linked_agents fails, treat as unlinked.
-            unlinkedVoters.add(voterKey);
-          }
-        }
-
-        // Deduplicate: for each identity cluster, keep only the first vote.
-        const deduplicatedVotes: VoteData[] = [];
-
-        // Add one vote per identity cluster.
-        for (const [, voters] of vaultToVoters) {
-          const firstVote = currentVotes.find((v) =>
-            voters.includes(v.author),
-          );
-          if (firstVote) {
-            deduplicatedVotes.push(firstVote);
-          }
-        }
-
-        // Add all unlinked votes (can't deduplicate without identity).
-        for (const voterKey of unlinkedVoters) {
-          const vote = currentVotes.find((v) => v.author === voterKey);
-          if (vote) {
-            deduplicatedVotes.push(vote);
-          }
-        }
-
-        // Count per option.
-        const verifiedCounts = Array.from({ length: optionCount }, (_, i) =>
-          deduplicatedVotes.filter((v) => v.vote.option_index === i).length,
-        );
-
-        verified.value = {
-          verifiedVoteCount: deduplicatedVotes.length,
-          verifiedCounts,
-          identityCount: vaultToVoters.size,
-        };
-      } catch (e) {
-        console.error("Failed to compute verified results:", e);
-      } finally {
-        verifiedLoading.value = false;
-      }
-    },
-  );
 
   useVisibleTask$(async () => {
     try {
@@ -167,10 +82,7 @@ export default component$(() => {
         ) ?? null;
       }
 
-      // Load verified results in the background.
-      if (votesResult.length > 0) {
-        loadVerifiedResults(votesResult, pollResult.poll.options.length);
-      }
+
     } catch (e: any) {
       error.value = e.message || "Failed to load poll";
     } finally {
@@ -190,10 +102,7 @@ export default component$(() => {
       votes.value = newVotes;
       hasVoted.value = true;
 
-      // Refresh verified results.
-      if (poll.value) {
-        loadVerifiedResults(newVotes, poll.value.options.length);
-      }
+
     } catch (e: any) {
       voteError.value = e.message || "Failed to cast vote";
     } finally {
@@ -306,12 +215,6 @@ export default component$(() => {
         )}
         <div class="text-xs text-gray-500">
           {totalVotes} vote{totalVotes !== 1 ? "s" : ""}
-          {verified.value && verified.value.identityCount > 0 && (
-            <span>
-              {" "}
-              · {verified.value.identityCount} verified
-            </span>
-          )}
           {flags.value.length > 0 && (
             <span>
               {" "}
@@ -527,53 +430,6 @@ export default component$(() => {
         )}
       </div>
 
-      {/* Verified Results — only shown when identity-linked voters exist */}
-      {verifiedLoading.value && (
-        <div class="text-gray-500 text-sm mb-6">
-          Computing verified results...
-        </div>
-      )}
-
-      {verified.value && verified.value.identityCount > 0 && (
-        <div class="bg-gray-900 border border-indigo-900 rounded-lg p-5">
-          <h2 class="text-sm font-medium text-indigo-300 mb-1">
-            Verified Results
-          </h2>
-          <p class="text-xs text-gray-500 mb-4">
-            {verified.value.verifiedVoteCount} verified vote
-            {verified.value.verifiedVoteCount !== 1 ? "s" : ""} from{" "}
-            {verified.value.identityCount} confirmed{" "}
-            {verified.value.identityCount !== 1 ? "people" : "person"}.
-            One vote per person.
-          </p>
-
-          <div class="space-y-3">
-            {p.options.map((option, i) => {
-              const count = verified.value!.verifiedCounts[i];
-              const total = verified.value!.verifiedVoteCount;
-              const pct =
-                total > 0 ? Math.round((count / total) * 100) : 0;
-
-              return (
-                <div key={`v-${i}`}>
-                  <div class="flex justify-between text-sm mb-1">
-                    <span class="text-gray-200">{option}</span>
-                    <span class="text-gray-400">
-                      {count} ({pct}%)
-                    </span>
-                  </div>
-                  <div class="h-2 bg-gray-800 rounded-full overflow-hidden">
-                    <div
-                      class="h-full bg-indigo-400 rounded-full transition-all"
-                      style={{ width: `${pct}%` }}
-                    />
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
     </div>
   );
 });
