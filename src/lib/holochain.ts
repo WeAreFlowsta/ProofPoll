@@ -21,12 +21,16 @@ import { invoke } from "@tauri-apps/api/core";
 
 // ── App-specific types (replace with your data model) ─────────────────
 
+export type PollType = "Anonymous" | "Public";
+
 export interface Poll {
   title: string;
   description: string;
   options: string[];
   created_at: number;
   closes_at: number | null;
+  /** "Anonymous" or "Public". Null for pre-v1.2 polls (treated as Anonymous). */
+  poll_type: PollType | null;
 }
 
 export interface PollListItem {
@@ -34,19 +38,23 @@ export interface PollListItem {
   poll: Poll;
   author: string;
   /** Which DHT this poll lives on. Pass back to castVote and getPollVotes. */
-  dna_version: "1.0" | "1.1";
+  dna_version: "1.0" | "1.1" | "1.2";
 }
 
 export interface PollDetail {
   poll: Poll;
   author: string;
   /** Which DHT this poll lives on. Pass back to castVote and getPollVotes. */
-  dna_version: "1.0" | "1.1";
+  dna_version: "1.0" | "1.1" | "1.2";
 }
 
 export interface VoteData {
   vote: { poll_action_hash: string; option_index: number };
   author: string;
+  /** Set on public v1.2 polls. Null otherwise. */
+  display_name: string | null;
+  /** Set on public v1.2 polls. Null otherwise. */
+  profile_picture: string | null;
 }
 
 // ── App-specific operations (replace with your invoke() wrappers) ─────
@@ -56,6 +64,7 @@ export async function createPoll(input: {
   description: string;
   options: string[];
   closes_at: number | null;
+  poll_type: PollType;
 }): Promise<string> {
   return invoke<string>("create_poll", input);
 }
@@ -75,18 +84,20 @@ export async function deletePoll(actionHash: string): Promise<string> {
 export async function castVote(
   pollActionHash: string,
   optionIndex: number,
-  dnaVersion: "1.0" | "1.1",
+  dnaVersion: "1.0" | "1.1" | "1.2",
+  pollType?: PollType,
 ): Promise<string> {
   return invoke<string>("cast_vote", {
     pollActionHash,
     optionIndex,
     dnaVersion,
+    pollType: pollType ?? null,
   });
 }
 
 export async function getPollVotes(
   pollActionHash: string,
-  dnaVersion: "1.0" | "1.1",
+  dnaVersion: "1.0" | "1.1" | "1.2",
 ): Promise<VoteData[]> {
   return invoke<VoteData[]>("get_poll_votes", {
     pollActionHash,

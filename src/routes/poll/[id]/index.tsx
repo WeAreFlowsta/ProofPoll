@@ -22,7 +22,7 @@ export default component$(() => {
   const nav = useNavigate();
   const poll = useSignal<Poll | null>(null);
   const pollAuthor = useSignal<string | null>(null);
-  const pollDnaVersion = useSignal<"1.0" | "1.1">("1.1");
+  const pollDnaVersion = useSignal<"1.0" | "1.1" | "1.2">("1.2");
   const votes = useSignal<VoteData[]>([]);
   const myAgent = useSignal<string | null>(null);
   const selectedOption = useSignal<number | null>(null);
@@ -62,10 +62,10 @@ export default component$(() => {
       pollAuthor.value = pollResult.author;
       pollDnaVersion.value = pollResult.dna_version;
 
-      // Fetch votes from the correct cell. Flags only exist on v1.1.
+      // Fetch votes from the correct cell. Flags exist on v1.1 and v1.2.
       const [votesResult, flagsResult] = await Promise.all([
         getPollVotes(pollHash, pollResult.dna_version),
-        pollResult.dna_version === "1.1"
+        (pollResult.dna_version === "1.1" || pollResult.dna_version === "1.2")
           ? getPollFlags(pollHash).catch(() => [] as FlagData[])
           : Promise.resolve([] as FlagData[]),
       ]);
@@ -96,7 +96,12 @@ export default component$(() => {
     voting.value = true;
 
     try {
-      await castVote(pollHash, selectedOption.value, pollDnaVersion.value);
+      await castVote(
+        pollHash,
+        selectedOption.value,
+        pollDnaVersion.value,
+        poll.value?.poll_type ?? undefined,
+      );
 
       const newVotes = await getPollVotes(pollHash, pollDnaVersion.value);
       votes.value = newVotes;
@@ -190,6 +195,7 @@ export default component$(() => {
   const p = poll.value;
   const isOpen = !p.closes_at || p.closes_at > Date.now() / 1000;
   const totalVotes = votes.value.length;
+  const isPublic = p.poll_type === "Public";
 
   const voteCounts: number[] = p.options.map(
     (_, i) => votes.value.filter((v) => v.vote.option_index === i).length,
@@ -200,15 +206,22 @@ export default component$(() => {
       <div class="mb-6">
         <div class="flex items-start justify-between mb-2">
           <h1 class="text-2xl font-bold">{p.title}</h1>
-          <span
-            class={`text-xs px-2 py-0.5 rounded ${
-              isOpen
-                ? "bg-green-900 text-green-300"
-                : "bg-gray-800 text-gray-400"
-            }`}
-          >
-            {isOpen ? "Open" : "Closed"}
-          </span>
+          <div class="flex items-center gap-2 shrink-0">
+            {isPublic && (
+              <span class="text-xs px-2 py-0.5 rounded bg-blue-900 text-blue-300">
+                Public
+              </span>
+            )}
+            <span
+              class={`text-xs px-2 py-0.5 rounded ${
+                isOpen
+                  ? "bg-green-900 text-green-300"
+                  : "bg-gray-800 text-gray-400"
+              }`}
+            >
+              {isOpen ? "Open" : "Closed"}
+            </span>
+          </div>
         </div>
         {p.description && (
           <p class="text-gray-400 mb-3">{p.description}</p>
@@ -229,8 +242,8 @@ export default component$(() => {
           )}
         </div>
 
-        {/* Flag / unflag — only on v1.1 polls (v1.0 has no Flag entry type) */}
-        {linked.value && myAgent.value && pollAuthor.value !== myAgent.value && pollDnaVersion.value === "1.1" && (
+        {/* Flag / unflag — only on v1.1 and v1.2 polls (v1.0 has no Flag entry type) */}
+        {linked.value && myAgent.value && pollAuthor.value !== myAgent.value && (pollDnaVersion.value === "1.1" || pollDnaVersion.value === "1.2") && (
           <div class="mt-3">
             {flagError.value && (
               <div class="text-red-400 text-xs mb-2">{flagError.value}</div>
@@ -331,6 +344,12 @@ export default component$(() => {
               Cast your vote
             </h2>
 
+            {isPublic && (
+              <div class="bg-blue-900/20 border border-blue-800/40 rounded-lg px-3 py-2 text-xs text-blue-300 mb-3">
+                This is a public poll — your display name will be shown alongside your vote.
+              </div>
+            )}
+
             {voteError.value && (
               <div class="bg-red-900/50 border border-red-700 text-red-300 px-3 py-2 rounded text-sm mb-3">
                 {voteError.value}
@@ -392,7 +411,7 @@ export default component$(() => {
         </div>
       )}
 
-      {/* Raw Results */}
+      {/* Results */}
       <div class="bg-gray-900 border border-gray-800 rounded-lg p-5 mb-6">
         <h2 class="text-sm font-medium text-gray-300 mb-4">
           Results ({totalVotes} total)
@@ -401,13 +420,16 @@ export default component$(() => {
         {totalVotes === 0 ? (
           <p class="text-gray-500 text-sm">No votes yet</p>
         ) : (
-          <div class="space-y-3">
+          <div class="space-y-4">
             {p.options.map((option, i) => {
               const count = voteCounts[i];
               const pct =
                 totalVotes > 0
                   ? Math.round((count / totalVotes) * 100)
                   : 0;
+              const optionVoters = isPublic
+                ? votes.value.filter((v) => v.vote.option_index === i && v.display_name)
+                : [];
 
               return (
                 <div key={i}>
@@ -417,12 +439,30 @@ export default component$(() => {
                       {count} ({pct}%)
                     </span>
                   </div>
-                  <div class="h-2 bg-gray-800 rounded-full overflow-hidden">
+                  <div class="h-2 bg-gray-800 rounded-full overflow-hidden mb-1.5">
                     <div
                       class="h-full bg-indigo-600 rounded-full transition-all"
                       style={{ width: `${pct}%` }}
                     />
                   </div>
+                  {optionVoters.length > 0 && (
+                    <div class="flex flex-wrap gap-1.5 mt-1">
+                      {optionVoters.map((v) => (
+                        <div key={v.author} class="flex items-center gap-1 bg-gray-800 rounded-full px-2 py-0.5">
+                          {v.profile_picture && (
+                            <img
+                              src={v.profile_picture}
+                              alt=""
+                              width={14}
+                              height={14}
+                              class="rounded-full"
+                            />
+                          )}
+                          <span class="text-xs text-gray-300">{v.display_name}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               );
             })}

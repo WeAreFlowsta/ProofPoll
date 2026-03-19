@@ -2,8 +2,8 @@
 
 # Build all ProofPoll DNA versions.
 #
-# Both v1.0 and v1.1 hApp bundles must be present in src-tauri/resources/
-# for the migration system to work. Run this script before `cargo tauri dev`
+# All hApp bundles must be present in src-tauri/resources/ for the
+# migration system to work. Run this script before `cargo tauri dev`
 # or `cargo tauri build`.
 
 set -e
@@ -14,6 +14,10 @@ echo "=== Building ProofPoll DNA v1.0 ==="
 echo ""
 echo "=== Building ProofPoll DNA v1.1 ==="
 (cd dna/v1.1 && bash build.sh)
+
+echo ""
+echo "=== Building ProofPoll DNA v1.2 ==="
+(cd dna/v1.2 && bash build.sh)
 
 echo ""
 echo "=== Build complete ==="

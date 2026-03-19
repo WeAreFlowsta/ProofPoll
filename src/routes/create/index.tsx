@@ -1,7 +1,7 @@
 import { component$, useContext, useSignal, useVisibleTask$, $ } from "@builder.io/qwik";
 import { useNavigate } from "@builder.io/qwik-city";
 import { linkedContext } from "~/lib/context";
-import { createPoll } from "~/lib/holochain";
+import { createPoll, type PollType } from "~/lib/holochain";
 
 export default component$(() => {
   const linked = useContext(linkedContext);
@@ -12,6 +12,7 @@ export default component$(() => {
   const closesAt = useSignal("");
   const minDateTime = useSignal("");
   const noExpiry = useSignal(false);
+  const pollType = useSignal<PollType>("Anonymous");
   const submitting = useSignal(false);
   const error = useSignal<string | null>(null);
 
@@ -79,6 +80,7 @@ export default component$(() => {
         description: description.value.trim(),
         options: trimmedOptions,
         closes_at: closesAtTs,
+        poll_type: pollType.value,
       });
 
       await nav(`/poll/${hash}/`);
@@ -213,6 +215,41 @@ export default component$(() => {
             />
             <span class="text-sm text-gray-400">No expiry</span>
           </label>
+        </div>
+
+        <div>
+          <label class="block text-sm font-medium text-gray-300 mb-2">
+            Poll type
+          </label>
+          <div class="flex gap-3">
+            <button
+              type="button"
+              onClick$={() => (pollType.value = "Anonymous")}
+              class={`flex-1 py-2 px-4 rounded-lg border text-sm font-medium transition-colors ${
+                pollType.value === "Anonymous"
+                  ? "bg-indigo-600 border-indigo-500 text-white"
+                  : "bg-gray-900 border-gray-700 text-gray-400 hover:border-gray-500"
+              }`}
+            >
+              Anonymous
+            </button>
+            <button
+              type="button"
+              onClick$={() => (pollType.value = "Public")}
+              class={`flex-1 py-2 px-4 rounded-lg border text-sm font-medium transition-colors ${
+                pollType.value === "Public"
+                  ? "bg-indigo-600 border-indigo-500 text-white"
+                  : "bg-gray-900 border-gray-700 text-gray-400 hover:border-gray-500"
+              }`}
+            >
+              Public
+            </button>
+          </div>
+          <p class="text-xs text-gray-500 mt-1.5">
+            {pollType.value === "Anonymous"
+              ? "Votes are counted but voter identities are not shown."
+              : "Voters' display names are shown alongside their vote."}
+          </p>
         </div>
 
         <button

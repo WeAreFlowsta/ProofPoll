@@ -33,27 +33,31 @@ use std::path::Path;
 
 pub const APP_ID_V1_0: &str = "proofpoll_v1_0";
 pub const APP_ID_V1_1: &str = "proofpoll_v1_1";
+pub const APP_ID_V1_2: &str = "proofpoll_v1_2";
 
 const HAPP_FILE_V1_0: &str = "proofpoll_v1_0_happ.happ";
 const HAPP_FILE_V1_1: &str = "proofpoll_v1_1_happ.happ";
+const HAPP_FILE_V1_2: &str = "proofpoll_v1_2_happ.happ";
 
 /// The active version for all new reads and writes.
-pub const ACTIVE_APP_ID: &str = APP_ID_V1_1;
+pub const ACTIVE_APP_ID: &str = APP_ID_V1_2;
 
 /// Result of the DNA installation phase.
 pub struct InstallResult {
     pub agent_pub_key: AgentPubKey,
-    /// True if v1.0 data exists and needs to be migrated to v1.1.
+    /// True if v1.1 data exists and needs to be migrated to v1.2.
     pub needs_migration: bool,
-    /// True if v1.0 is installed and usable (for migration reads).
+    /// True if v1.0 is installed and usable (for legacy reads).
     pub v1_0_available: bool,
+    /// True if v1.1 is installed and usable (for migration reads).
+    pub v1_1_available: bool,
 }
 
-/// Install ProofPoll DNAs, handling upgrades from v1.0 to v1.1.
+/// Install ProofPoll DNAs, handling upgrades across all versions.
 ///
-/// - Fresh install: installs v1.1 only.
-/// - Upgrade: installs v1.1 alongside v1.0, flags migration needed.
-/// - Already current: re-enables v1.1, checks if migration is still pending.
+/// - Fresh install: installs v1.2 only.
+/// - Upgrade from v1.1: installs v1.2 alongside v1.1, flags migration needed.
+/// - Already current: re-enables v1.2, keeps v1.0/v1.1 for migration reads.
 pub async fn install_dnas(admin_port: u16, resource_dir: &Path) -> Result<InstallResult, String> {
     let admin_ws = AdminWebsocket::connect(
         format!("localhost:{}", admin_port),
@@ -71,19 +75,21 @@ pub async fn install_dnas(admin_port: u16, resource_dir: &Path) -> Result<Instal
     let mut v1_0_agent_key: Option<AgentPubKey> = None;
     let mut v1_1_installed = false;
     let mut v1_1_agent_key: Option<AgentPubKey> = None;
+    let mut v1_2_installed = false;
+    let mut v1_2_agent_key: Option<AgentPubKey> = None;
 
     for app in &existing_apps {
         if app.installed_app_id == APP_ID_V1_0 {
             if matches!(app.status, holochain_types::prelude::AppStatus::Disabled(_)) {
-                // Disabled v1.0 — try to re-enable for migration reads
-                log::warn!("v1.0 DNA disabled, attempting re-enable for migration...");
+                // Disabled v1.0 — try to re-enable for legacy reads
+                log::warn!("v1.0 DNA disabled, attempting re-enable...");
                 match admin_ws.enable_app(APP_ID_V1_0.to_string()).await {
                     Ok(_) => {
                         v1_0_installed = true;
                         v1_0_agent_key = Some(app.agent_pub_key.clone());
                     }
                     Err(e) => {
-                        log::warn!("Could not re-enable v1.0: {}. Migration will skip v1.0 data.", e);
+                        log::warn!("Could not re-enable v1.0: {}. Legacy reads will be unavailable.", e);
                     }
                 }
             } else {
@@ -93,45 +99,64 @@ pub async fn install_dnas(admin_port: u16, resource_dir: &Path) -> Result<Instal
         }
         if app.installed_app_id == APP_ID_V1_1 {
             if matches!(app.status, holochain_types::prelude::AppStatus::Disabled(_)) {
-                log::warn!("v1.1 DNA disabled, reinstalling...");
-                admin_ws
-                    .uninstall_app(APP_ID_V1_1.to_string(), false)
-                    .await
-                    .map_err(|e| format!("Failed to uninstall disabled v1.1: {}", e))?;
+                // Disabled v1.1 — try to re-enable for migration reads
+                log::warn!("v1.1 DNA disabled, attempting re-enable...");
+                match admin_ws.enable_app(APP_ID_V1_1.to_string()).await {
+                    Ok(_) => {
+                        v1_1_installed = true;
+                        v1_1_agent_key = Some(app.agent_pub_key.clone());
+                    }
+                    Err(e) => {
+                        log::warn!("Could not re-enable v1.1: {}. Migration reads may be unavailable.", e);
+                    }
+                }
             } else {
                 v1_1_installed = true;
                 v1_1_agent_key = Some(app.agent_pub_key.clone());
                 // Re-enable to recover any disabled cells
+                if let Err(e) = admin_ws.enable_app(APP_ID_V1_1.to_string()).await {
+                    log::warn!("Could not re-enable v1.1: {}", e);
+                }
+            }
+        }
+        if app.installed_app_id == APP_ID_V1_2 {
+            if matches!(app.status, holochain_types::prelude::AppStatus::Disabled(_)) {
+                log::warn!("v1.2 DNA disabled, reinstalling...");
                 admin_ws
-                    .enable_app(APP_ID_V1_1.to_string())
+                    .uninstall_app(APP_ID_V1_2.to_string(), false)
                     .await
-                    .map_err(|e| format!("Failed to re-enable v1.1: {}", e))?;
+                    .map_err(|e| format!("Failed to uninstall disabled v1.2: {}", e))?;
+            } else {
+                v1_2_installed = true;
+                v1_2_agent_key = Some(app.agent_pub_key.clone());
+                // Re-enable to recover any disabled cells
+                admin_ws
+                    .enable_app(APP_ID_V1_2.to_string())
+                    .await
+                    .map_err(|e| format!("Failed to re-enable v1.2: {}", e))?;
             }
         }
     }
 
-    // Install v1.1 if not present
-    if !v1_1_installed {
-        let agent_key = if let Some(key) = &v1_0_agent_key {
-            // Reuse v1.0's agent key so identity links still work
-            Some(key.clone())
-        } else {
-            None // Fresh install — let conductor generate
-        };
+    // Install v1.2 if not present — reuse v1.1 key (then v1.0) so identity links survive
+    if !v1_2_installed {
+        let agent_key = v1_1_agent_key.as_ref()
+            .or(v1_0_agent_key.as_ref())
+            .cloned();
 
-        let happ_path = resource_dir.join(HAPP_FILE_V1_1);
+        let happ_path = resource_dir.join(HAPP_FILE_V1_2);
         if !happ_path.exists() {
             return Err(format!(
-                "ProofPoll v1.1 hApp bundle not found at {:?}",
+                "ProofPoll v1.2 hApp bundle not found at {:?}",
                 happ_path
             ));
         }
 
-        log::info!("Installing ProofPoll v1.1 DNA from {:?}...", happ_path);
+        log::info!("Installing ProofPoll v1.2 DNA from {:?}...", happ_path);
         let payload = InstallAppPayload {
             source: AppBundleSource::Path(happ_path),
             agent_key,
-            installed_app_id: Some(APP_ID_V1_1.to_string()),
+            installed_app_id: Some(APP_ID_V1_2.to_string()),
             network_seed: None,
             roles_settings: None,
             ignore_genesis_failure: false,
@@ -140,57 +165,58 @@ pub async fn install_dnas(admin_port: u16, resource_dir: &Path) -> Result<Instal
         let app_info = admin_ws
             .install_app(payload)
             .await
-            .map_err(|e| format!("Failed to install v1.1 DNA: {}", e))?;
+            .map_err(|e| format!("Failed to install v1.2 DNA: {}", e))?;
 
         admin_ws
-            .enable_app(APP_ID_V1_1.to_string())
+            .enable_app(APP_ID_V1_2.to_string())
             .await
-            .map_err(|e| format!("Failed to enable v1.1 DNA: {}", e))?;
+            .map_err(|e| format!("Failed to enable v1.2 DNA: {}", e))?;
 
-        v1_1_agent_key = Some(app_info.agent_pub_key);
-        log::info!("ProofPoll v1.1 DNA installed and enabled");
+        v1_2_agent_key = Some(app_info.agent_pub_key);
+        log::info!("ProofPoll v1.2 DNA installed and enabled");
     }
 
-    // Force re-enable v1.1 to recover any disabled cells from previous runs
-    // (CellDisabled can happen even when the app-level status shows Running)
-    if let Err(e) = admin_ws.enable_app(APP_ID_V1_1.to_string()).await {
-        log::warn!("Could not re-enable v1.1: {}", e);
+    // Force re-enable v1.2 to recover any disabled cells from previous runs
+    if let Err(e) = admin_ws.enable_app(APP_ID_V1_2.to_string()).await {
+        log::warn!("Could not re-enable v1.2: {}", e);
     }
 
-    // Verify v1.1 is enabled
+    // Verify v1.2 is enabled
     let enabled_apps = admin_ws
         .list_apps(Some(AppStatusFilter::Enabled))
         .await
         .map_err(|e| format!("Failed to verify installed apps: {}", e))?;
 
-    let v1_1_enabled = enabled_apps
+    let v1_2_enabled = enabled_apps
         .iter()
-        .any(|app| app.installed_app_id == APP_ID_V1_1);
+        .any(|app| app.installed_app_id == APP_ID_V1_2);
 
-    if !v1_1_enabled {
-        return Err("ProofPoll v1.1 DNA installation verification failed".to_string());
+    if !v1_2_enabled {
+        return Err("ProofPoll v1.2 DNA installation verification failed".to_string());
     }
 
-    let agent_pub_key = v1_1_agent_key.ok_or("No agent key after installation")?;
+    let agent_pub_key = v1_2_agent_key.ok_or("No agent key after installation")?;
 
-    // Migration is needed if v1.0 exists and v1.1 was just installed
-    let needs_migration = v1_0_installed && !v1_1_installed;
+    // Migration needed if v1.1 exists and v1.2 was just installed
+    let needs_migration = v1_1_installed && !v1_2_installed;
 
     Ok(InstallResult {
         agent_pub_key,
         needs_migration,
         v1_0_available: v1_0_installed,
+        v1_1_available: v1_1_installed,
     })
 }
 
 /// Attach an app interface, authorize signing credentials, and connect
 /// AppWebsockets for all installed versions.
 ///
-/// Returns (app_port, active_client, optional_v1_0_client).
+/// Returns (app_port, v1.2_active_client, optional_v1_1_client, optional_v1_0_client).
 pub async fn setup_app_interface(
     admin_port: u16,
     v1_0_available: bool,
-) -> Result<(u16, AppWebsocket, Option<AppWebsocket>), String> {
+    v1_1_available: bool,
+) -> Result<(u16, AppWebsocket, Option<AppWebsocket>, Option<AppWebsocket>), String> {
     let admin_ws = AdminWebsocket::connect(
         format!("localhost:{}", admin_port),
         Some("proofpoll".to_string()),
@@ -289,28 +315,66 @@ pub async fn setup_app_interface(
 
     let signer_arc: std::sync::Arc<dyn holochain_client::AgentSigner + Send + Sync> = signer.into();
 
-    // Connect the active (v1.1) AppWebsocket.
-    let token_v1_1 = admin_ws
+    // Connect the active (v1.2) AppWebsocket.
+    let token_v1_2 = admin_ws
         .issue_app_auth_token(
             IssueAppAuthenticationTokenPayload::for_installed_app_id(ACTIVE_APP_ID.into())
                 .expiry_seconds(0)
                 .single_use(false),
         )
         .await
-        .map_err(|e| format!("Failed to issue v1.1 auth token: {}", e))?;
+        .map_err(|e| format!("Failed to issue v1.2 auth token: {}", e))?;
 
-    let app_ws_v1_1 = AppWebsocket::connect(
+    let app_ws_v1_2 = AppWebsocket::connect(
         format!("localhost:{}", app_port),
-        token_v1_1.token,
+        token_v1_2.token,
         signer_arc.clone(),
         Some("proofpoll".to_string()),
     )
     .await
-    .map_err(|e| format!("Failed to connect v1.1 app WebSocket: {}", e))?;
+    .map_err(|e| format!("Failed to connect v1.2 app WebSocket: {}", e))?;
 
-    log::info!("v1.1 App WebSocket connected on port {}", app_port);
+    log::info!("v1.2 App WebSocket connected on port {}", app_port);
 
-    // Connect the v1.0 AppWebsocket if available (for migration reads).
+    // Connect the v1.1 AppWebsocket if available (for migration reads).
+    let app_ws_v1_1 = if v1_1_available {
+        match admin_ws
+            .issue_app_auth_token(
+                IssueAppAuthenticationTokenPayload::for_installed_app_id(APP_ID_V1_1.into())
+                    .expiry_seconds(0)
+                    .single_use(false),
+            )
+            .await
+        {
+            Ok(token_v1_1) => {
+                match AppWebsocket::connect(
+                    format!("localhost:{}", app_port),
+                    token_v1_1.token,
+                    signer_arc.clone(),
+                    Some("proofpoll".to_string()),
+                )
+                .await
+                {
+                    Ok(ws) => {
+                        log::info!("v1.1 App WebSocket connected for migration reads");
+                        Some(ws)
+                    }
+                    Err(e) => {
+                        log::warn!("Could not connect v1.1 WebSocket: {}. Migration reads will be skipped.", e);
+                        None
+                    }
+                }
+            }
+            Err(e) => {
+                log::warn!("Could not issue v1.1 auth token: {}. Migration reads will be skipped.", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // Connect the v1.0 AppWebsocket if available (for legacy reads).
     let app_ws_v1_0 = if v1_0_available {
         match admin_ws
             .issue_app_auth_token(
@@ -330,17 +394,17 @@ pub async fn setup_app_interface(
                 .await
                 {
                     Ok(ws) => {
-                        log::info!("v1.0 App WebSocket connected for migration reads");
+                        log::info!("v1.0 App WebSocket connected for legacy reads");
                         Some(ws)
                     }
                     Err(e) => {
-                        log::warn!("Could not connect v1.0 WebSocket: {}. Migration will be skipped.", e);
+                        log::warn!("Could not connect v1.0 WebSocket: {}. Legacy reads will be skipped.", e);
                         None
                     }
                 }
             }
             Err(e) => {
-                log::warn!("Could not issue v1.0 auth token: {}. Migration will be skipped.", e);
+                log::warn!("Could not issue v1.0 auth token: {}. Legacy reads will be skipped.", e);
                 None
             }
         }
@@ -348,5 +412,5 @@ pub async fn setup_app_interface(
         None
     };
 
-    Ok((app_port, app_ws_v1_1, app_ws_v1_0))
+    Ok((app_port, app_ws_v1_2, app_ws_v1_1, app_ws_v1_0))
 }

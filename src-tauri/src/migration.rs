@@ -1,8 +1,8 @@
 //! DNA migration orchestration for ProofPoll.
 //!
-//! Handles the v1.0 → v1.1 upgrade by:
-//!   1. Exporting user-authored polls and votes from v1.0 DHT
-//!   2. Re-creating polls on v1.1 DHT
+//! Handles the v1.1 → v1.2 upgrade by:
+//!   1. Exporting user-authored polls and votes from v1.1 DHT
+//!   2. Re-creating polls on v1.2 DHT (as Anonymous poll type)
 //!   3. Publishing MigratedPoll entries so other users can discover hash mappings
 //!   4. Re-casting votes (where the target poll has been migrated)
 //!   5. Retrying pending votes in a background loop
@@ -15,11 +15,6 @@
 //!   3. Update the zome function names in `call_zome_on()` calls
 //!   4. Update `RoleName::from("proofpoll")` to your app's role name
 //!
-//! When you add a v1.2 DNA, copy this module and update:
-//!   - The app IDs (APP_ID_V1_1 → APP_ID_V1_2)
-//!   - The client references (v1_0 → v1_1 for export, v1_1 → v1_2 for import)
-//!   - The state file name (migration-state.json → migration-v1.2-state.json)
-//!
 //! The orchestration pattern (export → create → register mapping → retry loop)
 //! is identical regardless of version numbers or data model.
 
@@ -31,7 +26,7 @@ use tauri::Emitter;
 
 // ── Migration state (persisted to disk) ───────────────────────────────
 
-const STATE_FILE: &str = "migration-state.json";
+const STATE_FILE: &str = "migration-v1.2-state.json";
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub struct MigrationState {
@@ -135,12 +130,20 @@ struct CreatePollInput {
     description: String,
     options: Vec<String>,
     closes_at: Option<i64>,
+    /// v1.2 field — migrated polls default to Anonymous.
+    poll_type: String,
 }
 
 #[derive(serde::Serialize, Debug)]
 struct CastVoteInput {
     poll_action_hash: ActionHash,
     option_index: u32,
+    /// v1.2 field — None for migrated votes (always anonymous).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    display_name: Option<String>,
+    /// v1.2 field — None for migrated votes (always anonymous).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    profile_picture: Option<String>,
 }
 
 #[derive(serde::Serialize, Debug)]
@@ -187,10 +190,10 @@ async fn call_zome_on(
 
 // ── Main migration function ───────────────────────────────────────────
 
-/// Run the v1.0 → v1.1 migration.
+/// Run the v1.1 → v1.2 migration.
 ///
-/// Exports user-authored polls and votes from v1.0, re-creates them on
-/// v1.1, and publishes migration mappings for other users.
+/// Exports user-authored polls and votes from v1.1, re-creates them on
+/// v1.2, and publishes migration mappings for other users.
 pub async fn run_migration(
     state: &Arc<AppState>,
     app_handle: &tauri::AppHandle,
@@ -205,25 +208,25 @@ pub async fn run_migration(
     }
 
     // Give the conductor a moment to fully initialize cells after startup.
-    // Without this, zome calls to v1.0 may timeout because cells aren't
-    // ready yet (especially on first run after installing v1.1).
+    // Without this, zome calls to v1.1 may timeout because cells aren't
+    // ready yet (especially on first run after installing v1.2).
     log::info!("Waiting 10s for conductor cells to initialize...");
     tokio::time::sleep(std::time::Duration::from_secs(10)).await;
 
-    // Get both clients
-    let v1_0_client = state.app_client_v1_0.lock().await;
-    let v1_0 = match v1_0_client.as_ref() {
+    // Get both clients: v1.1 as source, v1.2 as destination
+    let v1_1_client = state.app_client_v1_1.lock().await;
+    let v1_1 = match v1_1_client.as_ref() {
         Some(c) => c,
         None => {
-            log::warn!("No v1.0 client available, skipping migration");
+            log::warn!("No v1.1 client available, skipping migration");
             return Ok(());
         }
     };
 
-    let v1_1_client = state.app_client.lock().await;
-    let v1_1 = match v1_1_client.as_ref() {
+    let v1_2_client = state.app_client.lock().await;
+    let v1_2 = match v1_2_client.as_ref() {
         Some(c) => c,
-        None => return Err("v1.1 client not available".to_string()),
+        None => return Err("v1.2 client not available".to_string()),
     };
 
     let my_agent = {
@@ -240,14 +243,14 @@ pub async fn run_migration(
 
     let _ = app_handle.emit("migration-progress", serde_json::json!({
         "phase": "exporting",
-        "message": "Reading your data from v1.0...",
+        "message": "Reading your data from v1.1...",
     }));
 
-    // ── Phase 1: Export from v1.0 ─────────────────────────────────────
+    // ── Phase 1: Export from v1.1 ─────────────────────────────────────
 
-    // Get all polls from v1.0
+    // Get all polls from v1.1
     let payload = ExternIO::encode(()).map_err(|e| e.to_string())?;
-    let result = call_zome_on(v1_0, "polls", "get_all_polls", payload).await?;
+    let result = call_zome_on(v1_1, "polls", "get_all_polls", payload).await?;
     let all_polls: Vec<Record> = result.decode().map_err(|e| e.to_string())?;
 
     // Filter to my polls and collect my votes
@@ -266,7 +269,7 @@ pub async fn run_migration(
 
         // Check if I voted on this poll
         let vote_payload = ExternIO::encode(hash.clone()).map_err(|e| e.to_string())?;
-        match call_zome_on(v1_0, "polls", "get_poll_votes", vote_payload).await {
+        match call_zome_on(v1_1, "polls", "get_poll_votes", vote_payload).await {
             Ok(vote_result) => {
                 let vote_records: Vec<Record> = vote_result.decode().unwrap_or_default();
                 for vr in &vote_records {
@@ -306,7 +309,7 @@ pub async fn run_migration(
 
         // Also check DHT for existing mapping (in case we crashed mid-migration)
         let mapping_payload = ExternIO::encode(old_hash.clone()).map_err(|e| e.to_string())?;
-        let mapping_result = call_zome_on(v1_1, "polls", "get_migration_mapping", mapping_payload).await;
+        let mapping_result = call_zome_on(v1_2, "polls", "get_migration_mapping", mapping_payload).await;
         if let Ok(result) = mapping_result {
             let existing: Option<ActionHash> = result.decode().unwrap_or(None);
             if existing.is_some() {
@@ -322,24 +325,25 @@ pub async fn run_migration(
             }
         }
 
-        // Create poll on v1.1
+        // Create poll on v1.2 — migrated polls default to Anonymous poll type.
         let create_input = CreatePollInput {
             title: poll.title.clone(),
             description: poll.description.clone(),
             options: poll.options.clone(),
             closes_at: poll.closes_at,
+            poll_type: "Anonymous".to_string(),
         };
         let create_payload = ExternIO::encode(create_input).map_err(|e| e.to_string())?;
-        let create_result = call_zome_on(v1_1, "polls", "create_poll", create_payload).await?;
+        let create_result = call_zome_on(v1_2, "polls", "create_poll", create_payload).await?;
         let new_hash: ActionHash = create_result.decode().map_err(|e| e.to_string())?;
 
-        // Register the mapping
+        // Register the mapping on v1.2
         let register_input = RegisterMigratedPollInput {
             old_action_hash: old_hash.clone(),
             new_action_hash: new_hash.clone(),
         };
         let register_payload = ExternIO::encode(register_input).map_err(|e| e.to_string())?;
-        call_zome_on(v1_1, "polls", "register_migrated_poll", register_payload).await?;
+        call_zome_on(v1_2, "polls", "register_migrated_poll", register_payload).await?;
 
         // Save progress
         {
@@ -390,9 +394,9 @@ pub async fn run_migration(
             }
         }
 
-        // Look up the new hash for this poll
+        // Look up the new hash for this poll on v1.2
         let mapping_payload = ExternIO::encode(old_poll_hash.clone()).map_err(|e| e.to_string())?;
-        let mapping_result = call_zome_on(v1_1, "polls", "get_migration_mapping", mapping_payload).await;
+        let mapping_result = call_zome_on(v1_2, "polls", "get_migration_mapping", mapping_payload).await;
 
         let new_poll_hash: Option<ActionHash> = match mapping_result {
             Ok(r) => r.decode().unwrap_or(None),
@@ -400,14 +404,16 @@ pub async fn run_migration(
         };
 
         if let Some(new_hash) = new_poll_hash {
-            // Cast vote on v1.1
+            // Cast vote on v1.2 — migrated votes are always anonymous
             let vote_input = CastVoteInput {
                 poll_action_hash: new_hash.clone(),
                 option_index: *option_index,
+                display_name: None,
+                profile_picture: None,
             };
             let vote_payload = ExternIO::encode(vote_input).map_err(|e| e.to_string())?;
 
-            match call_zome_on(v1_1, "polls", "cast_vote", vote_payload).await {
+            match call_zome_on(v1_2, "polls", "cast_vote", vote_payload).await {
                 Ok(_) => {
                     let mut ms = state.migration_state.lock().await;
                     ms.votes_migrated.push(MigratedVoteRecord {
@@ -504,9 +510,9 @@ pub fn spawn_migration_retry_loop(
                 break;
             }
 
-            // Try to migrate each pending vote
-            let v1_1_client = state.app_client.lock().await;
-            let v1_1 = match v1_1_client.as_ref() {
+            // Try to migrate each pending vote using v1.2 client
+            let v1_2_client = state.app_client.lock().await;
+            let v1_2 = match v1_2_client.as_ref() {
                 Some(c) => c,
                 None => continue,
             };
@@ -530,7 +536,7 @@ pub fn spawn_migration_retry_loop(
                 };
 
                 let mapping_result =
-                    call_zome_on(v1_1, "polls", "get_migration_mapping", mapping_payload).await;
+                    call_zome_on(v1_2, "polls", "get_migration_mapping", mapping_payload).await;
 
                 let new_hash: Option<ActionHash> = match mapping_result {
                     Ok(r) => r.decode().unwrap_or(None),
@@ -541,13 +547,15 @@ pub fn spawn_migration_retry_loop(
                     let vote_input = CastVoteInput {
                         poll_action_hash: new_hash.clone(),
                         option_index: vote.option_index,
+                        display_name: None,
+                        profile_picture: None,
                     };
                     let vote_payload = match ExternIO::encode(vote_input) {
                         Ok(p) => p,
                         Err(_) => continue,
                     };
 
-                    match call_zome_on(v1_1, "polls", "cast_vote", vote_payload).await {
+                    match call_zome_on(v1_2, "polls", "cast_vote", vote_payload).await {
                         Ok(_) => {
                             newly_migrated.push((
                                 vote.v1_0_poll_hash.clone(),

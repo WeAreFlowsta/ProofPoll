@@ -51,12 +51,21 @@ pub struct Poll {
     pub options: Vec<String>,
     pub created_at: i64,
     pub closes_at: Option<i64>,
+    /// "Anonymous" or "Public". None for v1.0/v1.1 polls (treated as Anonymous).
+    #[serde(default)]
+    pub poll_type: Option<String>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub struct Vote {
     pub poll_action_hash: ActionHash,
     pub option_index: u32,
+    /// Only present on v1.2 public poll votes.
+    #[serde(default)]
+    pub display_name: Option<String>,
+    /// Only present on v1.2 public poll votes.
+    #[serde(default)]
+    pub profile_picture: Option<String>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug)]
@@ -65,12 +74,21 @@ pub struct CreatePollInput {
     pub description: String,
     pub options: Vec<String>,
     pub closes_at: Option<i64>,
+    /// Only sent for v1.2. Omit for v1.0/v1.1 migration calls.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub poll_type: Option<String>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug)]
 pub struct CastVoteInput {
     pub poll_action_hash: ActionHash,
     pub option_index: u32,
+    /// Only sent for v1.2 public polls; None otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// Only sent for v1.2 public polls; None otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile_picture: Option<String>,
 }
 
 // ── Frontend response types ───────────────────────────────────────────
@@ -85,7 +103,7 @@ pub struct PollListItem {
     pub hash: String,
     pub poll: Poll,
     pub author: String,
-    /// Which DHT this poll lives on: "1.0" (pre-migration) or "1.1" (current).
+    /// Which DHT this poll lives on: "1.0", "1.1", or "1.2".
     /// The frontend passes this back when voting so the vote goes to the correct cell.
     pub dna_version: String,
 }
@@ -94,7 +112,7 @@ pub struct PollListItem {
 pub struct PollDetail {
     pub poll: Poll,
     pub author: String,
-    /// Which DHT this poll lives on: "1.0" or "1.1".
+    /// Which DHT this poll lives on: "1.0", "1.1", or "1.2".
     pub dna_version: String,
 }
 
@@ -102,6 +120,10 @@ pub struct PollDetail {
 pub struct VoteData {
     pub vote: VoteResponse,
     pub author: String,
+    /// Display name from v1.2 public poll votes. None for anonymous or pre-v1.2 votes.
+    pub display_name: Option<String>,
+    /// Profile picture URL from v1.2 public poll votes. None for anonymous or pre-v1.2 votes.
+    pub profile_picture: Option<String>,
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -117,13 +139,15 @@ pub struct AppState {
     pub conductor_handle: Mutex<Option<ConductorHandle>>,
     pub conductor_status: Mutex<ConductorStatus>,
     pub agent_pub_key: Mutex<Option<String>>,
-    /// Active (v1.1) app client for all reads and writes.
+    /// Active (v1.2) app client for all reads and writes.
     pub app_client: tokio::sync::Mutex<Option<AppWebsocket>>,
-    /// Legacy (v1.0) app client, only used for migration reads.
+    /// v1.1 app client for migration reads (v1.1 → v1.2).
+    pub app_client_v1_1: tokio::sync::Mutex<Option<AppWebsocket>>,
+    /// v1.0 app client for legacy reads.
     pub app_client_v1_0: tokio::sync::Mutex<Option<AppWebsocket>>,
     pub passphrase: Mutex<String>,
     pub lair_client: tokio::sync::Mutex<Option<LairClient>>,
-    /// Current migration state (persisted to disk in migration-state.json).
+    /// Current migration state (persisted to disk).
     pub migration_state: tokio::sync::Mutex<crate::migration::MigrationState>,
 }
 
@@ -146,6 +170,7 @@ impl AppState {
             conductor_status: Mutex::new(ConductorStatus::Stopped),
             agent_pub_key: Mutex::new(None),
             app_client: tokio::sync::Mutex::new(None),
+            app_client_v1_1: tokio::sync::Mutex::new(None),
             app_client_v1_0: tokio::sync::Mutex::new(None),
             passphrase: Mutex::new(passphrase),
             lair_client: tokio::sync::Mutex::new(None),
@@ -343,6 +368,7 @@ pub async fn create_poll(
     description: String,
     options: Vec<String>,
     closes_at: Option<i64>,
+    poll_type: Option<String>,
 ) -> Result<String, String> {
     // Require a linked Flowsta identity — frontend gating alone is bypassable.
     if load_identity_link(&state.data_dir).is_none() {
@@ -357,6 +383,7 @@ pub async fn create_poll(
         description,
         options,
         closes_at,
+        poll_type: Some(poll_type.unwrap_or_else(|| "Anonymous".to_string())),
     };
     let payload = ExternIO::encode(input).map_err(|e| e.to_string())?;
     let result = call_zome(client, POLLS_ZOME, "create_poll", payload).await?;
@@ -373,9 +400,27 @@ pub async fn get_poll(
     let hash = ActionHash::try_from(action_hash)
         .map_err(|e| format!("Invalid action hash: {:?}", e))?;
 
-    // Try v1.1 first — most polls will be here after users migrate.
+    // Try v1.2 first — most polls will be here for current users.
     {
         let client = state.app_client.lock().await;
+        if let Some(client) = client.as_ref() {
+            let payload = ExternIO::encode(hash.clone()).map_err(|e| e.to_string())?;
+            let result = call_zome(client, POLLS_ZOME, "get_poll", payload).await?;
+            let record: Option<Record> = result.decode().map_err(|e| e.to_string())?;
+            if let Some(record) = record {
+                let poll: Poll = decode_entry(&record)?;
+                return Ok(Some(PollDetail {
+                    poll,
+                    author: record.action().author().to_string(),
+                    dna_version: "1.2".to_string(),
+                }));
+            }
+        }
+    } // v1.2 lock released
+
+    // Fall back to v1.1 — poll author hasn't migrated to v1.2 yet.
+    {
+        let client = state.app_client_v1_1.lock().await;
         if let Some(client) = client.as_ref() {
             let payload = ExternIO::encode(hash.clone()).map_err(|e| e.to_string())?;
             let result = call_zome(client, POLLS_ZOME, "get_poll", payload).await?;
@@ -391,7 +436,7 @@ pub async fn get_poll(
         }
     } // v1.1 lock released
 
-    // Fall back to v1.0 — poll author hasn't migrated yet.
+    // Fall back to v1.0 — legacy poll.
     let client = state.app_client_v1_0.lock().await;
     if let Some(client) = client.as_ref() {
         let payload = ExternIO::encode(hash).map_err(|e| e.to_string())?;
@@ -414,9 +459,9 @@ pub async fn get_poll(
 pub async fn get_all_polls(
     state: tauri::State<'_, std::sync::Arc<AppState>>,
 ) -> Result<Vec<PollListItem>, String> {
-    // Phase 1: fetch v1.1 polls and the set of v1.0 hashes already migrated there.
-    // We release the v1.1 lock before acquiring v1.0 to avoid holding both simultaneously.
-    let (mut polls, migrated_v1_0_hashes) = {
+    // Phase 1: fetch v1.2 polls (active DHT) and collect migration mappings.
+    // Release each lock before acquiring the next to avoid deadlocks.
+    let (mut polls, migrated_v1_1_hashes, migrated_v1_0_hashes) = {
         let client = state.app_client.lock().await;
         let client = client.as_ref().ok_or("Conductor not ready")?;
 
@@ -431,14 +476,13 @@ pub async fn get_all_polls(
                     hash: record.action_address().to_string(),
                     poll,
                     author: record.action().author().to_string(),
-                    dna_version: "1.1".to_string(),
+                    dna_version: "1.2".to_string(),
                 });
             }
         }
 
-        // Fetch migration mappings so we know which v1.0 hashes are already on v1.1.
-        // If this fails (e.g. no mappings yet), we just show everything from both DHTs.
-        let migrated: std::collections::HashSet<String> = {
+        // Fetch migration mappings to know which v1.1 hashes are already on v1.2.
+        let migrated_v1_1: std::collections::HashSet<String> = {
             let payload = ExternIO::encode(()).map_err(|e| e.to_string())?;
             match call_zome(client, POLLS_ZOME, "get_all_migration_mappings", payload).await {
                 Ok(r) => {
@@ -452,17 +496,58 @@ pub async fn get_all_polls(
                     set
                 }
                 Err(e) => {
-                    log::warn!("Could not fetch migration mappings: {}", e);
+                    log::warn!("Could not fetch v1.2 migration mappings: {}", e);
                     std::collections::HashSet::new()
                 }
             }
         };
 
-        (items, migrated)
+        (items, migrated_v1_1, std::collections::HashSet::<String>::new())
+    }; // v1.2 lock released here
+
+    // Phase 2: fetch v1.1 polls, excluding those already migrated to v1.2.
+    // Also collect their migration mappings to de-dupe against v1.0.
+    let migrated_v1_0_hashes = {
+        let client = state.app_client_v1_1.lock().await;
+        let mut migrated_v1_0 = migrated_v1_0_hashes;
+        if let Some(client) = client.as_ref() {
+            let payload = ExternIO::encode(()).map_err(|e| e.to_string())?;
+            match call_zome(client, POLLS_ZOME, "get_all_polls", payload).await {
+                Ok(result) => {
+                    let records: Vec<Record> = result.decode().unwrap_or_default();
+                    for record in &records {
+                        let hash = record.action_address().to_string();
+                        if migrated_v1_1_hashes.contains(&hash) {
+                            continue; // already on v1.2
+                        }
+                        if let Ok(poll) = decode_entry::<Poll>(record) {
+                            polls.push(PollListItem {
+                                hash,
+                                poll,
+                                author: record.action().author().to_string(),
+                                dna_version: "1.1".to_string(),
+                            });
+                        }
+                    }
+                }
+                Err(e) => log::warn!("Could not fetch v1.1 polls (skipping): {}", e),
+            }
+
+            // Fetch v1.1 migration mappings to de-dupe v1.0 polls
+            let payload = ExternIO::encode(()).map_err(|e| e.to_string())?;
+            if let Ok(r) = call_zome(client, POLLS_ZOME, "get_all_migration_mappings", payload).await {
+                let mapping_records: Vec<Record> = r.decode().unwrap_or_default();
+                for rec in &mapping_records {
+                    if let Ok(entry) = decode_entry::<MigratedPollEntry>(rec) {
+                        migrated_v1_0.insert(entry.old_action_hash.to_string());
+                    }
+                }
+            }
+        }
+        migrated_v1_0
     }; // v1.1 lock released here
 
-    // Phase 2: fetch v1.0 polls and include only those not yet migrated to v1.1.
-    // During the migration period both DHTs are live — users on v1.0 are still active.
+    // Phase 3: fetch v1.0 polls, excluding those migrated to v1.1 or v1.2.
     {
         let client = state.app_client_v1_0.lock().await;
         if let Some(client) = client.as_ref() {
@@ -472,9 +557,8 @@ pub async fn get_all_polls(
                     let records: Vec<Record> = result.decode().unwrap_or_default();
                     for record in &records {
                         let hash = record.action_address().to_string();
-                        // Skip: this poll is already on v1.1 DHT (author migrated it)
                         if migrated_v1_0_hashes.contains(&hash) {
-                            continue;
+                            continue; // already on v1.1 or v1.2
                         }
                         if let Ok(poll) = decode_entry::<Poll>(record) {
                             polls.push(PollListItem {
@@ -516,9 +600,11 @@ pub async fn cast_vote(
     state: tauri::State<'_, std::sync::Arc<AppState>>,
     poll_action_hash: String,
     option_index: u32,
-    // "1.0" or "1.1" — routes the vote to the correct DHT cell.
+    // "1.0", "1.1", or "1.2" — routes the vote to the correct DHT cell.
     // Obtained from dna_version on PollListItem or PollDetail.
     dna_version: String,
+    // "Anonymous" or "Public" — only relevant for dna_version "1.2".
+    poll_type: Option<String>,
 ) -> Result<String, String> {
     // Require a linked Flowsta identity — frontend gating alone is bypassable.
     if load_identity_link(&state.data_dir).is_none() {
@@ -527,19 +613,50 @@ pub async fn cast_vote(
 
     let hash = ActionHash::try_from(poll_action_hash)
         .map_err(|e| format!("Invalid action hash: {:?}", e))?;
-    let input = CastVoteInput {
-        poll_action_hash: hash,
-        option_index,
-    };
-    let payload = ExternIO::encode(input).map_err(|e| e.to_string())?;
 
     let action_hash: ActionHash = if dna_version == "1.0" {
-        // Vote on a poll that hasn't been migrated yet — write to v1.0 DHT.
+        // Vote on a legacy poll — write to v1.0 DHT (no display_name field).
+        let input = CastVoteInput {
+            poll_action_hash: hash,
+            option_index,
+            display_name: None,
+            profile_picture: None,
+        };
+        let payload = ExternIO::encode(input).map_err(|e| e.to_string())?;
         let client = state.app_client_v1_0.lock().await;
         let client = client.as_ref().ok_or("v1.0 conductor not available")?;
         let result = call_zome(client, POLLS_ZOME, "cast_vote", payload).await?;
         result.decode().map_err(|e| e.to_string())?
+    } else if dna_version == "1.1" {
+        // Vote on a v1.1 poll — write to v1.1 DHT (no display_name field).
+        let input = CastVoteInput {
+            poll_action_hash: hash,
+            option_index,
+            display_name: None,
+            profile_picture: None,
+        };
+        let payload = ExternIO::encode(input).map_err(|e| e.to_string())?;
+        let client = state.app_client_v1_1.lock().await;
+        let client = client.as_ref().ok_or("v1.1 conductor not available")?;
+        let result = call_zome(client, POLLS_ZOME, "cast_vote", payload).await?;
+        result.decode().map_err(|e| e.to_string())?
     } else {
+        // v1.2 poll — include profile for public polls.
+        let (display_name, profile_picture) = if poll_type.as_deref() == Some("Public") {
+            let profile = load_cached_profile(&state.data_dir);
+            let dn = profile.as_ref().and_then(|p| p.display_name.clone());
+            let pp = profile.as_ref().and_then(|p| p.profile_picture.clone());
+            (dn, pp)
+        } else {
+            (None, None)
+        };
+        let input = CastVoteInput {
+            poll_action_hash: hash,
+            option_index,
+            display_name,
+            profile_picture,
+        };
+        let payload = ExternIO::encode(input).map_err(|e| e.to_string())?;
         let client = state.app_client.lock().await;
         let client = client.as_ref().ok_or("Conductor not ready")?;
         let result = call_zome(client, POLLS_ZOME, "cast_vote", payload).await?;
@@ -553,7 +670,7 @@ pub async fn cast_vote(
 pub async fn get_poll_votes(
     state: tauri::State<'_, std::sync::Arc<AppState>>,
     poll_action_hash: String,
-    // "1.0" or "1.1" — reads votes from the correct DHT cell.
+    // "1.0", "1.1", or "1.2" — reads votes from the correct DHT cell.
     // Obtained from dna_version on PollListItem or PollDetail.
     dna_version: String,
 ) -> Result<Vec<VoteData>, String> {
@@ -564,6 +681,11 @@ pub async fn get_poll_votes(
     let records: Vec<Record> = if dna_version == "1.0" {
         let client = state.app_client_v1_0.lock().await;
         let client = client.as_ref().ok_or("v1.0 conductor not available")?;
+        let result = call_zome(client, POLLS_ZOME, "get_poll_votes", payload).await?;
+        result.decode().map_err(|e| e.to_string())?
+    } else if dna_version == "1.1" {
+        let client = state.app_client_v1_1.lock().await;
+        let client = client.as_ref().ok_or("v1.1 conductor not available")?;
         let result = call_zome(client, POLLS_ZOME, "get_poll_votes", payload).await?;
         result.decode().map_err(|e| e.to_string())?
     } else {
@@ -582,6 +704,8 @@ pub async fn get_poll_votes(
                 option_index: vote.option_index,
             },
             author: record.action().author().to_string(),
+            display_name: vote.display_name,
+            profile_picture: vote.profile_picture,
         });
     }
     Ok(votes)
