@@ -202,6 +202,33 @@ ProofPoll uses [Flowsta](https://flowsta.com) for decentralized identity verific
 4. Keep the `agent_linking_integrity` and `agent_linking` zomes in your `dna.yaml`
 5. Update the `appName` parameter in `linkFlowstaIdentity()` calls to your app name (shown in the Vault approval dialog)
 
+### Scopes
+
+Scopes control which Flowsta profile fields your app can access. They are configured per-app at [dev.flowsta.com](https://dev.flowsta.com) and are shown to the user in the Flowsta Vault approval dialog when they first sign in. The Vault enforces them — it only exposes data fields the user actually approved, regardless of what the app requests at runtime.
+
+**ProofPoll requests these scopes:**
+
+| Scope | What it provides | Why ProofPoll uses it |
+|---|---|---|
+| `openid` | Basic identity (implicit) | Required by all apps — not shown to the user |
+| `did` | Decentralized identifier | Unique identity for sybil resistance |
+| `public_key` | Holochain agent pub key | Links the Vault identity to the DHT entry |
+| `holochain` | Holochain identity attestation | Required for `agent_linking` zome ceremony |
+| `display_name` | The user's display name | Shown in the app header and voter chips |
+| `username` | The user's @username | Displayed on the identity page |
+| `profile_picture` | Avatar URL | Shown in the app header and voter chips |
+
+The `display_name`, `username`, and `profile_picture` scopes are optional — ProofPoll requests them for a friendlier UI. If your fork has no use for profile data, remove them from your app's scope configuration at dev.flowsta.com.
+
+**Configuring scopes for your fork:**
+
+1. Register your app at [dev.flowsta.com](https://dev.flowsta.com) and create a new application
+2. In the app settings, select the scopes your app needs
+3. Copy your `client_id` into `.env` as `VITE_FLOWSTA_CLIENT_ID`
+4. The selected scopes are fetched fresh from the Flowsta API each time a user goes through the linking flow, so scope changes take effect immediately — no app rebuild needed
+
+**What the user sees:** The Vault approval dialog lists every scope (except `openid`) in plain language before the user approves. The Vault will only serve those fields on `GET /status` at `localhost:27777`.
+
 ### How Identity Works at Runtime
 
 The Flowsta Vault is a separate desktop app that manages the user's identity. Your app communicates with it via HTTP on `localhost:27777`. The key design principle: **the Vault only needs to be running for the initial identity linking ceremony**. After that, your app works independently.
