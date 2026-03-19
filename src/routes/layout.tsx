@@ -246,6 +246,18 @@ export default component$(() => {
           }
         }
 
+        // Fallback: during DNA migration the new DHT has no entry yet.
+        // Trust the local identity-link.json until the background re-creation
+        // completes and getLinkedAgents starts returning results.
+        if (!nowLinked) {
+          try {
+            const localLink = await getIdentityLink();
+            if (localLink) nowLinked = true;
+          } catch {
+            // No local file — genuinely not linked
+          }
+        }
+
         linked.value = nowLinked;
 
         // Start/stop auto-backup based on link status
