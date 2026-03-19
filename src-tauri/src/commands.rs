@@ -344,6 +344,11 @@ pub async fn create_poll(
     options: Vec<String>,
     closes_at: Option<i64>,
 ) -> Result<String, String> {
+    // Require a linked Flowsta identity — frontend gating alone is bypassable.
+    if load_identity_link(&state.data_dir).is_none() {
+        return Err("Sign in with Flowsta to create polls".to_string());
+    }
+
     let client = state.app_client.lock().await;
     let client = client.as_ref().ok_or("Conductor not ready")?;
 
@@ -515,6 +520,11 @@ pub async fn cast_vote(
     // Obtained from dna_version on PollListItem or PollDetail.
     dna_version: String,
 ) -> Result<String, String> {
+    // Require a linked Flowsta identity — frontend gating alone is bypassable.
+    if load_identity_link(&state.data_dir).is_none() {
+        return Err("Sign in with Flowsta to vote".to_string());
+    }
+
     let hash = ActionHash::try_from(poll_action_hash)
         .map_err(|e| format!("Invalid action hash: {:?}", e))?;
     let input = CastVoteInput {
@@ -998,6 +1008,11 @@ pub async fn flag_poll(
     poll_action_hash: String,
     reason: String,
 ) -> Result<String, String> {
+    // Require a linked Flowsta identity — frontend gating alone is bypassable.
+    if load_identity_link(&state.data_dir).is_none() {
+        return Err("Sign in with Flowsta to flag polls".to_string());
+    }
+
     let client = state.app_client.lock().await;
     let client = client.as_ref().ok_or("Conductor not ready")?;
 
