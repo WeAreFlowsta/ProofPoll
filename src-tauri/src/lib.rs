@@ -118,9 +118,8 @@ pub fn run() {
                             monitor_handle,
                         );
 
-                        // Run migration if needed (v1.2 → v1.3).
-                        // Also trigger if v1.2 is available but migration never completed
-                        // (e.g., first run installed v1.3 but migration failed/timed out).
+                        // Run migration if the previous version is installed and
+                        // migration hasn't completed yet.
                         let should_migrate = needs_migration || {
                             let ms = startup_state.migration_state.lock().await;
                             v1_2_available
@@ -129,7 +128,7 @@ pub fn run() {
                         if should_migrate {
                             let migration_state = startup_state.clone();
                             tauri::async_runtime::spawn(async move {
-                                log::info!("Starting v1.2 → v1.3 migration...");
+                                log::info!("Starting migration to {}...", dna::ACTIVE_APP_ID);
                                 match migration::run_migration(
                                     &migration_state,
                                     &migration_handle,

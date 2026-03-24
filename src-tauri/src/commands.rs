@@ -494,20 +494,17 @@ pub async fn get_poll(
 pub async fn get_all_polls(
     state: tauri::State<'_, std::sync::Arc<AppState>>,
 ) -> Result<Vec<PollListItem>, String> {
-    // Phase 1: fetch active (v1.3) polls and collect migration mappings.
-    // Release each lock before acquiring the next to avoid deadlocks.
-    let (mut polls, migrated_prev_hashes, migrated_v1_0_hashes) = {
+    // Step 1: Fetch polls from the active version (always available).
+    let mut polls = Vec::new();
+    {
         let client = state.app_client.lock().await;
         let client = client.as_ref().ok_or("Conductor not ready")?;
-
         let payload = ExternIO::encode(()).map_err(|e| e.to_string())?;
         let result = call_zome(client, POLLS_ZOME, "get_all_polls", payload).await?;
         let records: Vec<Record> = result.decode().map_err(|e| e.to_string())?;
-
-        let mut items = Vec::new();
         for record in &records {
             if let Ok(poll) = decode_entry::<Poll>(record) {
-                items.push(PollListItem {
+                polls.push(PollListItem {
                     hash: record.action_address().to_string(),
                     poll,
                     author: record.action().author().to_string(),
@@ -515,104 +512,56 @@ pub async fn get_all_polls(
                 });
             }
         }
+    }
 
-        // Fetch migration mappings to know which previous hashes are already on v1.3.
-        let migrated_prev: std::collections::HashSet<String> = {
-            let payload = ExternIO::encode(()).map_err(|e| e.to_string())?;
-            match call_zome(client, POLLS_ZOME, "get_all_migration_mappings", payload).await {
-                Ok(r) => {
-                    let mapping_records: Vec<Record> = r.decode().unwrap_or_default();
-                    let mut set = std::collections::HashSet::new();
-                    for rec in &mapping_records {
-                        if let Ok(entry) = decode_entry::<MigratedPollEntry>(rec) {
-                            set.insert(entry.old_action_hash.to_string());
-                        }
-                    }
-                    set
-                }
-                Err(e) => {
-                    log::warn!("Could not fetch v1.3 migration mappings: {}", e);
-                    std::collections::HashSet::new()
-                }
-            }
-        };
+    // Step 2: Collect ALL migrated hashes from every version that has
+    // migration mappings. A hash in this set means the poll was migrated
+    // to a newer version — don't show it from the older version.
+    let mut migrated_hashes = std::collections::HashSet::<String>::new();
 
-        (items, migrated_prev, std::collections::HashSet::<String>::new())
-    }; // v1.3 lock released here
-
-    // Phase 2: fetch v1.2 polls, excluding those already migrated to v1.3.
+    // Collect from active version (maps previous→active)
     {
-        let client = state.app_client_v1_2.lock().await;
+        let client = state.app_client.lock().await;
         if let Some(client) = client.as_ref() {
-            let payload = ExternIO::encode(()).map_err(|e| e.to_string())?;
-            match call_zome(client, POLLS_ZOME, "get_all_polls", payload).await {
-                Ok(result) => {
-                    let records: Vec<Record> = result.decode().unwrap_or_default();
-                    for record in &records {
-                        let hash = record.action_address().to_string();
-                        if migrated_prev_hashes.contains(&hash) {
-                            continue;
-                        }
-                        if let Ok(poll) = decode_entry::<Poll>(record) {
-                            polls.push(PollListItem {
-                                hash,
-                                poll,
-                                author: record.action().author().to_string(),
-                                dna_version: "1.2".to_string(),
-                            });
-                        }
-                    }
-                }
-                Err(e) => log::warn!("Could not fetch v1.2 polls (skipping): {}", e),
-            }
-        }
-    } // v1.2 lock released
-
-    // Phase 3: fetch v1.1 polls, excluding those already migrated.
-    // Also collect their migration mappings to de-dupe against v1.0.
-    let migrated_v1_0_hashes = {
-        let client = state.app_client_v1_1.lock().await;
-        let mut migrated_v1_0 = migrated_v1_0_hashes;
-        if let Some(client) = client.as_ref() {
-            let payload = ExternIO::encode(()).map_err(|e| e.to_string())?;
-            match call_zome(client, POLLS_ZOME, "get_all_polls", payload).await {
-                Ok(result) => {
-                    let records: Vec<Record> = result.decode().unwrap_or_default();
-                    for record in &records {
-                        let hash = record.action_address().to_string();
-                        if migrated_prev_hashes.contains(&hash) {
-                            continue; // already on v1.3
-                        }
-                        if let Ok(poll) = decode_entry::<Poll>(record) {
-                            polls.push(PollListItem {
-                                hash,
-                                poll,
-                                author: record.action().author().to_string(),
-                                dna_version: "1.1".to_string(),
-                            });
-                        }
-                    }
-                }
-                Err(e) => log::warn!("Could not fetch v1.1 polls (skipping): {}", e),
-            }
-
-            // Fetch v1.1 migration mappings to de-dupe v1.0 polls
             let payload = ExternIO::encode(()).map_err(|e| e.to_string())?;
             if let Ok(r) = call_zome(client, POLLS_ZOME, "get_all_migration_mappings", payload).await {
-                let mapping_records: Vec<Record> = r.decode().unwrap_or_default();
-                for rec in &mapping_records {
+                let records: Vec<Record> = r.decode().unwrap_or_default();
+                for rec in &records {
                     if let Ok(entry) = decode_entry::<MigratedPollEntry>(rec) {
-                        migrated_v1_0.insert(entry.old_action_hash.to_string());
+                        migrated_hashes.insert(entry.old_action_hash.to_string());
                     }
                 }
             }
         }
-        migrated_v1_0
-    }; // v1.1 lock released here
+    }
 
-    // Phase 3: fetch v1.0 polls, excluding those migrated to v1.1 or v1.2.
-    {
-        let client = state.app_client_v1_0.lock().await;
+    // Collect from each older version (chains the dedup across all hops)
+    for older_client_mutex in [&state.app_client_v1_2, &state.app_client_v1_1] {
+        let client = older_client_mutex.lock().await;
+        if let Some(client) = client.as_ref() {
+            let payload = ExternIO::encode(()).map_err(|e| e.to_string())?;
+            if let Ok(r) = call_zome(client, POLLS_ZOME, "get_all_migration_mappings", payload).await {
+                let records: Vec<Record> = r.decode().unwrap_or_default();
+                for rec in &records {
+                    if let Ok(entry) = decode_entry::<MigratedPollEntry>(rec) {
+                        migrated_hashes.insert(entry.old_action_hash.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    // Step 3: Fetch polls from older versions, skipping any that have been migrated.
+    // Each version is checked independently — order doesn't matter since we
+    // have the complete set of migrated hashes.
+    let older_versions: Vec<(&tokio::sync::Mutex<Option<AppWebsocket>>, &str)> = vec![
+        (&state.app_client_v1_2, "1.2"),
+        (&state.app_client_v1_1, "1.1"),
+        (&state.app_client_v1_0, "1.0"),
+    ];
+
+    for (client_mutex, version) in &older_versions {
+        let client = client_mutex.lock().await;
         if let Some(client) = client.as_ref() {
             let payload = ExternIO::encode(()).map_err(|e| e.to_string())?;
             match call_zome(client, POLLS_ZOME, "get_all_polls", payload).await {
@@ -620,23 +569,23 @@ pub async fn get_all_polls(
                     let records: Vec<Record> = result.decode().unwrap_or_default();
                     for record in &records {
                         let hash = record.action_address().to_string();
-                        if migrated_v1_0_hashes.contains(&hash) {
-                            continue; // already on v1.1 or v1.2
+                        if migrated_hashes.contains(&hash) {
+                            continue; // already migrated to a newer version
                         }
                         if let Ok(poll) = decode_entry::<Poll>(record) {
                             polls.push(PollListItem {
                                 hash,
                                 poll,
                                 author: record.action().author().to_string(),
-                                dna_version: "1.0".to_string(),
+                                dna_version: version.to_string(),
                             });
                         }
                     }
                 }
-                Err(e) => log::warn!("Could not fetch v1.0 polls (skipping): {}", e),
+                Err(e) => log::warn!("Could not fetch {} polls (skipping): {}", version, e),
             }
         }
-    } // v1.0 lock released here
+    }
 
     Ok(polls)
 }
