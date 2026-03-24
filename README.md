@@ -253,6 +253,20 @@ The Flowsta Vault is a separate desktop app that manages the user's identity. Yo
 - `src-tauri/src/commands.rs` — `get_identity_link`, `get_cached_profile`, `save_profile_cache` commands
 - `src/lib/holochain.ts` — TypeScript wrappers for all identity + profile functions
 
+### Automatic Backups
+
+ProofPoll backs up the user's authored data (polls and votes) to Flowsta Vault's encrypted local storage every 60 minutes. Users can view, export, and delete their backups from the Vault's **Your Data** page.
+
+- Backups work even when the Vault is locked (after first unlock in the session)
+- Each backup creates a new timestamped snapshot (up to 10 per app, oldest auto-rotated)
+- Only the current user's data is backed up (not the entire DHT)
+
+**Key files:**
+- `src/routes/layout.tsx` — `startAutoBackup()` call with `getData` function
+- `src-tauri/src/commands.rs` — `get_export_data` command (queries user's authored polls and votes)
+
+**For forks:** Update the `getData` function in `layout.tsx` and the `get_export_data` command to export your own entry types. The `appName` parameter controls how your app appears in the Vault's Your Data page.
+
 ### Constants reference
 
 | Value | Location | Purpose |
