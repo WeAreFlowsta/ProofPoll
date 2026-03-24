@@ -4,7 +4,7 @@ Verified polls on Holochain with Flowsta identity linking.
 
 ProofPoll is a desktop app (Tauri v2 + Qwik) that runs a local Holochain conductor. Polls and votes are stored on a decentralized DHT — no central server. Identity verification through Flowsta ensures one vote per real person.
 
-**This app is designed to be forked.** Change the entry types, swap polls for reviews or proposals, add your own features — the architecture (conductor management, identity linking, DNA migration) works for any Holochain app. See [Forking Guide](#forking-guide) below.
+**This app is designed to be forked.** Change the entry types, swap polls for reviews or proposals, add your own features — the architecture (conductor management, identity linking, DNA migration, encrypted private data) works for any Holochain app. See [Forking Guide](#forking-guide) below.
 
 ## Stack
 
@@ -12,6 +12,7 @@ ProofPoll is a desktop app (Tauri v2 + Qwik) that runs a local Holochain conduct
 - **Backend**: Tauri v2 (Rust), Holochain 0.6.0
 - **DNA**: Rust (hdi 0.7.0, hdk 0.6.0)
 - **Identity**: Flowsta agent linking via `flowsta-agent-linking` crate
+- **Encryption**: lair xsalsa20poly1305 via `crypto_box_xsalsa_by_sign_pub_key`
 
 ## Quick Start
 
@@ -23,7 +24,7 @@ ProofPoll is a desktop app (Tauri v2 + Qwik) that runs a local Holochain conduct
 # - Node.js 18+
 # - flowsta-agent-linking repo cloned at ../flowsta-agent-linking/
 
-# Build both DNA versions
+# Build all DNA versions
 bash build-all.sh
 
 # Install frontend dependencies
@@ -39,8 +40,59 @@ cargo tauri dev
 |---|---|---|
 | v1.0 | `proofpoll-network-v1.0` | Polls, votes, agent linking |
 | v1.1 | `proofpoll-network-v1.1` | + Community flagging, migration support |
+| v1.2 | `proofpoll-network-v1.2` | + Public/anonymous poll types, voter profiles |
+| v1.3 | `proofpoll-network-v1.3` | + Encrypted private data (vote rationale, draft polls) |
 
-Both versions are installed side-by-side during migration. All new reads and writes go to v1.1.
+All versions are installed side-by-side during migration. All new reads and writes go to v1.3.
+
+## Encrypted Private Data (v1.3)
+
+ProofPoll demonstrates how to store **private data on a public DHT**. Entries are encrypted client-side using lair's xsalsa20poly1305 crypto_box before being committed to the DHT. The data is replicated across peers for resilience, but only the author can decrypt it.
+
+### How it works
+
+1. **Encrypt** — Tauri encrypts plaintext using the agent's Ed25519 signing key (lair converts to x25519 internally)
+2. **Store** — the encrypted blob is committed as a public `EncryptedEntry` on the DHT
+3. **Gossip** — peers replicate the ciphertext like any other entry — they can see it exists but cannot read it
+4. **Decrypt** — only the author's lair-managed private key can decrypt
+
+### What peers see on the DHT
+
+```
+cipher: [187, 202, 33, 175, 31, 134, ...]  (opaque bytes)
+nonce:  [244, 219, 96, 104, 85, 138, ...]  (random, unique)
+hint:   "private"                            (no metadata about content type)
+```
+
+No information about whether the entry is a vote rationale, draft poll, or anything else.
+
+### Features
+
+- **Vote rationale** — after voting, add a private note about why you voted that way. Encrypted, only visible to you. Stored on the DHT linked to your vote via `VoteToRationale`.
+- **Draft polls** — save polls privately before publishing. Encrypted on the DHT, listed on the Drafts page. Publish when ready (creates a real poll, deletes the draft).
+
+### Key files
+
+| File | Purpose |
+|---|---|
+| `src-tauri/src/crypto.rs` | `encrypt_to_self` / `decrypt_from_self` via lair crypto_box |
+| `dna/v1.3/zomes/polls/integrity/src/lib.rs` | `EncryptedEntry` type, `VoteToRationale` + `AgentDrafts` link types |
+| `dna/v1.3/zomes/polls/coordinator/src/lib.rs` | `create_encrypted_entry`, `get_vote_rationale`, `get_my_drafts`, `delete_encrypted_entry` |
+| `src-tauri/src/commands.rs` | 6 Tauri commands: save/get rationale, save/get/publish/delete drafts |
+| `src/routes/poll/[id]/index.tsx` | Vote rationale UI (private note textarea) |
+| `src/routes/drafts/index.tsx` | Drafts page (list, publish, delete) |
+| `src/routes/create/index.tsx` | "Save as Draft" button |
+
+### For forking developers
+
+The encryption pattern is generic — `EncryptedEntry` stores any encrypted blob. To add your own private data types:
+
+1. Encrypt your data with `crate::crypto::encrypt_to_self()` in a Tauri command
+2. Call `create_encrypted_entry` with a link type that fits your use case
+3. Add a new link type in the integrity zome if needed (e.g. `ItemToPrivateNote`)
+4. Decrypt with `crate::crypto::decrypt_from_self()` when reading
+
+The `entry_type_hint` field is always `"private"` — no metadata is leaked. Routing is done by link type, not by the hint.
 
 ## Community Flagging (v1.1)
 
@@ -49,7 +101,7 @@ Polls can be flagged by signed-in users for: Spam, Misleading, Off Topic, or Ina
 - **Censorship-resistant**: Flags are a UI-layer opinion. The poll and all votes remain on the DHT forever. No data is deleted.
 - **Sybil-resistant**: One flag per Flowsta identity per poll (same deduplication as votes).
 - **Configurable threshold**: Polls with >= `FLAG_HIDE_THRESHOLD` flags (default 3) are hidden from the default view. Users can toggle "Show flagged" to see them.
-- **Forking developers**: Change `FLAG_HIDE_THRESHOLD` in `dna/v1.1/zomes/polls/coordinator/src/lib.rs` to suit your community size.
+- **Forking developers**: Change `FLAG_HIDE_THRESHOLD` in the coordinator zome to suit your community size.
 
 ---
 
@@ -63,35 +115,25 @@ These identifiers **must** change or your app will conflict with ProofPoll:
 
 | What | Where | Current Value | Change To |
 |---|---|---|---|
-| Bundle ID | `src-tauri/tauri.conf.json` line 5 | `com.proofpoll.app` | `com.yourcompany.yourapp` |
-| Product name | `src-tauri/tauri.conf.json` line 3 | `ProofPoll` | `YourApp` |
-| Window title | `src-tauri/tauri.conf.json` line 15 | `ProofPoll` | `YourApp` |
-| Rust crate name | `src-tauri/Cargo.toml` line 2 | `proofpoll` | `yourapp` |
-| Rust description | `src-tauri/Cargo.toml` line 4 | `ProofPoll - ...` | Your description |
-| npm package name | `package.json` line 2 | `proofpoll` | `yourapp` |
-| DNA name (v1.0) | `dna/workdir/dna.yaml` line 3 | `proofpoll_v1_0` | `yourapp_v1_0` |
-| DNA name (v1.1) | `dna/v1.1/workdir/dna.yaml` line 3 | `proofpoll_v1_1` | `yourapp_v1_1` |
-| Network seed (v1.0) | `dna/workdir/dna.yaml` line 5 | `proofpoll-network-v1.0` | `yourapp-network-v1.0` |
-| Network seed (v1.1) | `dna/v1.1/workdir/dna.yaml` line 5 | `proofpoll-network-v1.1` | `yourapp-network-v1.1` |
-| hApp name (v1.0) | `dna/workdir/happ.yaml` line 3 | `proofpoll_v1_0_happ` | `yourapp_v1_0_happ` |
-| hApp name (v1.1) | `dna/v1.1/workdir/happ.yaml` line 3 | `yourapp_v1_1_happ` | `yourapp_v1_1_happ` |
-| hApp role (v1.0) | `dna/workdir/happ.yaml` lines 6-7 | `proofpoll` | `yourapp` |
-| hApp role (v1.1) | `dna/v1.1/workdir/happ.yaml` lines 6-7 | `proofpoll` | `yourapp` |
+| Bundle ID | `src-tauri/tauri.conf.json` | `com.proofpoll.app` | `com.yourcompany.yourapp` |
+| Product name | `src-tauri/tauri.conf.json` | `ProofPoll` | `YourApp` |
+| Rust crate name | `src-tauri/Cargo.toml` | `proofpoll` | `yourapp` |
+| npm package name | `package.json` | `proofpoll` | `yourapp` |
+| DNA names | `dna/*/workdir/dna.yaml` | `proofpoll_v1_*` | `yourapp_v1_*` |
+| Network seeds | `dna/*/workdir/dna.yaml` | `proofpoll-network-v1.*` | `yourapp-network-v1.*` |
+| hApp names | `dna/*/workdir/happ.yaml` | `proofpoll_v1_*_happ` | `yourapp_v1_*_happ` |
+| hApp role | `dna/*/workdir/happ.yaml` | `proofpoll` | `yourapp` |
 
-Then update these Rust constants to match:
+Then update these Rust constants:
 
-| File | Constant | Current | Change To |
-|---|---|---|---|
-| `src-tauri/src/dna.rs` | `APP_ID_V1_0` | `"proofpoll_v1_0"` | `"yourapp_v1_0"` |
-| `src-tauri/src/dna.rs` | `APP_ID_V1_1` | `"proofpoll_v1_1"` | `"yourapp_v1_1"` |
-| `src-tauri/src/dna.rs` | `HAPP_FILE_V1_0` | `"proofpoll_v1_0_happ.happ"` | `"yourapp_v1_0_happ.happ"` |
-| `src-tauri/src/dna.rs` | `HAPP_FILE_V1_1` | `"proofpoll_v1_1_happ.happ"` | `"yourapp_v1_1_happ.happ"` |
-| `src-tauri/src/commands.rs` | `ROLE_NAME` | `"proofpoll"` | `"yourapp"` |
-| `src-tauri/src/migration.rs` | `RoleName::from(...)` | `"proofpoll"` | `"yourapp"` |
+| File | What to change |
+|---|---|
+| `src-tauri/src/dna.rs` | `APP_ID_V1_*` and `HAPP_FILE_V1_*` constants |
+| `src-tauri/src/commands.rs` | `ROLE_NAME` constant |
+| `src-tauri/src/migration.rs` | `ROLE_NAME` constant |
+| `src-tauri/src/dna.rs` | `"proofpoll"` origin string in WebSocket connects |
 
-Also update the `"proofpoll"` string passed to `AdminWebsocket::connect(...)` and `AppWebsocket::connect(...)` calls throughout `dna.rs` (appears 6 times as the origin parameter).
-
-Update build scripts (`dna/build.sh`, `dna/v1.1/build.sh`, `build-all.sh`) — change hApp filenames in the `cp` commands and echo messages.
+Update build scripts (`dna/*/build.sh`, `build-all.sh`) — change hApp filenames.
 
 **Critical**: The `network_seed` in `dna.yaml` determines which DHT your app joins. Two apps with the same network seed share a DHT. Always use a unique seed.
 
@@ -99,7 +141,7 @@ Update build scripts (`dna/build.sh`, `dna/v1.1/build.sh`, `build-all.sh`) — c
 
 ProofPoll's data model is polls and votes. Replace these with your own.
 
-**Integrity zome** (`dna/v1.1/zomes/polls/integrity/src/lib.rs`):
+**Integrity zome** (latest version, currently `dna/v1.3/zomes/polls/integrity/src/lib.rs`):
 
 ```rust
 // REPLACE these with your entry types:
@@ -107,40 +149,18 @@ pub struct Poll { ... }     // → pub struct Review { ... }
 pub struct Vote { ... }     // → pub struct Rating { ... }
 pub struct Flag { ... }     // Keep or adapt for your content type
 
-// RENAME these:
-pub enum EntryTypes {
-    Poll(Poll),             // → Review(Review)
-    Vote(Vote),             // → Rating(Rating)
-    Flag(Flag),             // Keep
-    MigratedPoll(MigratedPoll), // → MigratedReview(MigratedReview)
-}
-
-pub enum LinkTypes {
-    AllPolls,               // → AllReviews
-    PollToVotes,            // → ReviewToRatings
-    PollToFlags,            // → ReviewToFlags
-    MigrationIndex,         // Keep as-is
-}
-
-// UPDATE the anchor function:
-pub fn all_polls_anchor()   // → pub fn all_reviews_anchor()
+// KEEP these as-is (infrastructure):
+pub struct MigratedPoll { ... }   // Rename "Poll" to your type but keep the structure
+pub struct EncryptedEntry { ... } // Generic — works for any private data
 ```
 
-**Coordinator zome** (`dna/v1.1/zomes/polls/coordinator/src/lib.rs`):
-
-Replace the zome functions to match your data model. The patterns are reusable:
+**Coordinator zome** — replace the zome functions. The patterns are reusable:
 - `create_poll` → `create_review` (same anchor + link pattern)
-- `cast_vote` → `submit_rating` (same double-action prevention pattern)
+- `cast_vote` → `submit_rating` (same one-per-agent enforcement pattern)
 - `get_all_polls` → `get_all_reviews` (same anchor query pattern)
 - `flag_poll` → `flag_review` (same pattern, just rename)
 
-Keep the migration functions (`register_migrated_poll`, `get_migration_mapping`, `get_all_migration_mappings`) — rename "poll" to your content type but the logic is identical.
-
-**Rename the zome package**: If you rename from "polls" to something else (e.g., "reviews"), update:
-- Directory names: `dna/v1.1/zomes/polls/` → `dna/v1.1/zomes/reviews/`
-- `dna/v1.1/Cargo.toml` workspace members
-- `dna/v1.1/workdir/dna.yaml` zome names and paths
-- `src-tauri/src/commands.rs`: `POLLS_ZOME` constant
+Keep the migration functions and encrypted entry functions — they're generic.
 
 ### Step 3: Update Tauri Commands
 
@@ -150,23 +170,18 @@ Keep the migration functions (`register_migrated_poll`, `get_migration_mapping`,
 1. Define a response struct (serializable)
 2. `#[tauri::command]` function that locks the AppWebsocket, encodes payload, calls `call_zome`, decodes result
 
-**Keep** these as-is (they're infrastructure):
-- `AppState` struct and `new()`
-- `call_zome()` helper (line 134)
-- `try_reenable_app()` (line 182)
-- `friendly_error()` (line 202)
-- `decode_entry()` (line 131)
-- `parse_agent_pub_key_string()` (line 225)
-- `get_app_status` command
-- `get_export_data` command (adapt the data it exports)
+**Keep** these as-is (infrastructure):
+- `AppState`, `call_zome()`, `try_reenable_app()`, `friendly_error()`, `decode_entry()`
+- `get_app_status`, `get_export_data` (adapt the data it exports)
 - Identity link commands (`commit_identity_link`, `get_identity_link`, etc.)
+- Encrypted entry commands (`save_vote_rationale`, `save_draft_poll`, etc. — adapt names)
 - Migration status commands (`get_migration_status`, `abandon_pending_votes`)
 
 **Register new commands** in `src-tauri/src/lib.rs` → `invoke_handler(tauri::generate_handler![...])`.
 
 ### Step 4: Update Frontend
 
-**`src/lib/holochain.ts`** — Replace poll/vote/flag TypeScript types and `invoke()` wrappers with your own. Keep the identity and migration functions.
+**`src/lib/holochain.ts`** — Replace poll/vote/flag TypeScript types and `invoke()` wrappers with your own. Keep the identity, migration, and encrypted entry functions.
 
 **`src/routes/`** — Replace the pages:
 - `index.tsx` → Your content list page
@@ -174,19 +189,19 @@ Keep the migration functions (`register_migrated_poll`, `get_migration_mapping`,
 - `poll/[id]/index.tsx` → Your content detail page
 
 **Keep as-is:**
-- `layout.tsx` — Conductor startup, header, migration banner (just rename "ProofPoll" to your app name in the UI text)
-- `identity/index.tsx` — Flowsta identity linking page (if using Flowsta)
+- `layout.tsx` — Conductor startup, header, migration banner (just rename "ProofPoll")
+- `identity/index.tsx` — Flowsta identity linking page
+- `drafts/index.tsx` — Encrypted drafts page (adapt for your draft type)
 - `src/lib/context.ts` — Qwik signals for linked state
 - `src/lib/sanitize.ts` — XSS prevention
 
 ### Step 5: Update Migration
 
-`src-tauri/src/migration.rs` exports polls and votes from v1.0 and re-creates them on v1.1. Replace the entry types and zome function names with your own. The orchestration pattern (export → create → register mapping → cast → retry loop) is identical for any data model.
+`src-tauri/src/migration.rs` exports data from the previous version and re-creates it on the current version. The source client is clearly marked — change one line to point to your previous version's client field.
 
-The key structs to replace:
-- `Poll`, `Vote` (lines ~100-120) → Your entry types
-- `CreatePollInput`, `CastVoteInput` (lines ~130-145) → Your input types
-- Zome function names in `call_zome_on()` calls: `"get_all_polls"`, `"create_poll"`, `"cast_vote"`, etc.
+Replace the entry types and zome function names with your own. The orchestration pattern (export → create → register mapping → cast → retry loop) is identical for any data model.
+
+The state file name is auto-generated from `ACTIVE_APP_ID` — no hardcoded strings to update.
 
 ---
 
@@ -291,65 +306,78 @@ Holochain DNA versions with different integrity zomes (new entry types, changed 
 
 ### The Solution: Anchor-Based Hash Mapping
 
-When a user upgrades from v1.0 to v1.1:
+When a user upgrades to a new version:
 
-1. **Install v1.1** alongside v1.0 (both stay installed)
-2. **Export** user's authored polls and votes from v1.0
-3. **Re-create** polls on v1.1 DHT (they get new action hashes)
+1. **Install new version** alongside the old (both stay installed)
+2. **Export** user's authored content and actions from the old DHT
+3. **Re-create** content on the new DHT (entries get new action hashes)
 4. **Publish migration mappings** — a `MigratedPoll` entry linked from a deterministic migration anchor maps old hashes to new hashes
-5. **Re-cast votes** where the target poll's mapping exists on v1.1
-6. **Queue pending votes** for polls whose authors haven't upgraded yet
-7. **Background retry** — every 60 seconds, check if new mappings appeared and re-cast pending votes
+5. **Re-cast actions** (votes, etc.) where the target content's mapping exists
+6. **Queue pending actions** for content whose authors haven't upgraded yet
+7. **Background retry** — every 60 seconds, check if new mappings appeared and retry
 
-Other users discover the mappings via `get_links` on the migration anchor. As more users upgrade, the v1.1 DHT fills up via gossip.
+Other users discover the mappings via `get_links` on the migration anchor. As more users upgrade, the new DHT fills up via gossip.
 
 ### Three Tiers of Holochain App Upgrades
 
 | Tier | When | Migration Needed? | Example |
 |---|---|---|---|
 | **1. Coordinator-only** | Bug fixes, new queries, new link traversals | No — use `admin.updateCoordinators()` | Fix a query bug |
-| **2. Additive integrity** | New entry types, new link types | Yes — new DNA hash, new DHT | Adding Flag entry type (v1.1) |
+| **2. Additive integrity** | New entry types, new link types | Yes — new DNA hash, new DHT | Adding EncryptedEntry (v1.3) |
 | **3. Breaking integrity** | Changed validation, restructured entries | Yes — with data transformation | Restructuring Poll fields |
 
-**~70% of real-world upgrades are Tier 1** (no migration needed). Tier 2 is what v1.1 demonstrates. Tier 3 follows the same pattern but adds a transformation step.
+**~70% of real-world upgrades are Tier 1** (no migration needed). Tier 2 is what ProofPoll demonstrates across v1.0→v1.3. Tier 3 follows the same pattern but adds a transformation step.
+
+### Votes Survive Migration
+
+During migration, polls from older versions remain visible and functional:
+
+- `get_all_polls` queries ALL installed versions and deduplicates using migration mappings
+- Each poll carries a `dna_version` field so votes and flags are routed to the correct cell
+- If a poll author hasn't migrated, their poll stays on the old DHT — votes cast on it go to the old cell
+- Once the author migrates, the old copy is hidden and the new copy takes over
+
+No votes are ever lost. Users on different versions can still interact with content on the version where it lives.
 
 ### Migration Key Files
 
 | File | Purpose |
 |---|---|
-| `src-tauri/src/migration.rs` | Migration orchestration (export, import, retry loop) |
-| `src-tauri/src/dna.rs` | Multi-version install, dual AppWebsocket setup |
-| `dna/v1.1/zomes/polls/coordinator/src/lib.rs` | `register_migrated_poll`, `get_migration_mapping` zome functions |
-| `dna/v1.1/zomes/polls/integrity/src/lib.rs` | `MigratedPoll` entry type, `MigrationIndex` link type |
+| `src-tauri/src/migration.rs` | Migration orchestration (export, import, retry loop). Source client clearly marked for forkers |
+| `src-tauri/src/dna.rs` | Multi-version install, AppWebsocket setup per version |
+| `src-tauri/src/commands.rs` | `get_all_polls` multi-version merge with chained dedup |
+| `dna/v1.3/zomes/polls/coordinator/src/lib.rs` | `register_migrated_poll`, `get_migration_mapping` zome functions |
+| `dna/v1.3/zomes/polls/integrity/src/lib.rs` | `MigratedPoll` entry type, `MigrationIndex` link type |
 
-### Adding Your Own v1.2
+### Adding Your Own Version
 
-1. **Create `dna/v1.2/`** — copy `dna/v1.1/`, update `network_seed` to `yourapp-network-v1.2` in `dna.yaml`
+1. **Create `dna/vX.Y/`** — copy the latest version, update `network_seed` in `dna.yaml`
 2. **Add your integrity changes** — new entry types, link types, validation
-3. **Update coordinator** — keep all migration functions, add your new zome functions
-4. **Update `src-tauri/src/dna.rs`** — add `APP_ID_V1_2`, `HAPP_FILE_V1_2`, update `ACTIVE_APP_ID`
-5. **Copy `migration.rs`** — update client references (v1_0 → v1_1 for reads, v1_1 → v1_2 for writes)
-6. **Update `build-all.sh`** — add the v1.2 build step
-7. **Test** — create data on v1.1, upgrade, verify migration completes
+3. **Update coordinator** — keep all migration + encrypted entry functions, add your new zome functions
+4. **Update `src-tauri/src/dna.rs`** — add `APP_ID_VX_Y`, `HAPP_FILE_VX_Y`, update `ACTIVE_APP_ID`, add `app_client_vX_Y` to `AppState`
+5. **Update `src-tauri/src/migration.rs`** — change the source client field (one line, clearly marked with `// FORKING`)
+6. **Update `src-tauri/src/commands.rs`** — add your previous version to the `older_versions` array in `get_all_polls`
+7. **Update `build-all.sh`** — add the new build step
+8. **Test** — create data on the old version, upgrade, verify migration completes and all content is visible
+
+The migration state file is auto-generated from `ACTIVE_APP_ID` — no hardcoded strings to update.
 
 ### Staying Visible During Migration
 
-During a migration both DNA cells are active simultaneously — v1.0 continues gossiping and v1.1 is being populated. To keep all content visible during this window, `get_all_polls` in `commands.rs` queries both cells and deduplicates:
+During a migration all DNA cells are active simultaneously. `get_all_polls` queries every installed version and deduplicates:
 
-1. **Query v1.1** — fetch all polls and all migration mappings (the old→new hash index)
-2. **Query v1.0** — fetch all polls, then exclude any whose hash appears in the migration mappings (they're already on v1.1)
-3. **Return merged list** — each item carries a `dna_version` field so votes and flag fetches are routed to the correct cell
+1. **Collect migration mappings** from ALL versions into one set (chains across multi-hop migrations)
+2. **Query each version** — skip any poll whose hash appears in the migrated set
+3. **Return merged list** — each item carries `dna_version` so votes and flags are routed to the correct cell
 
-This means polls are never missing from the UI, even if only one user on the network has upgraded so far. Once a poll's author migrates, the v1.0 copy is automatically hidden and the v1.1 copy takes over.
-
-The same pattern applies to any data type you migrate — the migration mapping index is the key. Deduplication prevents double-showing the same content during the transition window.
+This means content is never missing from the UI, even if only one user on the network has upgraded so far.
 
 ### Migration Edge Cases
 
 - **First user on new version**: Their own content migrates fine. References to others' content go to pending (retried every 60s).
-- **Content author never upgrades**: References stay pending. Users can "abandon pending votes" to clean up.
-- **Crash during migration**: State file (`migration-state.json`) is written after each entry. Restart picks up where it left off.
-- **Fresh install (no previous version)**: Installs latest directly. No migration needed, no banner shown.
+- **Content author never upgrades**: Content stays on the old DHT and remains visible. Actions (votes) cast on it go to the old cell. Users can "abandon pending votes" to clean up.
+- **Crash during migration**: State file is written after each entry. Restart picks up where it left off.
+- **Fresh install (no previous version)**: Installs latest directly. No migration needed.
 
 ---
 
@@ -361,8 +389,9 @@ These files work for **any** Holochain + Tauri app with zero or minimal changes:
 |---|---|---|
 | `src-tauri/src/conductor.rs` | Starts lair-keystore + holochain conductor, waits for readiness, health monitoring | Change ports if running multiple apps |
 | `src-tauri/src/lair.rs` | Lair keystore init, socket management, passphrase | None |
-| `src-tauri/src/dna.rs` | Multi-version DNA install, dual AppWebsocket, signing credentials. Handles `CellDisabled` on startup by re-enabling the app and retrying credential authorization (Holochain can leave cells disabled after a conductor restart even when the app shows as Running) | Change app IDs and hApp filenames |
-| `src-tauri/src/migration.rs` | Migration state machine, export/import/retry pattern | Change entry types and zome names |
+| `src-tauri/src/crypto.rs` | Encrypt/decrypt via lair's xsalsa20poly1305 crypto_box | None |
+| `src-tauri/src/dna.rs` | Multi-version DNA install, AppWebsocket per version, signing credentials with CellDisabled recovery | Change app IDs and hApp filenames |
+| `src-tauri/src/migration.rs` | Migration state machine, export/import/retry pattern. Auto-versioned state file | Change entry types, zome names, and source client field |
 | `src/lib/context.ts` | Qwik signals for linked/display state | None |
 | `src/lib/sanitize.ts` | XSS prevention for user content | None |
 | `src/routes/identity/` | Flowsta identity linking UI | None (if using Flowsta) |
@@ -400,17 +429,22 @@ ProofPoll/
 │   │   └── coordinator/src/    #   Zome functions (CRUD)
 │   ├── workdir/                # v1.0 manifests (dna.yaml, happ.yaml)
 │   ├── build.sh                # v1.0 build script
-│   └── v1.1/                   # v1.1 DNA (+ flags, migration)
-│       ├── zomes/polls/        #   Extended zomes
-│       ├── workdir/            #   v1.1 manifests
-│       └── build.sh            #   v1.1 build script
+│   ├── v1.1/                   # v1.1 DNA (+ flags, migration)
+│   ├── v1.2/                   # v1.2 DNA (+ public/anonymous polls)
+│   └── v1.3/                   # v1.3 DNA (+ encrypted private data)
+│       ├── zomes/polls/
+│       │   ├── integrity/src/  #   EncryptedEntry, VoteToRationale, AgentDrafts
+│       │   └── coordinator/src/#   Encrypted entry CRUD + existing functions
+│       ├── workdir/            #   v1.3 manifests
+│       └── build.sh            #   v1.3 build script
 ├── src-tauri/                  # Tauri v2 Rust backend
 │   ├── Cargo.toml              #   Rust dependencies
 │   ├── tauri.conf.json         #   App config (name, bundle ID, ports)
-│   ├── resources/              #   Built .happ bundles (v1.0 + v1.1)
+│   ├── resources/              #   Built .happ bundles (v1.0 through v1.3)
 │   └── src/
-│       ├── commands.rs         #   Tauri commands (your app + flags + migration)
+│       ├── commands.rs         #   Tauri commands (app + flags + encrypted entries + migration)
 │       ├── conductor.rs        #   Conductor lifecycle management
+│       ├── crypto.rs           #   Lair-based encryption (xsalsa20poly1305)
 │       ├── dna.rs              #   Multi-version DNA install + WebSocket setup
 │       ├── migration.rs        #   DNA migration orchestration
 │       ├── lair.rs             #   Lair keystore management
@@ -423,8 +457,9 @@ ProofPoll/
 │   └── routes/
 │       ├── layout.tsx          #   Header, conductor status, migration banner
 │       ├── index.tsx           #   Content list (+ flag filtering)
-│       ├── poll/[id]/          #   Content detail (+ flag button)
-│       ├── create/             #   Content creation form
+│       ├── poll/[id]/          #   Content detail (+ flag + vote rationale)
+│       ├── create/             #   Content creation form (+ save as draft)
+│       ├── drafts/             #   Encrypted draft polls page
 │       └── identity/           #   Flowsta identity linking
 ├── .env                        # VITE_FLOWSTA_CLIENT_ID
 ├── build-all.sh                # Build all DNA versions
