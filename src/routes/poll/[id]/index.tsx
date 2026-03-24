@@ -10,6 +10,8 @@ import {
   getPollFlags,
   flagPoll,
   removeFlag,
+  saveVoteRationale,
+  getVoteRationale,
   type Poll,
   type VoteData,
   type FlagData,
@@ -22,7 +24,7 @@ export default component$(() => {
   const nav = useNavigate();
   const poll = useSignal<Poll | null>(null);
   const pollAuthor = useSignal<string | null>(null);
-  const pollDnaVersion = useSignal<"1.0" | "1.1" | "1.2">("1.2");
+  const pollDnaVersion = useSignal<"1.0" | "1.1" | "1.2" | "1.3">("1.3");
   const votes = useSignal<VoteData[]>([]);
   const myAgent = useSignal<string | null>(null);
   const selectedOption = useSignal<number | null>(null);
@@ -39,6 +41,12 @@ export default component$(() => {
   const flagging = useSignal(false);
   const flagError = useSignal<string | null>(null);
   const showFlagPicker = useSignal(false);
+  // Vote rationale (encrypted private note)
+  const rationale = useSignal<string | null>(null);
+  const rationaleInput = useSignal("");
+  const savingRationale = useSignal(false);
+  const rationaleError = useSignal<string | null>(null);
+  const myVoteHash = useSignal<string | null>(null);
 
   const pollHash = loc.params.id;
 
@@ -74,12 +82,19 @@ export default component$(() => {
       flags.value = flagsResult;
 
       if (myAgent.value) {
-        hasVoted.value = votesResult.some(
-          (v) => v.author === myAgent.value,
-        );
+        const myVote = votesResult.find((v) => v.author === myAgent.value);
+        hasVoted.value = !!myVote;
+        myVoteHash.value = myVote?.vote.hash ?? null;
         myFlag.value = flagsResult.find(
           (f) => f.author === myAgent.value,
         ) ?? null;
+
+        // Load existing rationale if we voted
+        if (myVote?.vote.hash) {
+          getVoteRationale(myVote.vote.hash)
+            .then((r) => { rationale.value = r; })
+            .catch(() => {});
+        }
       }
 
 
@@ -159,6 +174,21 @@ export default component$(() => {
       flagError.value = e.message || "Failed to remove flag";
     } finally {
       flagging.value = false;
+    }
+  });
+
+  const submitRationale = $(async () => {
+    if (!myVoteHash.value || !rationaleInput.value.trim()) return;
+    savingRationale.value = true;
+    rationaleError.value = null;
+    try {
+      await saveVoteRationale(myVoteHash.value, rationaleInput.value.trim());
+      rationale.value = rationaleInput.value.trim();
+      rationaleInput.value = "";
+    } catch (e: any) {
+      rationaleError.value = e.message || "Failed to save note";
+    } finally {
+      savingRationale.value = false;
     }
   });
 
@@ -243,7 +273,7 @@ export default component$(() => {
         </div>
 
         {/* Flag / unflag — only on v1.1 and v1.2 polls (v1.0 has no Flag entry type) */}
-        {linked.value && myAgent.value && pollAuthor.value !== myAgent.value && (pollDnaVersion.value === "1.1" || pollDnaVersion.value === "1.2") && (
+        {linked.value && myAgent.value && pollAuthor.value !== myAgent.value && (pollDnaVersion.value !== "1.0") && (
           <div class="mt-3">
             {flagError.value && (
               <div class="text-red-400 text-xs mb-2">{flagError.value}</div>
@@ -406,8 +436,47 @@ export default component$(() => {
       )}
 
       {hasVoted.value && (
-        <div class="bg-green-900/20 border border-green-800 text-green-300 px-4 py-2 rounded-lg mb-6 text-sm">
-          You have voted on this poll.
+        <div class="mb-6">
+          <div class="bg-green-900/20 border border-green-800 text-green-300 px-4 py-2 rounded-lg text-sm mb-3">
+            You have voted on this poll.
+          </div>
+
+          {/* Private vote rationale */}
+          {myVoteHash.value && (
+            <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
+              <div class="flex items-center gap-2 mb-2">
+                <svg class="w-4 h-4 text-amber-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={2}>
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                </svg>
+                <span class="text-sm font-medium text-gray-300">Private note</span>
+                <span class="text-xs text-gray-500">Only you can see this</span>
+              </div>
+
+              {rationale.value ? (
+                <p class="text-sm text-gray-300 bg-gray-800 rounded p-3">{rationale.value}</p>
+              ) : (
+                <>
+                  <textarea
+                    value={rationaleInput.value}
+                    onInput$={(e) => (rationaleInput.value = (e.target as HTMLTextAreaElement).value)}
+                    placeholder="Why did you vote this way? (encrypted, only visible to you)"
+                    class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-indigo-500 h-20 resize-none mb-2"
+                  />
+                  {rationaleError.value && (
+                    <div class="text-red-400 text-xs mb-2">{rationaleError.value}</div>
+                  )}
+                  <button
+                    type="button"
+                    onClick$={submitRationale}
+                    disabled={savingRationale.value || !rationaleInput.value.trim()}
+                    class="bg-gray-700 hover:bg-gray-600 disabled:opacity-50 text-gray-200 font-medium px-3 py-1.5 rounded-full text-xs"
+                  >
+                    {savingRationale.value ? "Encrypting..." : "Save note"}
+                  </button>
+                </>
+              )}
+            </div>
+          )}
         </div>
       )}
 

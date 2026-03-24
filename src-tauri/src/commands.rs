@@ -141,6 +141,7 @@ pub struct VoteData {
 
 #[derive(serde::Serialize, Clone)]
 pub struct VoteResponse {
+    pub hash: String,
     pub poll_action_hash: String,
     pub option_index: u32,
 }
@@ -152,9 +153,11 @@ pub struct AppState {
     pub conductor_handle: Mutex<Option<ConductorHandle>>,
     pub conductor_status: Mutex<ConductorStatus>,
     pub agent_pub_key: Mutex<Option<String>>,
-    /// Active (v1.2) app client for all reads and writes.
+    /// Active (v1.3) app client for all reads and writes.
     pub app_client: tokio::sync::Mutex<Option<AppWebsocket>>,
-    /// v1.1 app client for migration reads (v1.1 → v1.2).
+    /// v1.2 app client for migration reads (v1.2 → v1.3).
+    pub app_client_v1_2: tokio::sync::Mutex<Option<AppWebsocket>>,
+    /// v1.1 app client for legacy reads.
     pub app_client_v1_1: tokio::sync::Mutex<Option<AppWebsocket>>,
     /// v1.0 app client for legacy reads.
     pub app_client_v1_0: tokio::sync::Mutex<Option<AppWebsocket>>,
@@ -183,6 +186,7 @@ impl AppState {
             conductor_status: Mutex::new(ConductorStatus::Stopped),
             agent_pub_key: Mutex::new(None),
             app_client: tokio::sync::Mutex::new(None),
+            app_client_v1_2: tokio::sync::Mutex::new(None),
             app_client_v1_1: tokio::sync::Mutex::new(None),
             app_client_v1_0: tokio::sync::Mutex::new(None),
             passphrase: Mutex::new(passphrase),
@@ -413,9 +417,27 @@ pub async fn get_poll(
     let hash = ActionHash::try_from(action_hash)
         .map_err(|e| format!("Invalid action hash: {:?}", e))?;
 
-    // Try v1.2 first — most polls will be here for current users.
+    // Try v1.3 first — most polls will be here for current users.
     {
         let client = state.app_client.lock().await;
+        if let Some(client) = client.as_ref() {
+            let payload = ExternIO::encode(hash.clone()).map_err(|e| e.to_string())?;
+            let result = call_zome(client, POLLS_ZOME, "get_poll", payload).await?;
+            let record: Option<Record> = result.decode().map_err(|e| e.to_string())?;
+            if let Some(record) = record {
+                let poll: Poll = decode_entry(&record)?;
+                return Ok(Some(PollDetail {
+                    poll,
+                    author: record.action().author().to_string(),
+                    dna_version: "1.3".to_string(),
+                }));
+            }
+        }
+    } // v1.3 lock released
+
+    // Fall back to v1.2.
+    {
+        let client = state.app_client_v1_2.lock().await;
         if let Some(client) = client.as_ref() {
             let payload = ExternIO::encode(hash.clone()).map_err(|e| e.to_string())?;
             let result = call_zome(client, POLLS_ZOME, "get_poll", payload).await?;
@@ -431,7 +453,7 @@ pub async fn get_poll(
         }
     } // v1.2 lock released
 
-    // Fall back to v1.1 — poll author hasn't migrated to v1.2 yet.
+    // Fall back to v1.1.
     {
         let client = state.app_client_v1_1.lock().await;
         if let Some(client) = client.as_ref() {
@@ -472,9 +494,9 @@ pub async fn get_poll(
 pub async fn get_all_polls(
     state: tauri::State<'_, std::sync::Arc<AppState>>,
 ) -> Result<Vec<PollListItem>, String> {
-    // Phase 1: fetch v1.2 polls (active DHT) and collect migration mappings.
+    // Phase 1: fetch active (v1.3) polls and collect migration mappings.
     // Release each lock before acquiring the next to avoid deadlocks.
-    let (mut polls, migrated_v1_1_hashes, migrated_v1_0_hashes) = {
+    let (mut polls, migrated_prev_hashes, migrated_v1_0_hashes) = {
         let client = state.app_client.lock().await;
         let client = client.as_ref().ok_or("Conductor not ready")?;
 
@@ -489,13 +511,13 @@ pub async fn get_all_polls(
                     hash: record.action_address().to_string(),
                     poll,
                     author: record.action().author().to_string(),
-                    dna_version: "1.2".to_string(),
+                    dna_version: "1.3".to_string(),
                 });
             }
         }
 
-        // Fetch migration mappings to know which v1.1 hashes are already on v1.2.
-        let migrated_v1_1: std::collections::HashSet<String> = {
+        // Fetch migration mappings to know which previous hashes are already on v1.3.
+        let migrated_prev: std::collections::HashSet<String> = {
             let payload = ExternIO::encode(()).map_err(|e| e.to_string())?;
             match call_zome(client, POLLS_ZOME, "get_all_migration_mappings", payload).await {
                 Ok(r) => {
@@ -509,16 +531,44 @@ pub async fn get_all_polls(
                     set
                 }
                 Err(e) => {
-                    log::warn!("Could not fetch v1.2 migration mappings: {}", e);
+                    log::warn!("Could not fetch v1.3 migration mappings: {}", e);
                     std::collections::HashSet::new()
                 }
             }
         };
 
-        (items, migrated_v1_1, std::collections::HashSet::<String>::new())
-    }; // v1.2 lock released here
+        (items, migrated_prev, std::collections::HashSet::<String>::new())
+    }; // v1.3 lock released here
 
-    // Phase 2: fetch v1.1 polls, excluding those already migrated to v1.2.
+    // Phase 2: fetch v1.2 polls, excluding those already migrated to v1.3.
+    {
+        let client = state.app_client_v1_2.lock().await;
+        if let Some(client) = client.as_ref() {
+            let payload = ExternIO::encode(()).map_err(|e| e.to_string())?;
+            match call_zome(client, POLLS_ZOME, "get_all_polls", payload).await {
+                Ok(result) => {
+                    let records: Vec<Record> = result.decode().unwrap_or_default();
+                    for record in &records {
+                        let hash = record.action_address().to_string();
+                        if migrated_prev_hashes.contains(&hash) {
+                            continue;
+                        }
+                        if let Ok(poll) = decode_entry::<Poll>(record) {
+                            polls.push(PollListItem {
+                                hash,
+                                poll,
+                                author: record.action().author().to_string(),
+                                dna_version: "1.2".to_string(),
+                            });
+                        }
+                    }
+                }
+                Err(e) => log::warn!("Could not fetch v1.2 polls (skipping): {}", e),
+            }
+        }
+    } // v1.2 lock released
+
+    // Phase 3: fetch v1.1 polls, excluding those already migrated.
     // Also collect their migration mappings to de-dupe against v1.0.
     let migrated_v1_0_hashes = {
         let client = state.app_client_v1_1.lock().await;
@@ -530,8 +580,8 @@ pub async fn get_all_polls(
                     let records: Vec<Record> = result.decode().unwrap_or_default();
                     for record in &records {
                         let hash = record.action_address().to_string();
-                        if migrated_v1_1_hashes.contains(&hash) {
-                            continue; // already on v1.2
+                        if migrated_prev_hashes.contains(&hash) {
+                            continue; // already on v1.3
                         }
                         if let Ok(poll) = decode_entry::<Poll>(record) {
                             polls.push(PollListItem {
@@ -653,8 +703,29 @@ pub async fn cast_vote(
         let client = client.as_ref().ok_or("v1.1 conductor not available")?;
         let result = call_zome(client, POLLS_ZOME, "cast_vote", payload).await?;
         result.decode().map_err(|e| e.to_string())?
+    } else if dna_version == "1.2" {
+        // Vote on a v1.2 poll — include profile for public polls.
+        let (display_name, profile_picture) = if poll_type.as_deref() == Some("Public") {
+            let profile = load_cached_profile(&state.data_dir);
+            let dn = profile.as_ref().and_then(|p| p.display_name.clone());
+            let pp = profile.as_ref().and_then(|p| p.profile_picture.clone());
+            (dn, pp)
+        } else {
+            (None, None)
+        };
+        let input = CastVoteInput {
+            poll_action_hash: hash,
+            option_index,
+            display_name,
+            profile_picture,
+        };
+        let payload = ExternIO::encode(input).map_err(|e| e.to_string())?;
+        let client = state.app_client_v1_2.lock().await;
+        let client = client.as_ref().ok_or("v1.2 conductor not available")?;
+        let result = call_zome(client, POLLS_ZOME, "cast_vote", payload).await?;
+        result.decode().map_err(|e| e.to_string())?
     } else {
-        // v1.2 poll — include profile for public polls.
+        // v1.3 poll — include profile for public polls.
         let (display_name, profile_picture) = if poll_type.as_deref() == Some("Public") {
             let profile = load_cached_profile(&state.data_dir);
             let dn = profile.as_ref().and_then(|p| p.display_name.clone());
@@ -701,6 +772,11 @@ pub async fn get_poll_votes(
         let client = client.as_ref().ok_or("v1.1 conductor not available")?;
         let result = call_zome(client, POLLS_ZOME, "get_poll_votes", payload).await?;
         result.decode().map_err(|e| e.to_string())?
+    } else if dna_version == "1.2" {
+        let client = state.app_client_v1_2.lock().await;
+        let client = client.as_ref().ok_or("v1.2 conductor not available")?;
+        let result = call_zome(client, POLLS_ZOME, "get_poll_votes", payload).await?;
+        result.decode().map_err(|e| e.to_string())?
     } else {
         let client = state.app_client.lock().await;
         let client = client.as_ref().ok_or("Conductor not ready")?;
@@ -713,6 +789,7 @@ pub async fn get_poll_votes(
         let vote: Vote = decode_entry(record)?;
         votes.push(VoteData {
             vote: VoteResponse {
+                hash: record.action_address().to_string(),
                 poll_action_hash: vote.poll_action_hash.to_string(),
                 option_index: vote.option_index,
             },
@@ -1258,4 +1335,319 @@ pub async fn abandon_pending_votes(
     migration.votes_pending.clear();
     migration.save(&state.data_dir);
     Ok(())
+}
+
+// ── Encrypted entry commands (v1.3) ──────────────────────────────────
+
+/// Extract the raw 32-byte Ed25519 public key from the agent key string.
+/// AgentPubKey is 39 bytes: 3-byte prefix + 32-byte key + 4-byte DHT location.
+fn get_agent_ed25519_bytes(state: &AppState) -> Result<[u8; 32], String> {
+    let key_str = state
+        .agent_pub_key
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("Agent key not available")?;
+    let agent_key = parse_agent_pub_key_string(&key_str)?;
+    let raw = agent_key.get_raw_39();
+    let mut bytes = [0u8; 32];
+    bytes.copy_from_slice(&raw[3..35]);
+    Ok(bytes)
+}
+
+/// Encrypted entry as decoded from a DHT Record.
+#[derive(serde::Deserialize)]
+struct EncryptedEntryData {
+    cipher: Vec<u8>,
+    nonce: Vec<u8>,
+    entry_type_hint: String,
+    related_hash: Option<ActionHash>,
+}
+
+/// Draft poll as returned to the frontend (decrypted).
+#[derive(serde::Serialize)]
+pub struct DraftPollItem {
+    pub hash: String,
+    pub title: String,
+    pub description: String,
+    pub options: Vec<String>,
+    pub closes_at: Option<i64>,
+    pub poll_type: String,
+    pub created_at: i64,
+}
+
+/// Save a private vote rationale (encrypted on the DHT).
+#[tauri::command]
+pub async fn save_vote_rationale(
+    state: tauri::State<'_, std::sync::Arc<AppState>>,
+    vote_action_hash: String,
+    rationale_text: String,
+) -> Result<String, String> {
+    let agent_bytes = get_agent_ed25519_bytes(&state)?;
+
+    // Encrypt the rationale — acquire lair first, then app client (lock ordering)
+    let (nonce, cipher) = {
+        let lair = state.lair_client.lock().await;
+        let lair = lair.as_ref().ok_or("Lair not connected")?;
+        crate::crypto::encrypt_to_self(lair, agent_bytes, rationale_text.as_bytes()).await?
+    };
+
+    let vote_hash = parse_action_hash(&vote_action_hash)?;
+
+    #[derive(serde::Serialize, Debug)]
+    struct Input {
+        cipher: Vec<u8>,
+        nonce: Vec<u8>,
+        link_as: String,
+        related_hash: Option<ActionHash>,
+    }
+
+    let input = Input {
+        cipher,
+        nonce: nonce.to_vec(),
+        link_as: "vote_rationale".to_string(),
+        related_hash: Some(vote_hash),
+    };
+
+    let client = state.app_client.lock().await;
+    let client = client.as_ref().ok_or("Conductor not ready")?;
+    let payload = ExternIO::encode(input).map_err(|e| e.to_string())?;
+    let result = call_zome(client, POLLS_ZOME, "create_encrypted_entry", payload).await?;
+    let hash: ActionHash = result.decode().map_err(|e| e.to_string())?;
+    Ok(hash.to_string())
+}
+
+/// Get and decrypt a vote rationale.
+#[tauri::command]
+pub async fn get_vote_rationale(
+    state: tauri::State<'_, std::sync::Arc<AppState>>,
+    vote_action_hash: String,
+) -> Result<Option<String>, String> {
+    let vote_hash = parse_action_hash(&vote_action_hash)?;
+
+    let client = state.app_client.lock().await;
+    let client = client.as_ref().ok_or("Conductor not ready")?;
+    let payload = ExternIO::encode(vote_hash).map_err(|e| e.to_string())?;
+    let result = call_zome(client, POLLS_ZOME, "get_vote_rationale", payload).await?;
+    let record: Option<Record> = result.decode().map_err(|e| e.to_string())?;
+
+    let record = match record {
+        Some(r) => r,
+        None => return Ok(None),
+    };
+
+    // Only decrypt if we're the author
+    let my_agent = state.agent_pub_key.lock().unwrap().clone();
+    if my_agent.as_deref() != Some(&record.action().author().to_string()) {
+        return Ok(None);
+    }
+
+    let ee: EncryptedEntryData = decode_entry(&record)?;
+    let agent_bytes = get_agent_ed25519_bytes(&state)?;
+
+    let mut nonce = [0u8; 24];
+    if ee.nonce.len() != 24 {
+        return Err("Invalid nonce length".into());
+    }
+    nonce.copy_from_slice(&ee.nonce);
+
+    let lair = state.lair_client.lock().await;
+    let lair = lair.as_ref().ok_or("Lair not connected")?;
+    let plaintext = crate::crypto::decrypt_from_self(lair, agent_bytes, nonce, &ee.cipher).await?;
+    let text = String::from_utf8(plaintext).map_err(|e| format!("Invalid UTF-8: {}", e))?;
+    Ok(Some(text))
+}
+
+/// Save a draft poll (encrypted on the DHT).
+#[tauri::command]
+pub async fn save_draft_poll(
+    state: tauri::State<'_, std::sync::Arc<AppState>>,
+    title: String,
+    description: String,
+    options: Vec<String>,
+    closes_at: Option<i64>,
+    poll_type: Option<String>,
+) -> Result<String, String> {
+    let agent_bytes = get_agent_ed25519_bytes(&state)?;
+
+    let draft = serde_json::json!({
+        "title": title,
+        "description": description,
+        "options": options,
+        "closes_at": closes_at,
+        "poll_type": poll_type.unwrap_or_else(|| "Anonymous".to_string()),
+    });
+    let plaintext = serde_json::to_vec(&draft).map_err(|e| e.to_string())?;
+
+    let (nonce, cipher) = {
+        let lair = state.lair_client.lock().await;
+        let lair = lair.as_ref().ok_or("Lair not connected")?;
+        crate::crypto::encrypt_to_self(lair, agent_bytes, &plaintext).await?
+    };
+    #[derive(serde::Serialize, Debug)]
+    struct Input {
+        cipher: Vec<u8>,
+        nonce: Vec<u8>,
+        link_as: String,
+        related_hash: Option<ActionHash>,
+    }
+
+    let input = Input {
+        cipher,
+        nonce: nonce.to_vec(),
+        link_as: "draft_poll".to_string(),
+        related_hash: None,
+    };
+
+    let client = state.app_client.lock().await;
+    let client = client.as_ref().ok_or("Conductor not ready")?;
+    let payload = ExternIO::encode(input).map_err(|e| e.to_string())?;
+    let result = call_zome(client, POLLS_ZOME, "create_encrypted_entry", payload).await?;
+    let hash: ActionHash = result.decode().map_err(|e| e.to_string())?;
+    Ok(hash.to_string())
+}
+
+/// Get all draft polls (decrypted).
+#[tauri::command]
+pub async fn get_my_drafts(
+    state: tauri::State<'_, std::sync::Arc<AppState>>,
+) -> Result<Vec<DraftPollItem>, String> {
+    log::info!("get_my_drafts: fetching from DHT...");
+    let records: Vec<Record> = {
+        let client = state.app_client.lock().await;
+        let client = client.as_ref().ok_or("Conductor not ready")?;
+        let payload = ExternIO::encode(()).map_err(|e| e.to_string())?;
+        let result = call_zome(client, POLLS_ZOME, "get_my_drafts", payload).await?;
+        result.decode().map_err(|e| e.to_string())?
+    }; // app_client lock released here
+
+    log::info!("get_my_drafts: {} records found, decrypting...", records.len());
+    let agent_bytes = get_agent_ed25519_bytes(&state)?;
+    let lair = state.lair_client.lock().await;
+    let lair = lair.as_ref().ok_or("Lair not connected")?;
+
+    let mut drafts = Vec::new();
+    for record in &records {
+        let hash = record.action_address().to_string();
+        let created_at = record.action().timestamp().as_seconds_and_nanos().0;
+
+        let ee: EncryptedEntryData = match decode_entry(record) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+
+        let mut nonce = [0u8; 24];
+        if ee.nonce.len() != 24 {
+            continue;
+        }
+        nonce.copy_from_slice(&ee.nonce);
+
+        let plaintext = match crate::crypto::decrypt_from_self(lair, agent_bytes, nonce, &ee.cipher).await {
+            Ok(p) => p,
+            Err(e) => {
+                log::warn!("Failed to decrypt draft {}: {}", hash, e);
+                continue;
+            }
+        };
+
+        let draft: serde_json::Value = match serde_json::from_slice(&plaintext) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        drafts.push(DraftPollItem {
+            hash,
+            title: draft["title"].as_str().unwrap_or("").to_string(),
+            description: draft["description"].as_str().unwrap_or("").to_string(),
+            options: draft["options"]
+                .as_array()
+                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default(),
+            closes_at: draft["closes_at"].as_i64(),
+            poll_type: draft["poll_type"].as_str().unwrap_or("Anonymous").to_string(),
+            created_at,
+        });
+    }
+
+    Ok(drafts)
+}
+
+/// Publish a draft: decrypt it, create a real poll, delete the draft.
+#[tauri::command]
+pub async fn publish_draft(
+    state: tauri::State<'_, std::sync::Arc<AppState>>,
+    draft_action_hash: String,
+) -> Result<String, String> {
+    let draft_hash = parse_action_hash(&draft_action_hash)?;
+    let agent_bytes = get_agent_ed25519_bytes(&state)?;
+
+    // Fetch and decrypt the draft
+    let (draft_json, _ee) = {
+        let client = state.app_client.lock().await;
+        let client = client.as_ref().ok_or("Conductor not ready")?;
+        let payload = ExternIO::encode(draft_hash.clone()).map_err(|e| e.to_string())?;
+        let result = call_zome(client, POLLS_ZOME, "get_poll", payload).await?;
+        let record: Option<Record> = result.decode().map_err(|e| e.to_string())?;
+        let record = record.ok_or("Draft not found")?;
+
+        let ee: EncryptedEntryData = decode_entry(&record)?;
+        let mut nonce = [0u8; 24];
+        if ee.nonce.len() != 24 {
+            return Err("Invalid nonce".into());
+        }
+        nonce.copy_from_slice(&ee.nonce);
+
+        let lair = state.lair_client.lock().await;
+        let lair = lair.as_ref().ok_or("Lair not connected")?;
+        let plaintext = crate::crypto::decrypt_from_self(lair, agent_bytes, nonce, &ee.cipher).await?;
+        let json: serde_json::Value = serde_json::from_slice(&plaintext)
+            .map_err(|e| format!("Failed to parse draft: {}", e))?;
+        (json, ee)
+    };
+
+    // Create the real poll using the existing CreatePollInput struct
+    let input = CreatePollInput {
+        title: draft_json["title"].as_str().unwrap_or("").to_string(),
+        description: draft_json["description"].as_str().unwrap_or("").to_string(),
+        options: draft_json["options"]
+            .as_array()
+            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default(),
+        closes_at: draft_json["closes_at"].as_i64(),
+        poll_type: Some(draft_json["poll_type"].as_str().unwrap_or("Anonymous").to_string()),
+    };
+
+    let client = state.app_client.lock().await;
+    let client = client.as_ref().ok_or("Conductor not ready")?;
+    let payload = ExternIO::encode(input).map_err(|e| e.to_string())?;
+    let result = call_zome(client, POLLS_ZOME, "create_poll", payload).await?;
+    let poll_hash: ActionHash = result.decode().map_err(|e| e.to_string())?;
+
+    // Delete the draft
+    let delete_payload = ExternIO::encode(draft_hash).map_err(|e| e.to_string())?;
+    if let Err(e) = call_zome(client, POLLS_ZOME, "delete_encrypted_entry", delete_payload).await {
+        log::warn!("Failed to delete draft after publishing: {}", e);
+    }
+
+    Ok(poll_hash.to_string())
+}
+
+/// Delete a draft poll.
+#[tauri::command]
+pub async fn delete_draft(
+    state: tauri::State<'_, std::sync::Arc<AppState>>,
+    draft_action_hash: String,
+) -> Result<String, String> {
+    let hash = parse_action_hash(&draft_action_hash)?;
+    let client = state.app_client.lock().await;
+    let client = client.as_ref().ok_or("Conductor not ready")?;
+    let payload = ExternIO::encode(hash).map_err(|e| e.to_string())?;
+    let result = call_zome(client, POLLS_ZOME, "delete_encrypted_entry", payload).await?;
+    let deleted: ActionHash = result.decode().map_err(|e| e.to_string())?;
+    Ok(deleted.to_string())
+}
+
+/// Parse an action hash string into an ActionHash.
+fn parse_action_hash(s: &str) -> Result<ActionHash, String> {
+    ActionHash::try_from(s.to_string()).map_err(|e| format!("Invalid action hash: {:?}", e))
 }

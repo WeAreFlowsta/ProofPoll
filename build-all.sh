@@ -20,6 +20,10 @@ echo "=== Building ProofPoll DNA v1.2 ==="
 (cd dna/v1.2 && bash build.sh)
 
 echo ""
+echo "=== Building ProofPoll DNA v1.3 ==="
+(cd dna/v1.3 && bash build.sh)
+
+echo ""
 echo "=== Build complete ==="
 echo ""
 echo "Resources:"

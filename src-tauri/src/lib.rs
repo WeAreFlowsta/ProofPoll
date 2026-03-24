@@ -7,6 +7,7 @@
 //! - `dna` — DNA installation and multi-version management. Change app IDs only.
 //! - `lair` — Lair keystore management. Reusable as-is.
 //! - `migration` — DNA version migration orchestration. Adapt entry types.
+//! - `crypto` — Lair-based encryption for private data on public DHT.
 //!
 //! ## Startup sequence
 //!
@@ -22,6 +23,7 @@
 
 mod commands;
 mod conductor;
+mod crypto;
 mod dna;
 mod lair;
 pub mod migration;
@@ -97,11 +99,12 @@ pub fn run() {
                         let app_port = result.handle.app_port;
                         let conductor_pid = result.handle.conductor_pid;
                         let needs_migration = result.needs_migration;
-                        let v1_1_available = result.app_client_v1_1.is_some();
+                        let v1_2_available = result.app_client_v1_2.is_some();
 
                         *startup_state.conductor_handle.lock().unwrap() = Some(result.handle);
                         *startup_state.agent_pub_key.lock().unwrap() = Some(result.agent_key);
                         *startup_state.app_client.lock().await = Some(result.app_client);
+                        *startup_state.app_client_v1_2.lock().await = result.app_client_v1_2;
                         *startup_state.app_client_v1_1.lock().await = result.app_client_v1_1;
                         *startup_state.app_client_v1_0.lock().await = result.app_client_v1_0;
                         *startup_state.lair_client.lock().await = Some(result.lair_client);
@@ -115,18 +118,18 @@ pub fn run() {
                             monitor_handle,
                         );
 
-                        // Run migration if needed (v1.1 → v1.2).
-                        // Also trigger if v1.1 is available but migration never completed
-                        // (e.g., first run installed v1.2 but migration failed/timed out).
+                        // Run migration if needed (v1.2 → v1.3).
+                        // Also trigger if v1.2 is available but migration never completed
+                        // (e.g., first run installed v1.3 but migration failed/timed out).
                         let should_migrate = needs_migration || {
                             let ms = startup_state.migration_state.lock().await;
-                            v1_1_available
+                            v1_2_available
                                 && ms.status != migration::MigrationStatus::Complete
                         };
                         if should_migrate {
                             let migration_state = startup_state.clone();
                             tauri::async_runtime::spawn(async move {
-                                log::info!("Starting v1.1 → v1.2 migration...");
+                                log::info!("Starting v1.2 → v1.3 migration...");
                                 match migration::run_migration(
                                     &migration_state,
                                     &migration_handle,
@@ -200,6 +203,13 @@ pub fn run() {
             commands::get_export_data,
             commands::get_migration_status,
             commands::abandon_pending_votes,
+            // ── Encrypted entries (v1.3) ───────────────────────────
+            commands::save_vote_rationale,
+            commands::get_vote_rationale,
+            commands::save_draft_poll,
+            commands::get_my_drafts,
+            commands::publish_draft,
+            commands::delete_draft,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

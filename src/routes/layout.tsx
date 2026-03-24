@@ -346,6 +346,14 @@ export default component$(() => {
                   Create
                 </button>
               )}
+              {linked.value && (
+                <Link
+                  href="/drafts/"
+                  class={`text-sm ${isActive("/drafts/") ? "text-indigo-400 font-medium" : "text-gray-400 hover:text-gray-200"}`}
+                >
+                  Drafts
+                </Link>
+              )}
               <Link
                 href="/identity/"
                 class={`text-sm ${isActive("/identity/") ? "text-indigo-400 font-medium" : "text-gray-400 hover:text-gray-200"}`}

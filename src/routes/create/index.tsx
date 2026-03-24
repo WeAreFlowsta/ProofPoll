@@ -1,7 +1,7 @@
 import { component$, useContext, useSignal, useVisibleTask$, useComputed$, $ } from "@builder.io/qwik";
 import { useNavigate } from "@builder.io/qwik-city";
 import { linkedContext } from "~/lib/context";
-import { createPoll, type PollType } from "~/lib/holochain";
+import { createPoll, saveDraftPoll, type PollType } from "~/lib/holochain";
 
 const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
 const DAYS = ["Mo","Tu","We","Th","Fr","Sa","Su"];
@@ -21,6 +21,8 @@ export default component$(() => {
   const calMonth = useSignal(new Date().getMonth()); // 0-11
   const pollType = useSignal<PollType>("Anonymous");
   const submitting = useSignal(false);
+  const savingDraft = useSignal(false);
+  const draftSaved = useSignal(false);
   const error = useSignal<string | null>(null);
 
   useVisibleTask$(() => {
@@ -109,6 +111,36 @@ export default component$(() => {
     const updated = [...options.value];
     updated[index] = value;
     options.value = updated;
+  });
+
+  const saveDraft = $(async () => {
+    error.value = null;
+    const trimmedTitle = title.value.trim();
+    if (!trimmedTitle) { error.value = "Title is required to save a draft"; return; }
+
+    const trimmedOptions = options.value.map((o) => o.trim()).filter((o) => o.length > 0);
+
+    savingDraft.value = true;
+    try {
+      let closesAtTs: number | null = null;
+      if (!noExpiry.value && closesAtDate.value) {
+        const d = new Date(closesAtDate.value + "T23:59:59");
+        closesAtTs = Math.floor(d.getTime() / 1000);
+      }
+      await saveDraftPoll({
+        title: trimmedTitle,
+        description: description.value.trim(),
+        options: trimmedOptions.length >= 2 ? trimmedOptions : ["", ""],
+        closes_at: closesAtTs,
+        poll_type: pollType.value,
+      });
+      draftSaved.value = true;
+      setTimeout(() => { draftSaved.value = false; }, 3000);
+    } catch (e: any) {
+      error.value = e.message || "Failed to save draft";
+    } finally {
+      savingDraft.value = false;
+    }
   });
 
   const submit = $(async () => {
@@ -332,14 +364,30 @@ export default component$(() => {
           </p>
         </div>
 
-        <button
-          type="button"
-          onClick$={submit}
-          disabled={submitting.value}
-          class="w-full bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white font-medium py-2.5 rounded-full"
-        >
-          {submitting.value ? "Creating..." : "Create Poll"}
-        </button>
+        {draftSaved.value && (
+          <div class="bg-green-900/20 border border-green-800 text-green-300 px-4 py-2 rounded-lg text-sm">
+            Draft saved! View it on the <a href="/drafts/" class="underline">Drafts page</a>.
+          </div>
+        )}
+
+        <div class="flex gap-3">
+          <button
+            type="button"
+            onClick$={saveDraft}
+            disabled={savingDraft.value || submitting.value}
+            class="flex-1 bg-gray-700 hover:bg-gray-600 disabled:opacity-50 text-gray-200 font-medium py-2.5 rounded-full"
+          >
+            {savingDraft.value ? "Encrypting..." : "Save as Draft"}
+          </button>
+          <button
+            type="button"
+            onClick$={submit}
+            disabled={submitting.value || savingDraft.value}
+            class="flex-1 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white font-medium py-2.5 rounded-full"
+          >
+            {submitting.value ? "Creating..." : "Create Poll"}
+          </button>
+        </div>
       </div>
     </div>
   );

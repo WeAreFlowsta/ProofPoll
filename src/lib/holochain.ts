@@ -38,18 +38,18 @@ export interface PollListItem {
   poll: Poll;
   author: string;
   /** Which DHT this poll lives on. Pass back to castVote and getPollVotes. */
-  dna_version: "1.0" | "1.1" | "1.2";
+  dna_version: "1.0" | "1.1" | "1.2" | "1.3";
 }
 
 export interface PollDetail {
   poll: Poll;
   author: string;
   /** Which DHT this poll lives on. Pass back to castVote and getPollVotes. */
-  dna_version: "1.0" | "1.1" | "1.2";
+  dna_version: "1.0" | "1.1" | "1.2" | "1.3";
 }
 
 export interface VoteData {
-  vote: { poll_action_hash: string; option_index: number };
+  vote: { hash: string; poll_action_hash: string; option_index: number };
   author: string;
   /** Set on public v1.2 polls. Null otherwise. */
   display_name: string | null;
@@ -227,4 +227,60 @@ export async function getMigrationStatus(): Promise<MigrationState> {
 
 export async function abandonPendingVotes(): Promise<void> {
   return invoke<void>("abandon_pending_votes");
+}
+
+// ── Encrypted entries (v1.3) ──────────────────────────────────────────
+
+export interface DraftPollItem {
+  hash: string;
+  title: string;
+  description: string;
+  options: string[];
+  closes_at: number | null;
+  poll_type: string;
+  created_at: number;
+}
+
+export async function saveVoteRationale(
+  voteActionHash: string,
+  rationaleText: string,
+): Promise<string> {
+  return invoke<string>("save_vote_rationale", {
+    voteActionHash,
+    rationaleText,
+  });
+}
+
+export async function getVoteRationale(
+  voteActionHash: string,
+): Promise<string | null> {
+  return invoke<string | null>("get_vote_rationale", { voteActionHash });
+}
+
+export async function saveDraftPoll(input: {
+  title: string;
+  description: string;
+  options: string[];
+  closes_at: number | null;
+  poll_type: PollType;
+}): Promise<string> {
+  return invoke<string>("save_draft_poll", {
+    title: input.title,
+    description: input.description,
+    options: input.options,
+    closesAt: input.closes_at,
+    pollType: input.poll_type,
+  });
+}
+
+export async function getMyDrafts(): Promise<DraftPollItem[]> {
+  return invoke<DraftPollItem[]>("get_my_drafts");
+}
+
+export async function publishDraft(draftActionHash: string): Promise<string> {
+  return invoke<string>("publish_draft", { draftActionHash });
+}
+
+export async function deleteDraft(draftActionHash: string): Promise<string> {
+  return invoke<string>("delete_draft", { draftActionHash });
 }

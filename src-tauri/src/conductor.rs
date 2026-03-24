@@ -239,7 +239,9 @@ pub struct StartupResult {
     pub handle: ConductorHandle,
     pub agent_key: String,
     pub app_client: holochain_client::AppWebsocket,
-    /// v1.1 client for migration reads (v1.1 → v1.2).
+    /// v1.2 client for migration reads (v1.2 → v1.3).
+    pub app_client_v1_2: Option<holochain_client::AppWebsocket>,
+    /// v1.1 client for legacy reads.
     pub app_client_v1_1: Option<holochain_client::AppWebsocket>,
     /// v1.0 client for legacy reads.
     pub app_client_v1_0: Option<holochain_client::AppWebsocket>,
@@ -354,11 +356,12 @@ pub async fn start_holochain(
             message: "Setting up app interface...".into(),
         },
     );
-    let (app_port, app_client, app_client_v1_1, app_client_v1_0) =
+    let (app_port, app_client, app_client_v1_2, app_client_v1_1, app_client_v1_0) =
         match crate::dna::setup_app_interface(
             ADMIN_WS_PORT,
             install_result.v1_0_available,
             install_result.v1_1_available,
+            install_result.v1_2_available,
         )
         .await
         {
@@ -398,6 +401,7 @@ pub async fn start_holochain(
         handle,
         agent_key: agent_key_str,
         app_client,
+        app_client_v1_2,
         app_client_v1_1,
         app_client_v1_0,
         lair_client,

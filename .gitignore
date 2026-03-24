@@ -48,3 +48,4 @@ Thumbs.db
 server/
 .vercel/
 .netlify/
+dna/v1.3/target/
