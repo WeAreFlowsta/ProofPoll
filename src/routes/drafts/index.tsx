@@ -1,11 +1,12 @@
 import { component$, useSignal, useVisibleTask$, useContext, $ } from "@builder.io/qwik";
-import { useNavigate } from "@builder.io/qwik-city";
+import { useNavigate, useLocation } from "@builder.io/qwik-city";
 import { linkedContext } from "~/lib/context";
 import { getMyDrafts, publishDraft, deleteDraft, type DraftPollItem } from "~/lib/holochain";
 
 export default component$(() => {
   const linked = useContext(linkedContext);
   const nav = useNavigate();
+  const loc = useLocation();
   const drafts = useSignal<DraftPollItem[]>([]);
   const loading = useSignal(true);
   const publishing = useSignal<string | null>(null);
@@ -13,7 +14,11 @@ export default component$(() => {
   const deleting = useSignal(false);
   const error = useSignal<string | null>(null);
 
-  useVisibleTask$(async () => {
+  // eslint-disable-next-line qwik/no-use-visible-task
+  useVisibleTask$(async ({ track }) => {
+    // Re-run when navigating to this page (Qwik SPA keeps component mounted)
+    track(() => loc.isNavigating);
+    loading.value = true;
     if (!linked.value) {
       loading.value = false;
       return;
