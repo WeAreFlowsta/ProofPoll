@@ -259,6 +259,15 @@ pub async fn setup_app_interface(
 
     log::info!("App interface attached on port {}", app_port);
 
+    // Ensure all cells are actually ready before we try to authorize them.
+    // The conductor can report Enabled status while cells are still
+    // initializing after a restart — calling authorize_signing_credentials
+    // too early returns CellDisabled. This pre-check waits up to ~18s with
+    // periodic re-enable attempts so the per-cell loop below sees ready
+    // cells. Without this, dev sessions left idle for a while come back to
+    // life with disabled cells and zome calls silently fail.
+    ensure_apps_enabled(&admin_ws).await;
+
     // Authorize signing credentials for ALL provisioned cells (both versions).
     let signer = ClientAgentSigner::default();
     let apps = admin_ws
@@ -479,4 +488,95 @@ pub async fn setup_app_interface(
     };
 
     Ok((app_port, app_ws_v1_3, app_ws_v1_2, app_ws_v1_1, app_ws_v1_0))
+}
+
+/// Re-enable any disabled apps + verify cells are actually ready before
+/// callers try to authorize signing credentials.
+///
+/// The conductor can report Enabled status while cells are still
+/// initializing after a restart — calling authorize_signing_credentials too
+/// early returns CellDisabled. This helper waits up to ~18 seconds with
+/// periodic re-enable attempts, retrying until a probe authorize succeeds
+/// or we run out of attempts.
+///
+/// Idempotent and safe to call multiple times. Failures here are logged but
+/// don't propagate — the per-cell auth loop in the caller handles the
+/// remaining cell-by-cell skip behaviour.
+pub async fn ensure_apps_enabled(admin_ws: &AdminWebsocket) {
+    let apps = match admin_ws.list_apps(None).await {
+        Ok(a) => a,
+        Err(e) => {
+            log::warn!("ensure_apps_enabled: list_apps failed: {}", e);
+            return;
+        }
+    };
+
+    for app in &apps {
+        if let Err(e) = admin_ws.enable_app(app.installed_app_id.clone()).await {
+            log::warn!(
+                "ensure_apps_enabled: failed to enable {}: {}",
+                app.installed_app_id,
+                e,
+            );
+        }
+    }
+
+    // Pick the active version's cell as the probe. authorize_signing_credentials
+    // will return CellDisabled until cells are truly ready.
+    let probe_cell = apps
+        .iter()
+        .find(|a| a.installed_app_id == ACTIVE_APP_ID)
+        .and_then(|app| {
+            app.cell_info.values().flat_map(|cells| cells.iter()).find_map(|c| {
+                if let CellInfo::Provisioned(p) = c {
+                    Some(p.cell_id.clone())
+                } else {
+                    None
+                }
+            })
+        });
+
+    let Some(cell_id) = probe_cell else {
+        return;
+    };
+
+    for attempt in 1..=6 {
+        match admin_ws
+            .authorize_signing_credentials(AuthorizeSigningCredentialsPayload {
+                cell_id: cell_id.clone(),
+                functions: None,
+            })
+            .await
+        {
+            Ok(_) => {
+                if attempt > 1 {
+                    log::info!(
+                        "ensure_apps_enabled: cells ready after {}s wait",
+                        (attempt - 1) * 3,
+                    );
+                } else {
+                    log::info!("ensure_apps_enabled: cells ready");
+                }
+                return;
+            }
+            Err(e) => {
+                let err_str = format!("{}", e);
+                if err_str.contains("CellDisabled") && attempt < 6 {
+                    log::info!(
+                        "ensure_apps_enabled: cells not ready yet (attempt {}), waiting 3s...",
+                        attempt,
+                    );
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    // Re-enable all apps before retrying — sometimes the
+                    // conductor needs the enable_app nudge more than once.
+                    for app in &apps {
+                        let _ = admin_ws.enable_app(app.installed_app_id.clone()).await;
+                    }
+                } else {
+                    log::warn!("ensure_apps_enabled: cell readiness check failed: {}", e);
+                    return;
+                }
+            }
+        }
+    }
 }

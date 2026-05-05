@@ -1,7 +1,7 @@
 import { component$, useContext, useSignal, useVisibleTask$, $ } from "@builder.io/qwik";
 import { useLocation, useNavigate } from "@builder.io/qwik-city";
 import { invoke } from "@tauri-apps/api/core";
-import { linkedContext, displayNameContext, profilePictureContext } from "~/lib/context";
+import { linkedContext, linkStateContext, displayNameContext, profilePictureContext } from "~/lib/context";
 import { sanitizeImageSrc } from "~/lib/sanitize";
 import {
   getLinkedAgents,
@@ -13,6 +13,7 @@ export default component$(() => {
   const loc = useLocation();
   const nav = useNavigate();
   const linkedCtx = useContext(linkedContext);
+  const linkStateCtx = useContext(linkStateContext);
   const displayName = useContext(displayNameContext);
   const profilePicture = useContext(profilePictureContext);
   const returnTo = loc.url.searchParams.get("returnTo");
@@ -44,40 +45,32 @@ export default component$(() => {
     }
   });
 
-  // Check if Vault revoked the link. Returns true if revoked.
-  const checkVaultRevoke = $(async (pubKey: string): Promise<boolean> => {
-    try {
-      const { checkFlowstaLinkStatus } = await import("@flowsta/holochain");
-      const vaultStatus = await checkFlowstaLinkStatus({
-        localAgentPubKey: pubKey,
-      });
-
-      if (!vaultStatus.linked) {
-        // Verify Vault is actually running (SDK returns linked:false when unreachable)
-        const statusResp = await fetch("http://127.0.0.1:27777/status", {
-          signal: AbortSignal.timeout(2000),
-        }).catch(() => null);
-
-        if (statusResp && statusResp.ok) {
-          // Vault IS running and says not linked — revoke on DHT
-          try {
-            await revokeIdentityLink();
-          } catch (revokeErr: any) {
-            console.error("DHT revoke failed:", revokeErr);
-          }
-          linkedVaultKey.value = null;
-          linkedCtx.value = false;
-          displayName.value = null;
-          profilePicture.value = null;
-          success.value = "Your Flowsta account was disconnected from Vault.";
-          return true;
-        }
+  // Check if Vault still recognises this link. Returns the rich state so
+  // callers can react appropriately:
+  //   - 'linked'   — Vault is running and confirms the link.
+  //   - 'offline'  — Vault is not reachable; trust local state for now.
+  //   - 'mismatch' — Vault is running but doesn't know this app's agent.
+  //
+  // Critically, this no longer auto-revokes the DHT entry on a `mismatch`.
+  // The layout's banner gives the user the choice to reconnect or
+  // deliberately disconnect — silently revoking the link surprises users
+  // who briefly switched Flowsta accounts in Vault.
+  const fetchVaultLinkState = $(
+    async (pubKey: string): Promise<"linked" | "offline" | "mismatch"> => {
+      try {
+        const { getFlowstaLinkStatus } = await import("@flowsta/holochain");
+        const result = await getFlowstaLinkStatus({
+          clientId: import.meta.env.VITE_FLOWSTA_CLIENT_ID,
+          localAgentPubKey: pubKey,
+        });
+        if (result.state === "linked") return "linked";
+        if (result.state === "offline") return "offline";
+        return "mismatch";
+      } catch {
+        return "offline";
       }
-    } catch {
-      // SDK import or fetch failed — ignore
-    }
-    return false;
-  });
+    },
+  );
 
   useVisibleTask$(async ({ cleanup }) => {
     try {
@@ -86,13 +79,15 @@ export default component$(() => {
       }>("get_app_status");
       agentKey.value = status.agent_pub_key;
 
-      // Check if already linked on DHT.
+      // Check if already linked on DHT, then ask Vault for the canonical
+      // state. We never auto-revoke from here — the layout banner gives the
+      // user a clear choice if Vault disagrees with our local state.
       if (status.agent_pub_key) {
         const linked = await getLinkedAgents(status.agent_pub_key);
         if (linked.length > 0) {
           linkedVaultKey.value = linked[0];
-          const revoked = await checkVaultRevoke(status.agent_pub_key);
-          if (!revoked && !displayName.value) {
+          const vaultState = await fetchVaultLinkState(status.agent_pub_key);
+          if (vaultState !== "mismatch" && !displayName.value) {
             await fetchVaultProfile();
           }
         }
@@ -122,6 +117,7 @@ export default component$(() => {
             result.payload.vaultSignature,
           );
           linkedVaultKey.value = result.payload.vaultAgentPubKey;
+          linkStateCtx.value = "linked";
           linkedCtx.value = true;
           await fetchVaultProfile();
           success.value = "Signed in successfully!";
@@ -145,13 +141,11 @@ export default component$(() => {
       }
     }
 
-    // Poll Vault link status every 5s while linked
-    const interval = setInterval(async () => {
-      if (!linkedVaultKey.value || !agentKey.value) return;
-      await checkVaultRevoke(agentKey.value);
-    }, 5000);
-
-    cleanup(() => clearInterval(interval));
+    // No local polling needed — the layout's linkPoll watches link state
+    // every 3 seconds and updates `linkStateContext` accordingly. When the
+    // user takes action (link / unlink / disconnect via the banner) the
+    // layout state flows down to this page reactively.
+    cleanup(() => {});
   });
 
   const linkIdentity = $(async () => {
@@ -180,6 +174,7 @@ export default component$(() => {
       );
 
       linkedVaultKey.value = result.payload.vaultAgentPubKey;
+      linkStateCtx.value = "linked";
       linkedCtx.value = true;
       await fetchVaultProfile();
       success.value = "Signed in successfully!";
@@ -210,6 +205,7 @@ export default component$(() => {
     try {
       await revokeIdentityLink();
       linkedVaultKey.value = null;
+      linkStateCtx.value = "unlinked";
       linkedCtx.value = false;
       displayName.value = null;
       profilePicture.value = null;

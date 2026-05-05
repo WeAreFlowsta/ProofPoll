@@ -1,10 +1,20 @@
-import { component$, Slot, useContextProvider, useSignal, useVisibleTask$ } from "@builder.io/qwik";
-import { Link, useLocation } from "@builder.io/qwik-city";
+import { component$, Slot, useContextProvider, useSignal, useVisibleTask$, $ } from "@builder.io/qwik";
+import { Link, useLocation, useNavigate } from "@builder.io/qwik-city";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { linkedContext, displayNameContext, profilePictureContext } from "~/lib/context";
+import { linkedContext, linkStateContext, displayNameContext, profilePictureContext, type LinkState } from "~/lib/context";
 import { sanitizeImageSrc } from "~/lib/sanitize";
-import { getLinkedAgents, getIdentityLink, commitIdentityLink, getMigrationStatus, getCachedProfile, saveProfileCache, type MigrationState } from "~/lib/holochain";
+import {
+  getLinkedAgents,
+  getIdentityLink,
+  commitIdentityLink,
+  revokeIdentityLink,
+  getMigrationStatus,
+  getCachedProfile,
+  saveProfileCache,
+  type MigrationState,
+} from "~/lib/holochain";
+import { getFlowstaLinkStatus } from "@flowsta/holochain";
 
 
 interface AppStatus {
@@ -22,13 +32,21 @@ export default component$(() => {
   const displayName = useSignal<string | null>(null);
   const profilePicture = useSignal<string | null>(null);
   const linked = useSignal(false);
+  // Rich link state: 'linked' / 'offline' / 'mismatch' / 'unlinked'.
+  // `linked.value` is permissive (linked || offline); the layout's banner
+  // (further down) keys off `linkState.value === 'mismatch'` so individual
+  // pages don't need to know about the account-changed flow.
+  const linkState = useSignal<LinkState>("unlinked");
   useContextProvider(linkedContext, linked);
+  useContextProvider(linkStateContext, linkState);
   useContextProvider(displayNameContext, displayName);
   useContextProvider(profilePictureContext, profilePicture);
   const loc = useLocation();
+  const nav = useNavigate();
   const showSignIn = useSignal(false);
   const migration = useSignal<MigrationState | null>(null);
   const migrationDismissed = useSignal(false);
+  const disconnecting = useSignal(false);
 
   useVisibleTask$(({ cleanup }) => {
     let active = true;
@@ -79,85 +97,78 @@ export default component$(() => {
           const s = await invoke<AppStatus>("get_app_status");
           status.value = s;
           if (s.ready) {
-            // Check DHT link status + verify with Vault
+            // Compute the rich link state in one pass — see context.ts for
+            // why we don't just use a boolean.
+            //
+            // Three inputs:
+            //   • DHT entry — `getLinkedAgents` returns a non-empty list if
+            //     we previously committed an `IsSamePersonEntry` to our DHT.
+            //   • Local file — `getIdentityLink()` returns a record if we
+            //     stored the Vault's signature locally (survives DNA migration
+            //     and app restarts).
+            //   • Vault opinion — `getFlowstaLinkStatus()` returns one of
+            //     `linked` / `unlinked` / `offline`, distinguishing "Vault
+            //     says no" from "Vault not running".
             if (s.agent_pub_key) {
-              try {
-                const agents = await getLinkedAgents(s.agent_pub_key);
-                if (agents.length > 0) {
-                  // DHT says linked — verify Vault still agrees
-                  try {
-                    const linkResp = await fetch(
-                      `http://127.0.0.1:27777/link-status?app_agent_pub_key=${encodeURIComponent(s.agent_pub_key)}`,
-                      { signal: AbortSignal.timeout(2000) },
-                    );
-                    if (linkResp.ok) {
-                      const linkData = await linkResp.json();
-                      linked.value = linkData.linked === true;
-                    } else {
-                      // Vault running but endpoint error — trust DHT
-                      linked.value = true;
-                    }
-                  } catch {
-                    // Vault not running — trust DHT
-                    linked.value = true;
-                  }
-                }
-              } catch {
-                // Not linked or zome call failed
-              }
+              const dhtLinked = await getLinkedAgents(s.agent_pub_key)
+                .then((a) => a.length > 0)
+                .catch(() => false);
+              const hasLocalLink = await getIdentityLink()
+                .then((l) => !!l)
+                .catch(() => false);
 
-              // If DHT doesn't show a link yet, check local persistence.
-              // The local identity-link.json survives across DNA migrations
-              // and app restarts. If it exists AND the Vault confirms the
-              // link, trust it immediately — the DHT entry will catch up.
-              if (!linked.value && s.agent_pub_key) {
-                try {
-                  const localLink = await getIdentityLink();
-                  if (localLink) {
-                    // Ask the Vault if it still recognizes this link
-                    try {
-                      const vaultResp = await fetch(
-                        `http://127.0.0.1:27777/link-status?app_agent_pub_key=${encodeURIComponent(s.agent_pub_key)}`,
-                        { signal: AbortSignal.timeout(2000) },
-                      );
-                      if (vaultResp.ok) {
-                        const vaultData = await vaultResp.json();
-                        if (vaultData.linked === true) {
-                          // Vault confirms link — trust it, re-create DHT entry silently
-                          linked.value = true;
-                          console.log("[ProofPoll] Restored link from local state + Vault confirmation");
+              if (!dhtLinked && !hasLocalLink) {
+                // No evidence either way — user has never linked.
+                linkState.value = "unlinked";
+                linked.value = false;
+              } else {
+                const vaultStatus = await getFlowstaLinkStatus({
+                  clientId: import.meta.env.VITE_FLOWSTA_CLIENT_ID,
+                  localAgentPubKey: s.agent_pub_key,
+                });
 
-                          // Re-create the DHT entry in the background (non-blocking)
-                          // so other peers can verify this identity link
-                          import("@flowsta/holochain").then(async ({ linkFlowstaIdentity }) => {
-                            try {
-                              const result = await linkFlowstaIdentity({
-                                appName: "ProofPoll",
-                                clientId: import.meta.env.VITE_FLOWSTA_CLIENT_ID,
-                                localAgentPubKey: s.agent_pub_key!,
-                              });
-                              if (result.success) {
-                                await commitIdentityLink(
-                                  result.payload.vaultAgentPubKey,
-                                  result.payload.vaultSignature,
-                                );
-                                console.log("[ProofPoll] DHT identity link re-created after migration");
-                              }
-                            } catch {
-                              // Vault dialog dismissed or not shown — link still works locally
-                            }
-                          }).catch(() => {});
+                if (vaultStatus.state === "linked") {
+                  linkState.value = "linked";
+                  linked.value = true;
+
+                  // Migration race: Vault confirms the link but the new
+                  // DNA's DHT doesn't have an entry yet. Recreate it in
+                  // the background so peers can verify this identity link.
+                  if (!dhtLinked) {
+                    const agentPubKey = s.agent_pub_key;
+                    import("@flowsta/holochain")
+                      .then(async ({ linkFlowstaIdentity }) => {
+                        try {
+                          const result = await linkFlowstaIdentity({
+                            appName: "ProofPoll",
+                            clientId: import.meta.env.VITE_FLOWSTA_CLIENT_ID,
+                            localAgentPubKey: agentPubKey,
+                          });
+                          if (result.success) {
+                            await commitIdentityLink(
+                              result.payload.vaultAgentPubKey,
+                              result.payload.vaultSignature,
+                            );
+                            console.log("[ProofPoll] DHT identity link re-created after migration");
+                          }
+                        } catch {
+                          // Vault dialog dismissed — link still works locally
                         }
-                      }
-                    } catch {
-                      // Vault not running — if we have local file, trust it
-                      // (user was previously linked, Vault just isn't open right now)
-                      linked.value = true;
-                      console.log("[ProofPoll] Restored link from local state (Vault not running)");
-                    }
+                      })
+                      .catch(() => {});
                   }
-                } catch {
-                  // No local link data — user genuinely not linked
+                } else if (vaultStatus.state === "offline") {
+                  // Vault not running. Trust local state — features stay
+                  // enabled. The user is still themselves.
+                  linkState.value = "offline";
+                  linked.value = true;
+                } else {
+                  // Vault is running and says no link for this app's agent.
+                  // Could mean the user unlinked deliberately OR switched
+                  // Flowsta accounts. Either way, surface the choice to the
+                  // user via the banner — DON'T auto-revoke their data.
+                  linkState.value = "mismatch";
+                  linked.value = false;
                 }
               }
             }
@@ -226,38 +237,33 @@ export default component$(() => {
       const s = status.value;
       if (!s?.ready || !s.agent_pub_key) return;
       try {
-        const agents = await getLinkedAgents(s.agent_pub_key);
+        // Same state-machine as the initial poll — recompute on every tick.
+        // The user could have locked / unlocked Vault, switched accounts,
+        // or unlinked from the Vault UI at any moment, and the layout
+        // banner needs to reflect it within the 3s polling cadence.
         const wasLinked = linked.value;
-        let nowLinked = agents.length > 0;
+        const dhtLinked = await getLinkedAgents(s.agent_pub_key)
+          .then((a) => a.length > 0)
+          .catch(() => false);
+        const hasLocalLink = await getIdentityLink()
+          .then((l) => !!l)
+          .catch(() => false);
 
-        // Verify with Vault if DHT says linked
-        if (nowLinked) {
-          try {
-            const linkResp = await fetch(
-              `http://127.0.0.1:27777/link-status?app_agent_pub_key=${encodeURIComponent(s.agent_pub_key)}`,
-              { signal: AbortSignal.timeout(2000) },
-            );
-            if (linkResp.ok) {
-              const linkData = await linkResp.json();
-              if (linkData.linked === false) nowLinked = false;
-            }
-          } catch {
-            // Vault not running — trust DHT
-          }
+        let nextState: LinkState;
+        if (!dhtLinked && !hasLocalLink) {
+          nextState = "unlinked";
+        } else {
+          const vaultStatus = await getFlowstaLinkStatus({
+            clientId: import.meta.env.VITE_FLOWSTA_CLIENT_ID,
+            localAgentPubKey: s.agent_pub_key,
+          });
+          if (vaultStatus.state === "linked") nextState = "linked";
+          else if (vaultStatus.state === "offline") nextState = "offline";
+          else nextState = "mismatch";
         }
 
-        // Fallback: during DNA migration the new DHT has no entry yet.
-        // Trust the local identity-link.json until the background re-creation
-        // completes and getLinkedAgents starts returning results.
-        if (!nowLinked) {
-          try {
-            const localLink = await getIdentityLink();
-            if (localLink) nowLinked = true;
-          } catch {
-            // No local file — genuinely not linked
-          }
-        }
-
+        linkState.value = nextState;
+        const nowLinked = nextState === "linked" || nextState === "offline";
         linked.value = nowLinked;
 
         // Start/stop auto-backup based on link status
@@ -295,10 +301,14 @@ export default component$(() => {
           }
         }
 
-        // Clear profile when unlinked
-        if (wasLinked && !nowLinked) {
+        // Clear profile when going to a fully-unlinked state. In `mismatch`
+        // we deliberately keep the cached display name/picture so the user
+        // can see who they used to be signed in as — but the header renders
+        // them with a "stale" treatment.
+        if (wasLinked && nextState === "unlinked") {
           displayName.value = null;
           profilePicture.value = null;
+          await saveProfileCache(null, null).catch(() => {});
         }
       } catch {
         // Ignore errors
@@ -311,6 +321,32 @@ export default component$(() => {
       stopBackup();
       if (unlistenStatus) unlistenStatus();
     });
+  });
+
+  /**
+   * Disconnect handler: user has decided that the Vault account change is
+   * permanent and they want to clean up. Revokes the DHT entry, clears the
+   * profile cache, and drops to `unlinked` so the layout shows the standard
+   * sign-in CTA again. Does NOT delete past polls/votes — those remain
+   * attributable to ProofPoll's local agent.
+   */
+  const handleDisconnect = $(async () => {
+    if (disconnecting.value) return;
+    disconnecting.value = true;
+    try {
+      await revokeIdentityLink().catch(() => {});
+      await saveProfileCache(null, null).catch(() => {});
+      displayName.value = null;
+      profilePicture.value = null;
+      linkState.value = "unlinked";
+      linked.value = false;
+    } finally {
+      disconnecting.value = false;
+    }
+  });
+
+  const handleReconnect = $(() => {
+    nav("/identity/?link=true");
   });
 
   const isActive = (path: string) => loc.url.pathname === path;
@@ -365,28 +401,7 @@ export default component$(() => {
         </div>
         {status.value?.ready &&
           status.value.agent_pub_key &&
-          (linked.value ? (
-            <div class="flex items-center gap-2">
-              {displayName.value && (
-                <span class="text-sm text-gray-300">{displayName.value}</span>
-              )}
-              {sanitizeImageSrc(profilePicture.value) ? (
-                <img
-                  src={sanitizeImageSrc(profilePicture.value)!}
-                  alt="Profile"
-                  class="h-8 w-8 rounded-full object-cover border border-gray-600"
-                  width={32}
-                  height={32}
-                />
-              ) : (
-                <div class="flex h-8 w-8 items-center justify-center rounded-full bg-indigo-600 text-sm font-medium text-white">
-                  {displayName.value
-                    ? displayName.value.charAt(0).toUpperCase()
-                    : "F"}
-                </div>
-              )}
-            </div>
-          ) : (
+          (linkState.value === "unlinked" ? (
             <a href="/identity/?link=true">
               <img
                 src="/assets/flowsta-signin.svg"
@@ -396,6 +411,54 @@ export default component$(() => {
                 class="hover:opacity-80 transition-opacity"
               />
             </a>
+          ) : (
+            // linked / offline / mismatch — render the profile chip. In the
+            // `mismatch` case it's grayed out with a tooltip; the banner
+            // below explains the situation.
+            <div
+              class="flex items-center gap-2"
+              title={
+                linkState.value === "mismatch"
+                  ? "From a previous Flowsta connection. Reconnect or disconnect via the banner below."
+                  : undefined
+              }
+            >
+              {displayName.value && (
+                <span
+                  class={[
+                    "text-sm",
+                    linkState.value === "mismatch"
+                      ? "text-gray-500 line-through"
+                      : "text-gray-300",
+                  ].join(" ")}
+                >
+                  {displayName.value}
+                </span>
+              )}
+              {sanitizeImageSrc(profilePicture.value) ? (
+                <img
+                  src={sanitizeImageSrc(profilePicture.value)!}
+                  alt="Profile"
+                  class={[
+                    "h-8 w-8 rounded-full object-cover border border-gray-600",
+                    linkState.value === "mismatch" ? "opacity-40 grayscale" : "",
+                  ].join(" ")}
+                  width={32}
+                  height={32}
+                />
+              ) : (
+                <div
+                  class={[
+                    "flex h-8 w-8 items-center justify-center rounded-full text-sm font-medium text-white",
+                    linkState.value === "mismatch" ? "bg-gray-700" : "bg-indigo-600",
+                  ].join(" ")}
+                >
+                  {displayName.value
+                    ? displayName.value.charAt(0).toUpperCase()
+                    : "F"}
+                </div>
+              )}
+            </div>
           ))}
       </header>
 
@@ -462,6 +525,60 @@ export default component$(() => {
                 </button>
               </div>
             )}
+
+            {/* Account-changed banner — shown when Vault is running but
+                doesn't recognize this app's agent. The user can reconnect
+                with their current Vault account or deliberately disconnect.
+                We never auto-revoke; the user's polls + votes stay theirs. */}
+            {linkState.value === "mismatch" && (
+              <div class="bg-amber-900/30 border border-amber-800/50 rounded-lg px-4 py-3 mb-4">
+                <div class="flex items-start gap-3">
+                  <svg
+                    class="h-5 w-5 shrink-0 text-amber-400 mt-0.5"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    stroke="currentColor"
+                    stroke-width={2}
+                    aria-hidden="true"
+                  >
+                    <path
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z"
+                    />
+                  </svg>
+                  <div class="flex-1 min-w-0">
+                    <p class="text-sm font-medium text-amber-200">
+                      Your Flowsta account has changed
+                    </p>
+                    <p class="mt-1 text-xs text-amber-300/90">
+                      ProofPoll was connected to a Flowsta account that no
+                      longer matches the one in your Vault. Existing polls
+                      and votes are still yours, but you'll need to
+                      reconnect to create or vote on new ones.
+                    </p>
+                    <div class="mt-3 flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        onClick$={handleReconnect}
+                        class="inline-flex items-center rounded-md bg-amber-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-amber-500"
+                      >
+                        Connect with current account
+                      </button>
+                      <button
+                        type="button"
+                        disabled={disconnecting.value}
+                        onClick$={handleDisconnect}
+                        class="inline-flex items-center rounded-md border border-amber-700 px-3 py-1.5 text-xs font-medium text-amber-200 hover:bg-amber-900/40 disabled:opacity-50"
+                      >
+                        {disconnecting.value ? "Disconnecting..." : "Disconnect"}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
             <Slot />
           </>
         )}
