@@ -34,7 +34,7 @@
     "vite-tsconfig-paths": "^4.2.1"
   },
   "dependencies": {
-    "@flowsta/holochain": "file:../sdk-monorepo/packages/holochain",
+    "@flowsta/holochain": "^2.3.0",
     "@tailwindcss/postcss": "^4.2.1",
     "@tauri-apps/plugin-shell": "^2.3.5"
   }
