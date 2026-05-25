@@ -1,7 +1,8 @@
 {
   "name": "proofpoll",
   "description": "ProofPoll - Verified polls with Flowsta identity linking",
-  "version": "0.1.0",
+  "version": "0.2.0",
+  "license": "MIT",
   "engines": {
     "node": "^18.17.0 || ^20.3.0 || >=21.0.0"
   },

@@ -96,16 +96,31 @@ jobs:
 
     runs-on: ${{ matrix.platform }}
 
-    # Compile-time env vars consumed by src-tauri/src/conductor.rs.
-    # Empty when the corresponding secret isn't set → conductor.rs falls
-    # back to its defaults (Holochain dev bootstrap, no auth). See the
-    # workflow header for the fork-friendly rationale.
+    # Job-level env exposes secrets so that step-level `if:` conditionals
+    # can check for them (step-level env is evaluated AFTER the if, so
+    # secrets only set there can't gate the step itself).
+    #
+    # The PROOFPOLL_* vars are consumed by src-tauri/src/conductor.rs at
+    # compile time — empty values fall back to the source defaults
+    # (public Holochain dev bootstrap, no auth). The APPLE_* and
+    # ESIGNER_* vars are checked by the signing steps below; forks
+    # without those secrets get unsigned bundles, no signing-step failures.
     env:
       PROOFPOLL_BOOTSTRAP_URL: ${{ secrets.PROOFPOLL_BOOTSTRAP_URL }}
       PROOFPOLL_SIGNAL_URL: ${{ secrets.PROOFPOLL_SIGNAL_URL }}
       PROOFPOLL_RELAY_URL: ${{ secrets.PROOFPOLL_RELAY_URL }}
       PROOFPOLL_AUTH_MATERIAL: ${{ secrets.PROOFPOLL_AUTH_MATERIAL }}
       VITE_FLOWSTA_CLIENT_ID: ${{ secrets.VITE_FLOWSTA_CLIENT_ID }}
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+      APPLE_API_KEY_PATH: ${{ secrets.APPLE_API_KEY_PATH }}
+      APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      ESIGNER_USERNAME: ${{ secrets.ESIGNER_USERNAME }}
+      ESIGNER_PASSWORD: ${{ secrets.ESIGNER_PASSWORD }}
+      ESIGNER_CREDENTIAL_ID: ${{ secrets.ESIGNER_CREDENTIAL_ID }}
+      ESIGNER_TOTP_SECRET: ${{ secrets.ESIGNER_TOTP_SECRET }}
 
     steps:
       - uses: actions/checkout@v5
@@ -175,6 +190,49 @@ jobs:
       - name: Install frontend dependencies
         run: npm install
 
+      # macOS code signing — only runs when the Apple secrets are
+      # configured. A fork without an Apple Developer account will
+      # produce unsigned bundles (Gatekeeper will warn on first launch).
+      - name: Import Apple certificate (macOS)
+        if: runner.os == 'macOS' && env.APPLE_CERTIFICATE != ''
+        run: |
+          CERTIFICATE_PATH=$RUNNER_TEMP/certificate.p12
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+          echo -n "$APPLE_CERTIFICATE" | base64 --decode -o $CERTIFICATE_PATH
+          security create-keychain -p "" $KEYCHAIN_PATH
+          security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
+          security unlock-keychain -p "" $KEYCHAIN_PATH
+          security import $CERTIFICATE_PATH -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
+          security set-key-partition-list -S apple-tool:,apple: -k "" $KEYCHAIN_PATH
+          security list-keychains -d user -s $KEYCHAIN_PATH login.keychain-db
+
+      - name: Set up Apple API key (macOS)
+        if: runner.os == 'macOS' && env.APPLE_API_KEY != ''
+        run: |
+          mkdir -p ~/private_keys
+          echo -n "$APPLE_API_KEY_PATH" | base64 --decode -o ~/private_keys/AuthKey_${APPLE_API_KEY}.p8
+
+      # Windows code signing via SSL.com eSigner — only runs when the
+      # ESIGNER secrets are configured. Without them, the Windows bundle
+      # is unsigned (SmartScreen will warn on first launch).
+      - name: Setup Java (Windows)
+        if: runner.os == 'Windows' && env.ESIGNER_USERNAME != ''
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Download CodeSignTool (Windows)
+        if: runner.os == 'Windows' && env.ESIGNER_USERNAME != ''
+        shell: pwsh
+        run: |
+          $url = "https://github.com/SSLcom/CodeSignTool/releases/download/v1.3.2/CodeSignTool-v1.3.2.zip"
+          $zip = Join-Path $env:RUNNER_TEMP "CodeSignTool.zip"
+          $dest = Join-Path $env:RUNNER_TEMP "CodeSignTool"
+          Invoke-WebRequest -Uri $url -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath $dest -Force
+          "CODE_SIGN_TOOL_DIR=$dest" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
       # Pre-release tags (e.g. proofpoll-v1.4.0-beta1) skip the MSI bundle
       # on Windows: the MSI bundler rejects non-numeric pre-release
       # identifiers. NSIS has no such restriction.
@@ -190,19 +248,34 @@ jobs:
           fi
           echo "extra=$EXTRA" >> "$GITHUB_OUTPUT"
 
-      # v1: unsigned bundles for both macOS and Windows. macOS shows the
-      # "unidentified developer" Gatekeeper warning on first launch;
-      # Windows SmartScreen warns. Acceptable for early ProofPoll users;
-      # add signing later via the pattern in
-      # build-docs/memory/project_windows_signing_status.md (Vault uses
-      # SSL.com OV + eSigner) and an Apple Developer ID for macOS.
+      # Build + sign. The Apple and ESIGNER secrets below are read by
+      # tauri-action; absent secrets produce unsigned bundles. The
+      # `APPLE_SIGNING_IDENTITY: '-'` fallback when not on macOS keeps
+      # tauri-action's signing step from erroring on Linux/Windows.
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Default the signing identity to '-' (ad-hoc) when not on
+          # macOS or when the secret isn't configured. tauri-action's
+          # macOS sign step errors otherwise.
+          APPLE_SIGNING_IDENTITY: ${{ runner.os == 'macOS' && env.APPLE_SIGNING_IDENTITY != '' && env.APPLE_SIGNING_IDENTITY || '-' }}
         with:
           releaseId: ${{ needs.create-release.outputs.release_id }}
           args: --target ${{ matrix.target }}${{ steps.tauri_args.outputs.extra }}
+
+      - name: Dump Windows signing transcript on failure
+        if: failure() && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $log = Join-Path $env:RUNNER_TEMP "sign-windows.log"
+          if (Test-Path $log) {
+            Write-Host "===== sign-windows.log ====="
+            Get-Content $log
+            Write-Host "===== end log ====="
+          } else {
+            Write-Host "No sign-windows.log at $log"
+          }
 
   publish-release:
     needs: [create-release, build]
