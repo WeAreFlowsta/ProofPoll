@@ -491,8 +491,16 @@ pub fn spawn_health_monitor(
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 
-            // Check if process is still alive via kill(pid, 0)
+            // Check if process is still alive via kill(pid, 0) on Unix.
+            // Windows lacks libc::kill — for now we just skip the proactive
+            // check there; a conductor crash surfaces via the next failing
+            // API call instead. To restore on Windows, use windows-sys
+            // `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` +
+            // `GetExitCodeProcess` and treat `STILL_ACTIVE` (259) as alive.
+            #[cfg(unix)]
             let alive = unsafe { libc::kill(pid, 0) } == 0;
+            #[cfg(not(unix))]
+            let alive = true;
             if !alive {
                 let current = state.conductor_status.lock().unwrap().clone();
                 // Only report if we were in Ready state (not already Error/Stopped)
