@@ -162,6 +162,12 @@ jobs:
       # from-source compile cuts the build by roughly an hour. Holochain
       # publishes binaries for all four target triples; lair-keystore ships
       # in the same release (the 0.6.3 lair that 0.6.1 pins).
+      #
+      # We rename the binaries to a `proofpoll-` prefix on download so
+      # the resulting .deb / .msi etc. ship them as
+      # /usr/bin/proofpoll-{holochain,lair-keystore} — avoiding the
+      # collision with other Tauri/Holochain apps (e.g. Flowsta Vault)
+      # that also ship binaries with the bare names.
       - name: Fetch Holochain 0.6.1 binaries (Unix)
         if: runner.os != 'Windows'
         env:
@@ -170,7 +176,7 @@ jobs:
           mkdir -p src-tauri/binaries
           base="https://github.com/holochain/holochain/releases/download/${HC_RELEASE}"
           for bin in holochain lair-keystore; do
-            dest="src-tauri/binaries/${bin}-${{ matrix.target }}"
+            dest="src-tauri/binaries/proofpoll-${bin}-${{ matrix.target }}"
             curl -fsSL "${base}/${bin}-${{ matrix.target }}" -o "$dest"
             chmod +x "$dest"
             test "$(wc -c < "$dest")" -gt 1000000 || { echo "$bin download too small"; exit 1; }
@@ -186,7 +192,7 @@ jobs:
           $base = "https://github.com/holochain/holochain/releases/download/$env:HC_RELEASE"
           $t = "${{ matrix.target }}"
           foreach ($bin in "holochain","lair-keystore") {
-            $dest = "src-tauri/binaries/$bin-$t.exe"
+            $dest = "src-tauri/binaries/proofpoll-$bin-$t.exe"
             Invoke-WebRequest "$base/$bin-$t.exe" -OutFile $dest
             if ((Get-Item $dest).Length -lt 1000000) { throw "$bin download too small" }
           }

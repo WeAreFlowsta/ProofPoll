@@ -27,6 +27,7 @@ mod crypto;
 mod dna;
 mod lair;
 pub mod migration;
+mod sidecar;
 
 use commands::AppState;
 use std::sync::Arc;

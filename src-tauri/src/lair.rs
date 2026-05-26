@@ -13,6 +13,8 @@ use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 
+use crate::sidecar::sidecar_path;
+
 /// Start a lair-keystore process.
 ///
 /// On first run (no config file), initializes the keystore.
@@ -30,7 +32,7 @@ pub fn start_lair_process(
 
     if is_first_run {
         log::info!("First run: initializing lair-keystore...");
-        let mut child = Command::new("lair-keystore")
+        let mut child = Command::new(sidecar_path("proofpoll-lair-keystore"))
             .arg("init")
             .arg("--piped")
             .current_dir(lair_dir)
@@ -67,7 +69,7 @@ pub fn start_lair_process(
 
     // Start the lair server.
     log::info!("Starting lair-keystore server...");
-    let mut child = Command::new("lair-keystore")
+    let mut child = Command::new(sidecar_path("proofpoll-lair-keystore"))
         .arg("server")
         .arg("--piped")
         .current_dir(lair_dir)

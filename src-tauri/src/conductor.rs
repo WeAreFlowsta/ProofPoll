@@ -15,6 +15,7 @@
 //!     where your app-specific hApp bundle names are configured
 
 use crate::lair;
+use crate::sidecar::sidecar_path;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
 use tauri::Emitter;
@@ -193,7 +194,7 @@ fn start_conductor_process(
     let stderr_file = std::fs::File::create(&stderr_path)
         .map_err(|e| format!("Failed to create conductor stderr log: {}", e))?;
 
-    let mut child = std::process::Command::new("holochain")
+    let mut child = std::process::Command::new(sidecar_path("proofpoll-holochain"))
         .arg("-c")
         .arg(config_path)
         .arg("--piped")
