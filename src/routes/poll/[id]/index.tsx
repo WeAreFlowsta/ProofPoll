@@ -1,5 +1,15 @@
 import { component$, useContext, useSignal, useVisibleTask$, $ } from "@builder.io/qwik";
-import { useLocation, useNavigate } from "@builder.io/qwik-city";
+import { useLocation, useNavigate, type StaticGenerateHandler } from "@builder.io/qwik-city";
+
+// Without this, the static adapter strips the dynamic `/poll/[id]/`
+// route entirely — Qwik's client router doesn't know about the route
+// shape, so <Link href="/poll/abc/"> falls back to a hard HTTP nav and
+// 404s into the parent (the home page), making clicks look like no-ops.
+// One placeholder is enough: actual poll IDs are resolved at runtime
+// via useLocation().params.id and fetched from the conductor.
+export const onStaticGenerate: StaticGenerateHandler = () => ({
+  params: [{ id: "placeholder" }],
+});
 import { linkedContext } from "~/lib/context";
 import { invoke } from "@tauri-apps/api/core";
 import {
