@@ -69,6 +69,10 @@ pub fn run() {
             // Resolve the resource directory where the .happ bundle lives.
             // In dev mode, Tauri doesn't copy resources to target/debug/,
             // so point directly at the source resources/ folder.
+            // In release, Tauri's resource_dir() returns the app's root
+            // install directory; entries declared as `resources/foo` in
+            // tauri.conf.json land under a `resources/` subdir there, so
+            // we append that to match dev's layout.
             #[cfg(debug_assertions)]
             let resource_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("resources");
@@ -76,7 +80,8 @@ pub fn run() {
             let resource_dir = app
                 .path()
                 .resource_dir()
-                .expect("Failed to get resource directory");
+                .expect("Failed to get resource directory")
+                .join("resources");
 
             // Auto-start the conductor in the background.
             let startup_state = app_state.clone();

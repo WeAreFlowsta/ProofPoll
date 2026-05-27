@@ -3980,7 +3980,7 @@ dependencies = [
 
 [[package]]
 name = "proofpoll"
-version = "0.2.0-beta3"
+version = "0.2.0-beta4"
 dependencies = [
  "base64 0.22.1",
  "holochain_client",
