@@ -1,5 +1,5 @@
 import { component$, useContext, useSignal, useComputed$, useVisibleTask$, $ } from "@builder.io/qwik";
-import { Link } from "@builder.io/qwik-city";
+import { Link, useNavigate } from "@builder.io/qwik-city";
 import { invoke } from "@tauri-apps/api/core";
 import { linkedContext } from "~/lib/context";
 import { getAllPolls, getPollVotes, getPollFlags, getFlagThreshold, type PollListItem } from "~/lib/holochain";
@@ -8,6 +8,7 @@ type Filter = "current" | "archive" | "created" | "voted";
 
 export default component$(() => {
   const linked = useContext(linkedContext);
+  const nav = useNavigate();
   const polls = useSignal<PollListItem[]>([]);
   const loading = useSignal(true);
   const loadingSlow = useSignal(false);
@@ -314,10 +315,10 @@ export default component$(() => {
               p.poll.closes_at > Date.now() / 1000;
 
             return (
-              <Link
+              <div
                 key={p.hash}
-                href={`/poll/${p.hash}/`}
-                class="bg-gray-900 border border-gray-800 rounded-lg p-5 hover:border-indigo-600 transition-colors"
+                onClick$={() => nav(`/poll/${p.hash}/`)}
+                class="bg-gray-900 border border-gray-800 rounded-lg p-5 hover:border-indigo-600 transition-colors cursor-pointer"
               >
                 <div class="flex items-start justify-between mb-2">
                   <h2 class="text-lg font-semibold text-white">
@@ -346,7 +347,7 @@ export default component$(() => {
                     </span>
                   )}
                 </div>
-              </Link>
+              </div>
             );
           })}
         </div>
