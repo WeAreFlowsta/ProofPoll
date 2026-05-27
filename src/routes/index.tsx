@@ -317,7 +317,7 @@ export default component$(() => {
             return (
               <div
                 key={p.hash}
-                onClick$={() => nav(`/poll/${p.hash}/`)}
+                onClick$={() => nav(`/poll/#${p.hash}`)}
                 class="bg-gray-900 border border-gray-800 rounded-lg p-5 hover:border-indigo-600 transition-colors cursor-pointer"
               >
                 <div class="flex items-start justify-between mb-2">

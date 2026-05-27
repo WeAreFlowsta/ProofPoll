@@ -33,7 +33,7 @@ export default component$(() => {
     error.value = null;
     try {
       const pollHash = await publishDraft(hash);
-      await nav(`/poll/${pollHash}/`);
+      await nav(`/poll/#${pollHash}`);
     } catch (e: any) {
       error.value = e.message || "Failed to publish draft";
       publishing.value = null;

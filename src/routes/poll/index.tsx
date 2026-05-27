@@ -1,15 +1,16 @@
 import { component$, useContext, useSignal, useVisibleTask$, $ } from "@builder.io/qwik";
-import { useLocation, useNavigate, type StaticGenerateHandler } from "@builder.io/qwik-city";
+import { useNavigate } from "@builder.io/qwik-city";
 
-// Without this, the static adapter strips the dynamic `/poll/[id]/`
-// route entirely — Qwik's client router doesn't know about the route
-// shape, so <Link href="/poll/abc/"> falls back to a hard HTTP nav and
-// 404s into the parent (the home page), making clicks look like no-ops.
-// One placeholder is enough: actual poll IDs are resolved at runtime
-// via useLocation().params.id and fetched from the conductor.
-export const onStaticGenerate: StaticGenerateHandler = () => ({
-  params: [{ id: "placeholder" }],
-});
+// Why hash-based instead of /poll/[id]/?
+// The Qwik static adapter only pre-renders routes whose param values
+// are enumerated up-front. Poll action hashes aren't, so navigating
+// to /poll/<unknown-hash>/ fails: the per-route q-data.json doesn't
+// exist, the client router silently aborts the render, and the click
+// looks like a no-op (or flickers once before Qwik caches the failure
+// and refuses to re-attempt the same URL). Using /poll/#<hash>
+// sidesteps the issue — /poll/ is a fully static route, the hash is
+// browser-only (never sent to the server-shaped asset resolver), and
+// switching polls is just a hash change.
 import { linkedContext } from "~/lib/context";
 import { invoke } from "@tauri-apps/api/core";
 import {
@@ -30,8 +31,12 @@ import {
 
 export default component$(() => {
   const linked = useContext(linkedContext);
-  const loc = useLocation();
   const nav = useNavigate();
+  // The poll's action hash is read from window.location.hash at client
+  // visible-task time (the hash is never present on the server side).
+  // Stored in a signal so future hashchange events can re-trigger
+  // the data load.
+  const pollHashSig = useSignal<string>("");
   const poll = useSignal<Poll | null>(null);
   const pollAuthor = useSignal<string | null>(null);
   const pollDnaVersion = useSignal<"1.0" | "1.1" | "1.2" | "1.3">("1.3");
@@ -58,9 +63,16 @@ export default component$(() => {
   const rationaleError = useSignal<string | null>(null);
   const myVoteHash = useSignal<string | null>(null);
 
-  const pollHash = loc.params.id;
-
   useVisibleTask$(async () => {
+    const pollHash = window.location.hash.startsWith("#")
+      ? window.location.hash.slice(1)
+      : window.location.hash;
+    pollHashSig.value = pollHash;
+    if (!pollHash) {
+      error.value = "Poll not found";
+      loading.value = false;
+      return;
+    }
     try {
       const status = await invoke<{ agent_pub_key: string | null }>(
         "get_app_status",
@@ -122,13 +134,13 @@ export default component$(() => {
 
     try {
       await castVote(
-        pollHash,
+        pollHashSig.value,
         selectedOption.value,
         pollDnaVersion.value,
         poll.value?.poll_type ?? undefined,
       );
 
-      const newVotes = await getPollVotes(pollHash, pollDnaVersion.value);
+      const newVotes = await getPollVotes(pollHashSig.value, pollDnaVersion.value);
       votes.value = newVotes;
       hasVoted.value = true;
 
@@ -144,7 +156,7 @@ export default component$(() => {
     deleting.value = true;
     deleteError.value = null;
     try {
-      await deletePoll(pollHash);
+      await deletePoll(pollHashSig.value);
       await nav("/");
     } catch (e: any) {
       deleteError.value = e.message || String(e) || "Failed to delete poll";
@@ -157,8 +169,8 @@ export default component$(() => {
     flagging.value = true;
     showFlagPicker.value = false;
     try {
-      await flagPoll(pollHash, reason);
-      const updatedFlags = await getPollFlags(pollHash);
+      await flagPoll(pollHashSig.value, reason);
+      const updatedFlags = await getPollFlags(pollHashSig.value);
       flags.value = updatedFlags;
       myFlag.value = updatedFlags.find(
         (f) => f.author === myAgent.value,
@@ -218,7 +230,7 @@ export default component$(() => {
               <p class="text-red-300 text-sm font-medium mb-1">Couldn't load poll</p>
               <p class="text-red-400/70 text-xs mb-3">{error.value}</p>
               <a
-                href={`/poll/${pollHash}/`}
+                href={`/poll/#${pollHashSig.value}`}
                 class="text-xs bg-red-800/40 hover:bg-red-800/60 text-red-300 px-3 py-1.5 rounded-full font-medium transition-colors inline-block"
               >
                 Try again
@@ -432,7 +444,7 @@ export default component$(() => {
             <p class="text-gray-400 mb-4">
               Sign in with Flowsta to vote on this poll.
             </p>
-            <a href={`/identity/?link=true&returnTo=/poll/${pollHash}/`}>
+            <a href={`/identity/?link=true&returnTo=/poll/%23${pollHashSig.value}`}>
               <img
                 src="/assets/flowsta-signin.svg"
                 alt="Sign in with Flowsta to vote"

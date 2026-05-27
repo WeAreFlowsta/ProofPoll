@@ -173,7 +173,7 @@ export default component$(() => {
         closes_at: closesAtTs,
         poll_type: pollType.value,
       });
-      await nav(`/poll/${hash}/`);
+      await nav(`/poll/#${hash}`);
     } catch (e: any) {
       error.value = e.message || String(e) || "Failed to create poll";
       submitting.value = false;
