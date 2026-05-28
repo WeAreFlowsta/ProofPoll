@@ -620,10 +620,21 @@ pub async fn cast_vote(
     // "Anonymous" or "Public" — only relevant for dna_version "1.2".
     poll_type: Option<String>,
 ) -> Result<String, String> {
+    log::info!(
+        "cast_vote: dna_version={}, poll_type={:?}, option_index={}",
+        dna_version, poll_type, option_index,
+    );
     // Require a linked Flowsta identity — frontend gating alone is bypassable.
     if load_identity_link(&state.data_dir).is_none() {
+        log::error!("cast_vote: rejected — no identity link in data dir");
         return Err("Sign in with Flowsta to vote".to_string());
     }
+    let cached = load_cached_profile(&state.data_dir);
+    log::info!(
+        "cast_vote: identity link present, cached profile: display_name={:?}, has_picture={}",
+        cached.as_ref().and_then(|p| p.display_name.as_deref()),
+        cached.as_ref().and_then(|p| p.profile_picture.as_deref()).is_some(),
+    );
 
     let hash = ActionHash::try_from(poll_action_hash)
         .map_err(|e| format!("Invalid action hash: {:?}", e))?;

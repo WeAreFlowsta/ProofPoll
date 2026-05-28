@@ -12,6 +12,7 @@ import { useNavigate } from "@builder.io/qwik-city";
 // browser-only (never sent to the server-shaped asset resolver), and
 // switching polls is just a hash change.
 import { linkedContext } from "~/lib/context";
+import { formatInvokeError } from "~/lib/errors";
 import { setSignInIntent } from "~/lib/signin";
 import { invoke } from "@tauri-apps/api/core";
 import {
@@ -122,7 +123,7 @@ export default component$(() => {
 
 
     } catch (e: any) {
-      error.value = e.message || "Failed to load poll";
+      error.value = formatInvokeError(e, "Failed to load poll");
     } finally {
       loading.value = false;
     }
@@ -147,7 +148,7 @@ export default component$(() => {
 
 
     } catch (e: any) {
-      voteError.value = e.message || "Failed to cast vote";
+      voteError.value = formatInvokeError(e, "Failed to cast vote");
     } finally {
       voting.value = false;
     }
@@ -177,7 +178,7 @@ export default component$(() => {
         (f) => f.author === myAgent.value,
       ) ?? null;
     } catch (e: any) {
-      flagError.value = e.message || "Failed to flag poll";
+      flagError.value = formatInvokeError(e, "Failed to flag poll");
     } finally {
       flagging.value = false;
     }
@@ -194,7 +195,7 @@ export default component$(() => {
         (f) => f.author !== myAgent.value,
       );
     } catch (e: any) {
-      flagError.value = e.message || "Failed to remove flag";
+      flagError.value = formatInvokeError(e, "Failed to remove flag");
     } finally {
       flagging.value = false;
     }
@@ -209,7 +210,7 @@ export default component$(() => {
       rationale.value = rationaleInput.value.trim();
       rationaleInput.value = "";
     } catch (e: any) {
-      rationaleError.value = e.message || "Failed to save note";
+      rationaleError.value = formatInvokeError(e, "Failed to save note");
     } finally {
       savingRationale.value = false;
     }
