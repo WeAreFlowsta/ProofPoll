@@ -54,3 +54,13 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 # `spawn_health_monitor`. Windows uses a stubbed check (see conductor.rs).
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# Windows-only: EnumWindows + ShowWindow(SW_HIDE) so the spawned
+# lair-keystore.exe / holochain.exe console windows are hidden post-spawn
+# without using CREATE_NO_WINDOW (see process_ext.rs).
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Diagnostics_ToolHelp",
+] }

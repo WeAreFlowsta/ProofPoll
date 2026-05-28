@@ -13,6 +13,7 @@ use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 
+use crate::process_ext::CommandExt as _;
 use crate::sidecar::sidecar_path;
 
 /// Start a lair-keystore process.
@@ -39,7 +40,8 @@ pub fn start_lair_process(
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .spawn()
+            .tie_to_parent()
+            .spawn_hidden()
             .map_err(|e| format!("Failed to spawn lair-keystore init: {}", e))?;
 
         if let Some(mut stdin) = child.stdin.take() {
@@ -76,7 +78,8 @@ pub fn start_lair_process(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()
+        .tie_to_parent()
+        .spawn_hidden()
         .map_err(|e| format!("Failed to spawn lair-keystore server: {}", e))?;
 
     if let Some(mut stdin) = child.stdin.take() {

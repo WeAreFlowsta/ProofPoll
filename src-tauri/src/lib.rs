@@ -27,6 +27,7 @@ mod crypto;
 mod dna;
 mod lair;
 pub mod migration;
+mod process_ext;
 mod sidecar;
 
 use commands::AppState;

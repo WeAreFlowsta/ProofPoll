@@ -3980,7 +3980,7 @@ dependencies = [
 
 [[package]]
 name = "proofpoll"
-version = "0.2.0-beta11"
+version = "0.2.0-beta12"
 dependencies = [
  "base64 0.22.1",
  "holochain_client",
@@ -3999,6 +3999,7 @@ dependencies = [
  "tauri-plugin-shell",
  "thiserror 1.0.69",
  "tokio",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

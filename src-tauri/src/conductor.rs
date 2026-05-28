@@ -15,6 +15,7 @@
 //!     where your app-specific hApp bundle names are configured
 
 use crate::lair;
+use crate::process_ext::CommandExt as _;
 use crate::sidecar::sidecar_path;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
@@ -210,7 +211,8 @@ fn start_conductor_process(
         .stdin(Stdio::piped())
         .stdout(stdout_file)
         .stderr(stderr_file)
-        .spawn()
+        .tie_to_parent()
+        .spawn_hidden()
         .map_err(|e| format!("Failed to spawn holochain conductor: {}", e))?;
 
     if let Some(mut stdin) = child.stdin.take() {
