@@ -145,11 +145,20 @@ fn generate_conductor_config(
         None => String::new(),
     };
 
+    // Path values use SINGLE-quoted YAML strings — double-quoted YAML
+    // interprets backslash escapes (e.g. "C:\Users\..." reads "\U" as the
+    // start of a Unicode escape and bombs out on the first non-hex
+    // character). Single-quoted strings pass backslashes through verbatim.
+    // The only character that needs escaping inside single quotes is the
+    // single quote itself; doubling it is the YAML convention.
+    let data_root = conductor_dir.display().to_string().replace('\'', "''");
+    let lair_url = lair_connection_url.replace('\'', "''");
+
     let config = format!(
-        r#"data_root_path: {data_root}
+        r#"data_root_path: '{data_root}'
 keystore:
   type: lair_server
-  connection_url: "{lair_url}"
+  connection_url: '{lair_url}'
 admin_interfaces:
 - driver:
     type: websocket
@@ -161,9 +170,9 @@ network:
   relay_url: {relay}
 {auth_line}db_sync_strategy: Resilient
 "#,
-        data_root = conductor_dir.display(),
+        data_root = data_root,
         admin_port = admin_port,
-        lair_url = lair_connection_url,
+        lair_url = lair_url,
         bootstrap = bootstrap_url(),
         signal = signal_url(),
         relay = relay_url(),
