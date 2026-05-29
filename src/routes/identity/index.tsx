@@ -8,6 +8,7 @@ import {
   getLinkedAgents,
   commitIdentityLink,
   revokeIdentityLink,
+  saveProfileCache,
 } from "~/lib/holochain";
 
 export default component$(() => {
@@ -29,6 +30,9 @@ export default component$(() => {
   const confirmUnlink = useSignal(false);
 
   // Fetch Vault profile and update context for header + this page.
+  // Also persists to profile-cache.json so the Rust side (e.g. cast_vote on
+  // public polls, which needs display_name) can read it immediately after a
+  // fresh link without waiting for an app restart.
   const fetchVaultProfile = $(async () => {
     try {
       const resp = await fetch("http://127.0.0.1:27777/status", {
@@ -38,6 +42,12 @@ export default component$(() => {
         const vault = await resp.json();
         if (vault.display_name) displayName.value = vault.display_name;
         if (vault.profile_picture) profilePicture.value = vault.profile_picture;
+        if (vault.display_name || vault.profile_picture) {
+          await saveProfileCache(
+            vault.display_name ?? null,
+            vault.profile_picture ?? null,
+          );
+        }
       }
     } catch {
       // Vault not running — profile will load from layout poll
