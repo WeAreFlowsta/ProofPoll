@@ -346,7 +346,53 @@ pub struct StartupResult {
     pub needs_migration: bool,
 }
 
+/// Public entry point. Runs the full startup once; if it fails we kill
+/// any leftover children, wait briefly for OS resources to free, and try
+/// a second time on a fresh process.
+///
+/// Why: on Windows the first fresh-install run sometimes leaves lair or
+/// the conductor in a state where the next clean start succeeds — the
+/// retry automates the manual "close the app and reopen" workaround
+/// users would otherwise have to do. The Vault adopted the same pattern
+/// in `flowsta-vault` commit 3774082 for the same reason.
 pub async fn start_holochain(
+    app_handle: tauri::AppHandle,
+    data_dir: PathBuf,
+    resource_dir: PathBuf,
+    passphrase: String,
+) -> Result<StartupResult, String> {
+    match start_holochain_attempt(
+        app_handle.clone(),
+        data_dir.clone(),
+        resource_dir.clone(),
+        passphrase.clone(),
+    )
+    .await
+    {
+        Ok(result) => return Ok(result),
+        Err(e) => {
+            log::warn!(
+                "[start_holochain] first attempt failed: {} — auto-restarting",
+                e,
+            );
+            let _ = app_handle.emit(
+                "conductor-status",
+                ConductorStatus::Starting {
+                    message: "First-run setup needs a quick restart...".into(),
+                },
+            );
+            // Brief pause so the admin WS port is released and any
+            // process tear-down completes before the second attempt
+            // binds the same resources.
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+    }
+
+    start_holochain_attempt(app_handle, data_dir, resource_dir, passphrase).await
+}
+
+/// One full startup attempt: lair → connect → conductor → install DNAs.
+async fn start_holochain_attempt(
     app_handle: tauri::AppHandle,
     data_dir: PathBuf,
     resource_dir: PathBuf,
@@ -376,16 +422,51 @@ pub async fn start_holochain(
         fail_with_lair_cleanup!(e);
     }
 
-    // 3. Connect to lair.
+    // 3. Connect to lair. On Windows the named pipe is registered in the
+    //    kernel namespace asynchronously after the server process spawns —
+    //    "file not found" for the first second or two is normal. Retry until
+    //    the pipe is up or the lair process dies. On Unix this almost always
+    //    succeeds first try because step 2 already waited for the socket
+    //    file.
     let _ = app_handle.emit(
         "conductor-status",
         ConductorStatus::Starting {
             message: "Connecting to lair-keystore...".into(),
         },
     );
-    let lair_client = match lair::connect_to_lair(&connection_url, &passphrase).await {
-        Ok(c) => c,
-        Err(e) => fail_with_lair_cleanup!(e),
+    let lair_client = {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let mut last_err: Option<String> = None;
+        loop {
+            // Short-circuit if lair died — no amount of retrying brings it back.
+            if let Ok(Some(status)) = lair_child.try_wait() {
+                let logs = lair::read_lair_logs(&lair_dir, "server");
+                fail_with_lair_cleanup!(format!(
+                    "lair-keystore exited unexpectedly (status {}): {}",
+                    status, logs
+                ));
+            }
+            match lair::connect_to_lair(&connection_url, &passphrase).await {
+                Ok(c) => break c,
+                Err(e) => {
+                    // "Pipe not ready yet" — keep waiting.
+                    let not_ready = e.contains("os error 2")
+                        || e.contains("cannot find the file")
+                        || e.contains("No such file or directory");
+                    if not_ready && std::time::Instant::now() < deadline {
+                        last_err = Some(e);
+                        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                        continue;
+                    }
+                    let logs = lair::read_lair_logs(&lair_dir, "server");
+                    fail_with_lair_cleanup!(format!(
+                        "{} (lair output: {})",
+                        last_err.unwrap_or(e),
+                        logs,
+                    ));
+                }
+            }
+        }
     };
     log::info!("Connected to lair-keystore");
 
