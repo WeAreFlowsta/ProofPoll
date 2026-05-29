@@ -1,6 +1,6 @@
 [package]
 name = "proofpoll"
-version = "0.2.0-beta15"
+version = "0.2.0-beta16"
 description = "ProofPoll - Verified polls with Flowsta identity linking"
 authors = ["ProofPoll"]
 license = "MIT"
@@ -47,6 +47,10 @@ base64 = "0.22"
 
 # HTTP client for IPC notifications to Vault
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# Percent-decode lair connection-URL paths so we match the actual filesystem
+# path (matters on macOS where "Application Support" contains a space).
+percent-encoding = "2"
 
 # (libc dependency moved to the Unix-only target block below)
 

@@ -8,6 +8,7 @@
 //! Holochain app that uses the standard random agent key approach.
 
 use lair_keystore_api::prelude::*;
+use percent_encoding::percent_decode_str;
 use std::io::Write;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
@@ -132,11 +133,25 @@ pub async fn connect_to_lair(
         .map_err(|e| format!("Failed to connect to lair: {}", e))
 }
 
-/// Wait for the lair unix socket to be ready.
+/// Wait for the lair connection to be ready.
+/// On Unix, polls until the socket file exists.
+/// On Windows, lair uses named pipes — there's no socket file to poll, so we
+/// wait a fixed period for lair to initialize.
 pub async fn wait_for_lair_socket(connection_url: &str, timeout_secs: u64) -> Result<(), String> {
+    if cfg!(target_os = "windows") {
+        log::info!("Windows: waiting for lair-keystore to initialize...");
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        return Ok(());
+    }
+
     let url = lair_keystore_api::dependencies::url::Url::parse(connection_url)
         .map_err(|e| format!("Invalid connection URL: {}", e))?;
-    let socket_path = std::path::PathBuf::from(url.path());
+    // url.path() returns percent-encoded path (e.g. %20 for spaces).
+    // Decode it so we match the actual filesystem path — without this, macOS
+    // paths under "Application Support" fail because we'd poll for a literal
+    // "Application%20Support" directory.
+    let decoded_path = percent_decode_str(url.path()).decode_utf8_lossy();
+    let socket_path = std::path::PathBuf::from(decoded_path.as_ref());
 
     let deadline =
         std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
