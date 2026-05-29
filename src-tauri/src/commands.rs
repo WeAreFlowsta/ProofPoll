@@ -173,6 +173,25 @@ impl AppState {
         let passphrase = if passphrase_path.exists() {
             std::fs::read_to_string(&passphrase_path).unwrap_or_else(|_| generate_passphrase())
         } else {
+            // No passphrase on disk — either a true fresh install OR an
+            // uninstall+reinstall where Windows cleared the passphrase file
+            // but left the encrypted lair store_file and conductor databases
+            // behind. The new passphrase we're about to generate can't open
+            // any of that orphaned state, so wipe it now to guarantee a
+            // consistent fresh start. Nothing user-recoverable lives in
+            // either dir — agent keys are regenerated every install and
+            // user-authored polls/votes come back through the Vault backup
+            // restore flow.
+            for sub in &["lair", "conductor"] {
+                let p = data_dir.join(sub);
+                if p.exists() {
+                    log::warn!(
+                        "Wiping orphaned state at {:?} — encrypted under a previous passphrase that no longer exists",
+                        p,
+                    );
+                    let _ = std::fs::remove_dir_all(&p);
+                }
+            }
             let p = generate_passphrase();
             let _ = std::fs::write(&passphrase_path, &p);
             p

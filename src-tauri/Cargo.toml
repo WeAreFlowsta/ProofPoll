@@ -1,6 +1,6 @@
 [package]
 name = "proofpoll"
-version = "0.2.0-beta21"
+version = "0.2.0-beta22"
 description = "ProofPoll - Verified polls with Flowsta identity linking"
 authors = ["ProofPoll"]
 license = "MIT"
