@@ -33,6 +33,14 @@ lair_keystore_api = "=0.6.3"
 holochain_client = { version = "=0.8.1", default-features = false }
 holochain_types = "=0.6.1"
 
+# Direct deps for `recovery.rs` — reconstructing a `Record` for `graft_records`
+# from the SourceChainDumpRecord shape we store in canonical backups. These
+# crates are already pulled in transitively by `holochain_types` 0.6.1; pinning
+# the major version here ensures we move in lockstep with it.
+holochain_state_types = "=0.6.1"
+holochain_integrity_types = "=0.6.1"
+holo_hash = "=0.6.1"
+
 # Error handling
 thiserror = "1.0"
 

@@ -3984,7 +3984,10 @@ version = "0.2.0-beta24"
 dependencies = [
  "base64 0.22.1",
  "hex",
+ "holo_hash",
  "holochain_client",
+ "holochain_integrity_types",
+ "holochain_state_types",
  "holochain_types",
  "lair_keystore_api",
  "libc",

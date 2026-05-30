@@ -28,6 +28,7 @@ mod dna;
 mod lair;
 pub mod migration;
 mod process_ext;
+mod recovery;
 mod sidecar;
 
 use commands::AppState;
