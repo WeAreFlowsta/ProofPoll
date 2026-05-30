@@ -85,6 +85,15 @@ pub fn run() {
                 .expect("Failed to get resource directory")
                 .join("resources");
 
+            // Reinstall-recovery handshake: the frontend fetches the Vault
+            // backup (webview-side, so the Origin matches the linked app) and
+            // calls `provide_recovery_decision`. Startup awaits that decision
+            // before touching lair so it can come up as the recovered agent.
+            // The sender lives in AppState; the receiver moves into the spawn.
+            let (recovery_tx, recovery_rx) =
+                tokio::sync::oneshot::channel::<Option<serde_json::Value>>();
+            *app_state.recovery_decision_tx.lock().unwrap() = Some(recovery_tx);
+
             // Auto-start the conductor in the background.
             let startup_state = app_state.clone();
             let app_handle = app.handle().clone();
@@ -96,8 +105,50 @@ pub fn run() {
                     };
                 }
 
-                let passphrase = startup_state.passphrase.lock().unwrap().clone();
+                // Reinstall recovery only applies to a FRESH install — one with
+                // no existing lair store on disk. An existing install has an
+                // intact local agent and must neither recover nor be delayed
+                // waiting on the frontend. So we only await the recovery
+                // decision when the lair store is absent.
                 let data_dir = startup_state.data_dir.clone();
+                let is_fresh_install = !data_dir.join("lair").join("store_file").exists();
+
+                let recovery_payload = if is_fresh_install {
+                    // Wait (bounded) for the frontend's recovery decision. The
+                    // SDK's Vault fetch has a 30s ceiling, so we wait a bit
+                    // longer. Common case (no recoverable backup) resolves in
+                    // well under a second. On timeout we proceed fresh.
+                    match tokio::time::timeout(
+                        std::time::Duration::from_secs(45),
+                        recovery_rx,
+                    )
+                    .await
+                    {
+                        Ok(Ok(Some(json))) => {
+                            let p = recovery::LairRecoveryPayload::try_from_json(json);
+                            if p.is_some() {
+                                log::info!("Startup: reinstall recovery payload accepted");
+                            } else {
+                                log::warn!("Startup: recovery payload present but missing required fields; proceeding fresh");
+                            }
+                            p
+                        }
+                        Ok(Ok(None)) => {
+                            log::info!("Startup: frontend reported no recovery needed");
+                            None
+                        }
+                        Ok(Err(_)) | Err(_) => {
+                            log::warn!("Startup: no recovery decision from frontend (timeout/closed); proceeding fresh");
+                            None
+                        }
+                    }
+                } else {
+                    log::info!("Startup: existing install (lair store present) — skipping recovery wait");
+                    None
+                };
+
+                let passphrase = startup_state.passphrase.lock().unwrap().clone();
+                // `data_dir` already bound above for the fresh-install check.
 
                 let monitor_handle = app_handle.clone();
                 let migration_handle = app_handle.clone();
@@ -107,6 +158,7 @@ pub fn run() {
                     data_dir,
                     resource_dir,
                     passphrase,
+                    recovery_payload,
                 )
                 .await
                 {
@@ -235,11 +287,11 @@ pub fn run() {
             commands::get_export_data,
             commands::get_migration_status,
             commands::abandon_pending_votes,
-            // ── CAL-compliant backup helpers (v0.2.0+) ─────────────
-            // See build-docs/current/GENERIC_BACKUP_PLAN.md
+            // ── CAL-compliant backup + reinstall recovery ──────────
+            // See build-docs/current/LAIR_RECOVERY_AND_CAL_COMPLIANCE.md
             commands::decode_record_for_export,
-            commands::restore_record,
             commands::build_canonical_backup,
+            commands::provide_recovery_decision,
             // ── Encrypted entries (v1.3) ───────────────────────────
             commands::save_vote_rationale,
             commands::get_vote_rationale,

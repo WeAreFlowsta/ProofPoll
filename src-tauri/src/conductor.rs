@@ -370,12 +370,14 @@ pub async fn start_holochain(
     data_dir: PathBuf,
     resource_dir: PathBuf,
     passphrase: String,
+    recovery: Option<crate::recovery::LairRecoveryPayload>,
 ) -> Result<StartupResult, String> {
     let first_err = match start_holochain_attempt(
         app_handle.clone(),
         data_dir.clone(),
         resource_dir.clone(),
         passphrase.clone(),
+        recovery.as_ref(),
     )
     .await
     {
@@ -418,26 +420,54 @@ pub async fn start_holochain(
     // resources.
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
-    start_holochain_attempt(app_handle, data_dir, resource_dir, retry_passphrase).await
+    // On an hmac reset we wiped state — recovery files (if any) went with it,
+    // so don't reapply recovery on that retry. On a plain transient retry,
+    // recovery still applies (write_lair_recovery_files is idempotent).
+    let retry_recovery = if is_hmac_error { None } else { recovery.as_ref() };
+    start_holochain_attempt(app_handle, data_dir, resource_dir, retry_passphrase, retry_recovery).await
 }
 
 /// One full startup attempt: lair → connect → conductor → install DNAs.
+///
+/// When `recovery` is `Some`, this is a reinstall recovery: we write the
+/// recovered lair files BEFORE starting lair (so lair comes up as the user's
+/// original agent), use the recovered passphrase, install v1.3 with that agent
+/// + `ignore_genesis_failure` (deferred enable), then graft the recovered
+/// source chain and enable. The result is the same agent + same chain as the
+/// prior install — no DHT duplicates.
 async fn start_holochain_attempt(
     app_handle: tauri::AppHandle,
     data_dir: PathBuf,
     resource_dir: PathBuf,
     passphrase: String,
+    recovery: Option<&crate::recovery::LairRecoveryPayload>,
 ) -> Result<StartupResult, String> {
     let _ = app_handle.emit(
         "conductor-status",
         ConductorStatus::Starting {
-            message: "Starting lair-keystore...".into(),
+            message: if recovery.is_some() {
+                "Restoring your account...".into()
+            } else {
+                "Starting lair-keystore...".into()
+            },
         },
     );
 
-    // 1. Start lair-keystore.
+    // 0. Recovery: write the recovered lair files before lair starts, and use
+    //    the recovered passphrase (NOT the freshly-generated one AppState
+    //    handed us — that one can't open the recovered store).
     let lair_dir = data_dir.join("lair");
-    let (mut lair_child, connection_url) = lair::start_lair_process(&lair_dir, &passphrase)?;
+    let effective_passphrase = if let Some(payload) = recovery {
+        crate::recovery::write_lair_recovery_files(&data_dir, payload)?;
+        log::info!("Recovery: wrote recovered lair files; using recovered passphrase");
+        payload.passphrase.clone()
+    } else {
+        passphrase
+    };
+
+    // 1. Start lair-keystore.
+    let (mut lair_child, connection_url) =
+        lair::start_lair_process(&lair_dir, &effective_passphrase)?;
 
     macro_rules! fail_with_lair_cleanup {
         ($err:expr) => {{
@@ -476,7 +506,7 @@ async fn start_holochain_attempt(
                     status, logs
                 ));
             }
-            match lair::connect_to_lair(&connection_url, &passphrase).await {
+            match lair::connect_to_lair(&connection_url, &effective_passphrase).await {
                 Ok(c) => break c,
                 Err(e) => {
                     // "Pipe not ready yet" — keep waiting.
@@ -515,7 +545,7 @@ async fn start_holochain_attempt(
         };
 
     // 5. Start conductor process.
-    let mut conductor_child = match start_conductor_process(&config_path, &conductor_dir, &passphrase) {
+    let mut conductor_child = match start_conductor_process(&config_path, &conductor_dir, &effective_passphrase) {
         Ok(c) => c,
         Err(e) => fail_with_lair_cleanup!(e),
     };
@@ -551,11 +581,60 @@ async fn start_holochain_attempt(
         }};
     }
 
+    // On the recovery path, install v1.3 with the recovered agent key (so the
+    // cell is the user's original identity) and leave it disabled for graft.
+    let recovery_agent = recovery.map(|p| p.agent_pub_key_str.clone());
+    let recovery_agent_key = match &recovery_agent {
+        Some(s) => match crate::commands::parse_agent_pub_key_string(s) {
+            Ok(k) => Some(k),
+            Err(e) => fail_with_full_cleanup!(format!("Invalid recovered agent key: {}", e)),
+        },
+        None => None,
+    };
+
     let install_result =
-        match crate::dna::install_dnas(ADMIN_WS_PORT, &resource_dir).await {
+        match crate::dna::install_dnas(ADMIN_WS_PORT, &resource_dir, recovery_agent_key).await {
             Ok(r) => r,
             Err(e) => fail_with_full_cleanup!(format!("DNA installation failed: {}", e)),
         };
+
+    // 7b. Recovery graft: if install left a disabled cell for us, graft the
+    //     recovered source chain onto it, then enable. This rebuilds the
+    //     user's chain (original action hashes preserved) before the app is
+    //     used. Per Holochain's graft_records docs the cell must be disabled
+    //     during graft — install_dnas guarantees that on the recovery path.
+    if let Some(cell_id) = install_result.recovery_cell_id.clone() {
+        let payload = recovery.expect("recovery_cell_id set implies recovery payload present");
+        let _ = app_handle.emit(
+            "conductor-status",
+            ConductorStatus::Starting {
+                message: "Restoring your polls and votes...".into(),
+            },
+        );
+        let graft_outcome = async {
+            let records = crate::recovery::records_from_backup(
+                &payload.raw_payload,
+                &payload.agent_pub_key_str,
+            )?;
+            let admin_ws = holochain_client::AdminWebsocket::connect(
+                format!("localhost:{}", ADMIN_WS_PORT),
+                Some("proofpoll".to_string()),
+            )
+            .await
+            .map_err(|e| format!("admin connect for graft: {}", e))?;
+            let n = crate::recovery::graft_recovered_records(&admin_ws, cell_id, records).await?;
+            admin_ws
+                .enable_app(crate::dna::ACTIVE_APP_ID.to_string())
+                .await
+                .map_err(|e| format!("enable after graft: {}", e))?;
+            Ok::<usize, String>(n)
+        }
+        .await;
+        match graft_outcome {
+            Ok(n) => log::info!("Recovery graft succeeded: {} records, app enabled", n),
+            Err(e) => fail_with_full_cleanup!(format!("Recovery graft failed: {}", e)),
+        }
+    }
 
     // 8. Attach app interface.
     let _ = app_handle.emit(

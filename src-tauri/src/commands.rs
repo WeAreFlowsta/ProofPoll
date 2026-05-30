@@ -165,6 +165,14 @@ pub struct AppState {
     pub lair_client: tokio::sync::Mutex<Option<LairClient>>,
     /// Current migration state (persisted to disk).
     pub migration_state: tokio::sync::Mutex<crate::migration::MigrationState>,
+    /// One-shot channel the frontend uses to hand the conductor startup its
+    /// reinstall-recovery decision. The frontend fetches the Vault backup
+    /// (which must happen webview-side for the Origin to match the linked app)
+    /// and calls `provide_recovery_decision` with the payload (or `None`).
+    /// Startup awaits this before touching lair so it can come up as the
+    /// recovered agent. Set once at setup; taken when the decision arrives.
+    pub recovery_decision_tx:
+        Mutex<Option<tokio::sync::oneshot::Sender<Option<serde_json::Value>>>>,
 }
 
 impl AppState {
@@ -228,8 +236,30 @@ impl AppState {
             passphrase: Mutex::new(passphrase),
             lair_client: tokio::sync::Mutex::new(None),
             migration_state: tokio::sync::Mutex::new(migration_state),
+            recovery_decision_tx: Mutex::new(None),
         }
     }
+}
+
+/// Tauri command: the frontend hands the conductor startup its reinstall-
+/// recovery decision. `payload` is the canonical backup JSON fetched from the
+/// Vault (webview-side, so the Origin matches the linked app), or `None` when
+/// there's nothing to recover (fresh user, Vault absent, or older backup
+/// without lair fields). Startup awaits this once before starting lair.
+#[tauri::command]
+pub fn provide_recovery_decision(
+    state: tauri::State<'_, std::sync::Arc<AppState>>,
+    payload: Option<serde_json::Value>,
+) -> Result<(), String> {
+    let has_payload = payload.is_some();
+    if let Some(tx) = state.recovery_decision_tx.lock().unwrap().take() {
+        // Receiver dropped only if startup already proceeded (timeout); ignore.
+        let _ = tx.send(payload);
+        log::info!("Recovery decision received from frontend (payload present: {})", has_payload);
+    } else {
+        log::warn!("provide_recovery_decision called but channel already consumed (startup may have timed out waiting)");
+    }
+    Ok(())
 }
 
 /// Wipe every encryption-paired file under data_dir, generate a fresh
@@ -411,7 +441,7 @@ fn friendly_error(raw: &str) -> String {
 /// Parse a uhCAk... agent key string into an AgentPubKey.
 /// Decodes the base64url body and preserves the exact 39 bytes (including
 /// DHT location) so the key matches what the external signer used.
-fn parse_agent_pub_key_string(s: &str) -> Result<AgentPubKey, String> {
+pub(crate) fn parse_agent_pub_key_string(s: &str) -> Result<AgentPubKey, String> {
     // Strip the "u" multibase prefix
     let b64 = s.strip_prefix('u').ok_or("Agent key must start with 'u'")?;
 
@@ -1850,72 +1880,11 @@ pub async fn decode_record_for_export(
     }
 }
 
-/// Re-create an entry from a backup on the current (v1.3) cell. Called by
-/// the SDK's `restoreFromVault` once per record. Each arm decodes the entry
-/// from the backup's raw bytes, then calls the same zome function the user
-/// would have called originally.
-///
-/// Restored entries are NEW writes — they get new action hashes, new
-/// timestamps, and new signatures, but the content matches what the user
-/// originally authored. CAL §4.2.1 portability is preserved at the content
-/// level (which is what users care about); strict cryptographic-chain
-/// continuity is not a Holochain-supported operation today.
-#[tauri::command]
-pub async fn restore_record(
-    state: tauri::State<'_, std::sync::Arc<AppState>>,
-    entry_type: String,
-    entry_bytes_b64: String,
-) -> Result<(), String> {
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(&entry_bytes_b64)
-        .map_err(|e| format!("base64 decode: {}", e))?;
-
-    let client = state.app_client.lock().await;
-    let client = client.as_ref().ok_or("Conductor not ready")?;
-
-    match entry_type.as_str() {
-        "Poll" => {
-            // Decode the stored entry into the local Poll struct, then build a
-            // CreatePollInput. The local input wraps poll_type as Option<String>
-            // (for migrating to/from old DNAs); convert via serde.
-            let poll: Poll = rmp_serde::from_slice(&bytes)
-                .map_err(|e| format!("Poll decode: {}", e))?;
-            let poll_type_str = match poll.poll_type {
-                Some(pt) => serde_json::to_value(&pt)
-                    .ok()
-                    .and_then(|v| v.as_str().map(String::from)),
-                None => None,
-            };
-            let input = CreatePollInput {
-                title: poll.title,
-                description: poll.description,
-                options: poll.options,
-                closes_at: poll.closes_at,
-                poll_type: poll_type_str,
-            };
-            let payload = ExternIO::encode(input).map_err(|e| e.to_string())?;
-            call_zome(client, POLLS_ZOME, "create_poll", payload).await?;
-            Ok(())
-        }
-        "Vote" => {
-            let vote: Vote = rmp_serde::from_slice(&bytes)
-                .map_err(|e| format!("Vote decode: {}", e))?;
-            let input = CastVoteInput {
-                poll_action_hash: vote.poll_action_hash,
-                option_index: vote.option_index,
-                display_name: vote.display_name,
-                profile_picture: vote.profile_picture,
-            };
-            let payload = ExternIO::encode(input).map_err(|e| e.to_string())?;
-            call_zome(client, POLLS_ZOME, "cast_vote", payload).await?;
-            Ok(())
-        }
-        other => {
-            log::warn!("Skipping unknown entry type during restore: {}", other);
-            Ok(())
-        }
-    }
-}
+// Note: the old per-entry `restore_record` dispatcher was removed in favour of
+// source-chain `graft_records` (see `recovery.rs` + `conductor.rs`). Graft
+// rebuilds the chain with the original action hashes and signatures preserved
+// — no new writes, no DHT duplicates — which the dispatcher approach could not
+// achieve.
 
 /// Build the user's canonical-shape backup payload for Vault.
 ///
