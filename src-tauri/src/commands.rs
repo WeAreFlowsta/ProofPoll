@@ -1928,108 +1928,107 @@ pub async fn restore_record(
 ///     §4.2.1 data export (full or per-app), and
 ///   - leaves the signed `raw_record` inside the encrypted backup.
 ///
-/// Architecture note: ProofPoll talks to its conductor over AppWebsocket
-/// (not AdminWebsocket), so we go through zome queries here rather than
-/// `dump_full_state`. End result is the same canonical-shape payload —
-/// the Vault doesn't care how it was built, only that it follows the
-/// canonical shape.
+/// Architecture note: this captures the user's ENTIRE source chain via the
+/// admin `dump_full_state`, not just Poll/Vote app entries. That completeness
+/// is required for restore: `recovery::graft_recovered_records` rebuilds the
+/// chain from these `raw_record`s, and a graft of a partial chain (missing
+/// genesis / agent-linking / cap-grant actions) would fail chain-continuity
+/// validation. Each `raw_record` is a verbatim `SourceChainDumpRecord` so the
+/// recovery side can round-trip it back into a `Record`.
+///
+/// On top of the raw records we layer the human-readable view + per-type
+/// counts for the app entries we can decode (Poll, Vote, Flag) — this is what
+/// Vault renders on the Your Data page and inlines into the CAL §4.2.1 export.
+/// Infrastructure records (Dna, AgentValidationPkg, CapGrant, …) carry their
+/// raw_record for graft but no human_readable (they're chain plumbing, not
+/// user data).
+///
+/// The three lair files are appended at the top level so the backup is also
+/// CAL-complete: data PLUS the cryptographic keys needed to operate it. See
+/// `recovery::read_lair_backup_fields`.
 #[tauri::command]
 pub async fn build_canonical_backup(
     state: tauri::State<'_, std::sync::Arc<AppState>>,
 ) -> Result<serde_json::Value, String> {
+    use holochain_client::{AdminWebsocket, CellInfo};
+
     let my_key = {
         let key = state.agent_pub_key.lock().unwrap();
         key.clone().ok_or("Agent key not available")?
     };
 
-    let client = state.app_client.lock().await;
-    let client = client.as_ref().ok_or("Conductor not ready")?;
+    // 1. Connect to the admin websocket (same pattern as try_reenable_app).
+    let admin_ws = AdminWebsocket::connect(
+        format!("localhost:{}", crate::conductor::ADMIN_WS_PORT),
+        Some("proofpoll".to_string()),
+    )
+    .await
+    .map_err(|e| format!("Failed to connect to admin WS for backup: {}", e))?;
 
+    // 2. Find the active (v1.3) provisioned cell.
+    let apps = admin_ws
+        .list_apps(None)
+        .await
+        .map_err(|e| format!("list_apps: {}", e))?;
+    let cell_id = apps
+        .iter()
+        .find(|a| a.installed_app_id == crate::dna::ACTIVE_APP_ID)
+        .and_then(|app| {
+            app.cell_info
+                .values()
+                .flat_map(|cells| cells.iter())
+                .find_map(|c| match c {
+                    CellInfo::Provisioned(p) => Some(p.cell_id.clone()),
+                    _ => None,
+                })
+        })
+        .ok_or("Active app cell not found for backup")?;
+
+    // 3. Dump the full source chain (every action authored by this agent).
+    let dump = admin_ws
+        .dump_full_state(cell_id, None)
+        .await
+        .map_err(|e| format!("dump_full_state: {}", e))?;
+
+    // 4. Build canonical records + per-type counts.
     let mut records: Vec<serde_json::Value> = Vec::new();
-    let mut poll_count = 0usize;
-    let mut vote_count = 0usize;
+    let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
 
-    // Polls authored by this user.
-    let payload = ExternIO::encode(()).map_err(|e| e.to_string())?;
-    let result = call_zome(client, POLLS_ZOME, "get_all_polls", payload).await?;
-    let poll_records: Vec<Record> = result.decode().map_err(|e| e.to_string())?;
+    for rec in &dump.source_chain_dump.records {
+        let action_hash = rec.action_address.to_string();
+        let created_ms = rec.action.timestamp().as_millis();
 
-    for record in &poll_records {
-        let author = record.action().author().to_string();
-        if author != my_key {
-            continue;
+        let (entry_type_name, human_readable) = classify_dump_record(rec);
+
+        // Count only the decodable user-data entry types (those with a
+        // non-null human_readable view). Infrastructure records are kept in
+        // `records` for graft but don't inflate the user-facing summary.
+        if !human_readable.is_null() {
+            *counts.entry(entry_type_name.clone()).or_insert(0) += 1;
         }
-        let poll: Poll = match decode_entry(record) {
-            Ok(p) => p,
-            Err(_) => continue,
-        };
-        let action_hash = record.action_address().to_string();
-        let timestamp = record.action().timestamp().as_millis();
-        let entry_bytes = rmp_serde::to_vec(&poll)
-            .map_err(|e| format!("Poll re-encode: {}", e))?;
-        let entry_b64 = base64::engine::general_purpose::STANDARD.encode(&entry_bytes);
+
+        let raw_record = serde_json::to_value(rec)
+            .map_err(|e| format!("serialize SourceChainDumpRecord: {}", e))?;
+
         records.push(serde_json::json!({
-            "entryType": "Poll",
+            "entryType": entry_type_name,
             "actionHash": action_hash,
-            "createdAtMs": timestamp,
-            "human_readable": serde_json::to_value(&poll)
-                .map_err(|e| format!("Poll JSON: {}", e))?,
-            "raw_record": {
-                "entry_b64": entry_b64,
-                "action_address": record.action_address().to_string(),
-                "action_type": format!("{:?}", record.action().action_type()),
-            },
+            "createdAtMs": created_ms,
+            "human_readable": human_readable,
+            "raw_record": raw_record,
         }));
-        poll_count += 1;
-
-        // Votes by this user on this poll.
-        let vote_payload =
-            ExternIO::encode(record.action_address().clone()).map_err(|e| e.to_string())?;
-        if let Ok(vr) = call_zome(client, POLLS_ZOME, "get_poll_votes", vote_payload).await {
-            let vote_records: Vec<Record> = vr.decode().unwrap_or_default();
-            for vrec in &vote_records {
-                let vauthor = vrec.action().author().to_string();
-                if vauthor != my_key {
-                    continue;
-                }
-                let vote: Vote = match decode_entry(vrec) {
-                    Ok(v) => v,
-                    Err(_) => continue,
-                };
-                let vote_hash = vrec.action_address().to_string();
-                let vote_ts = vrec.action().timestamp().as_millis();
-                let entry_bytes = rmp_serde::to_vec(&vote)
-                    .map_err(|e| format!("Vote re-encode: {}", e))?;
-                let entry_b64 = base64::engine::general_purpose::STANDARD.encode(&entry_bytes);
-                records.push(serde_json::json!({
-                    "entryType": "Vote",
-                    "actionHash": vote_hash,
-                    "createdAtMs": vote_ts,
-                    "human_readable": serde_json::to_value(&vote)
-                        .map_err(|e| format!("Vote JSON: {}", e))?,
-                    "raw_record": {
-                        "entry_b64": entry_b64,
-                        "action_address": vrec.action_address().to_string(),
-                        "action_type": format!("{:?}", vrec.action().action_type()),
-                    },
-                }));
-                vote_count += 1;
-            }
-        }
     }
 
-    let mut counts = serde_json::Map::new();
-    if poll_count > 0 {
-        counts.insert("Poll".to_string(), serde_json::json!(poll_count));
-    }
-    if vote_count > 0 {
-        counts.insert("Vote".to_string(), serde_json::json!(vote_count));
-    }
-    let total_records = poll_count + vote_count;
+    let total_records: usize = counts.values().sum();
+    let counts_json: serde_json::Map<String, serde_json::Value> = counts
+        .into_iter()
+        .map(|(k, v)| (k, serde_json::json!(v)))
+        .collect();
 
-    Ok(serde_json::json!({
+    // 5. Assemble the canonical payload.
+    let mut payload = serde_json::json!({
         "version": 1,
-        "_readme": "Your ProofPoll data, backed up automatically by Flowsta Vault. Encrypted with your device key — only you can read it. Each record below carries a plain-English view of what you authored AND a signed Holochain record for restore.",
+        "_readme": "Your ProofPoll data, backed up automatically by Flowsta Vault. Encrypted with your device key — only you can read it. Each record below carries a plain-English view of what you authored AND a signed Holochain record for restore. The lair_* fields are the cryptographic keys that let you recover this identity on a fresh install.",
         "license": "Cryptographic Autonomy License v1.0 (CAL-1.0)",
         "app": {
             "name": "ProofPoll",
@@ -2042,15 +2041,127 @@ pub async fn build_canonical_backup(
                 .as_secs(),
         ),
         "_summary": {
-            "countsByEntryType": counts,
+            "countsByEntryType": counts_json,
             "totalRecords": total_records,
         },
         "cells": [
             {
                 "role_name": "polls",
-                "_readme": "Each record below is one thing you did. `human_readable` is the plain-English view of the entry. `raw_record` is the bytes needed to restore it onto another Holochain conductor.",
+                "_readme": "Each record below is one action on your source chain. `human_readable` is the plain-English view (app entries only). `raw_record` is the signed record used to restore your chain onto a fresh install.",
                 "records": records,
             }
         ],
-    }))
+    });
+
+    // 6. Append the lair recovery fields (data + keys = CAL-complete). If any
+    //    of the three files is missing we omit all three — a partial set is
+    //    useless for recovery and we'd rather ship a data-only backup than a
+    //    misleading one.
+    if let Some((passphrase, config_yaml, store_b64)) =
+        crate::recovery::read_lair_backup_fields(&state.data_dir)
+    {
+        payload["lair_passphrase"] = serde_json::json!(passphrase);
+        payload["lair_keystore_config"] = serde_json::json!(config_yaml);
+        payload["lair_keystore_data"] = serde_json::json!(store_b64);
+    } else {
+        log::warn!("build_canonical_backup: lair files incomplete; shipping data-only backup (no recovery fields)");
+    }
+
+    Ok(payload)
+}
+
+/// Classify a dumped source-chain record into a (entryType, human_readable)
+/// pair for the canonical backup. App entries we can decode get a type name +
+/// plain-JSON view; everything else gets an action-type label and a null
+/// human_readable (kept in the backup for graft, not shown as user data).
+///
+/// For forking developers: the `(zome_index, entry_index)` table below mirrors
+/// your DNA manifest's integrity-zome order and each integrity zome's
+/// `EntryTypes` enum order. Update it alongside your entry types — it is the
+/// one place that maps on-chain entry indices back to readable names.
+///
+/// ProofPoll v1.3 (`dna/v1.3/workdir/dna.yaml`):
+///   integrity zomes: [0] agent_linking_integrity, [1] polls_integrity
+///   polls_integrity EntryTypes: [0] Poll [1] Vote [2] Flag [3] MigratedPoll [4] EncryptedEntry
+fn classify_dump_record(
+    rec: &holochain_state_types::SourceChainDumpRecord,
+) -> (String, serde_json::Value) {
+    use holochain_integrity_types::EntryType;
+
+    let entry_type = match rec.action.entry_type() {
+        Some(et) => et,
+        // No entry reference — a system action (Dna, AgentValidationPkg,
+        // InitZomesComplete, OpenChain, CloseChain, …). Label by the action
+        // variant for diagnostics; not user data.
+        None => return (action_variant_label(&rec.action), serde_json::Value::Null),
+    };
+
+    let app_def = match entry_type {
+        EntryType::App(def) => def,
+        EntryType::AgentPubKey => return ("AgentPubKey".to_string(), serde_json::Value::Null),
+        EntryType::CapClaim => return ("CapClaim".to_string(), serde_json::Value::Null),
+        EntryType::CapGrant => return ("CapGrant".to_string(), serde_json::Value::Null),
+    };
+
+    let zome = app_def.zome_index.0;
+    let entry_idx = app_def.entry_index.0;
+
+    // Pull the raw msgpack entry bytes (if the entry is present in the dump).
+    let entry_bytes: Option<&[u8]> = rec
+        .entry
+        .as_ref()
+        .and_then(|e| e.as_app_entry())
+        .map(|app_bytes| app_bytes.as_ref().bytes().as_slice());
+
+    match (zome, entry_idx) {
+        // polls_integrity (zome index 1)
+        (1, 0) => decode_named::<Poll>("Poll", entry_bytes),
+        (1, 1) => decode_named::<Vote>("Vote", entry_bytes),
+        // Flag / MigratedPoll: kept in raw_record for graft, but no
+        // human_readable view (commands.rs has no plain mirror struct for
+        // them). Not counted in the user-facing summary.
+        (1, 2) => ("Flag".to_string(), serde_json::Value::Null),
+        (1, 3) => ("MigratedPoll".to_string(), serde_json::Value::Null),
+        // EncryptedEntry holds ciphertext — no plaintext human_readable view.
+        (1, 4) => ("EncryptedEntry".to_string(), serde_json::Value::Null),
+        // agent_linking_integrity (zome index 0)
+        (0, 0) => ("IsSamePerson".to_string(), serde_json::Value::Null),
+        _ => (
+            format!("AppEntry(zome={},entry={})", zome, entry_idx),
+            serde_json::Value::Null,
+        ),
+    }
+}
+
+/// Decode entry bytes into a named type for the human_readable view. Returns
+/// (name, json) on success, or (name, null) if bytes are absent or undecodable
+/// — the record is still kept (with its raw_record) for graft.
+fn decode_named<T: serde::de::DeserializeOwned + serde::Serialize>(
+    name: &str,
+    entry_bytes: Option<&[u8]>,
+) -> (String, serde_json::Value) {
+    let human = entry_bytes
+        .and_then(|b| rmp_serde::from_slice::<T>(b).ok())
+        .and_then(|v| serde_json::to_value(v).ok())
+        .unwrap_or(serde_json::Value::Null);
+    (name.to_string(), human)
+}
+
+/// Best-effort label for a system (entry-less) action, used only for
+/// diagnostics in the backup — never shown as user data.
+fn action_variant_label(action: &holochain_integrity_types::Action) -> String {
+    use holochain_integrity_types::Action;
+    match action {
+        Action::Dna(_) => "Dna",
+        Action::AgentValidationPkg(_) => "AgentValidationPkg",
+        Action::InitZomesComplete(_) => "InitZomesComplete",
+        Action::CreateLink(_) => "CreateLink",
+        Action::DeleteLink(_) => "DeleteLink",
+        Action::OpenChain(_) => "OpenChain",
+        Action::CloseChain(_) => "CloseChain",
+        Action::Create(_) => "Create",
+        Action::Update(_) => "Update",
+        Action::Delete(_) => "Delete",
+    }
+    .to_string()
 }
