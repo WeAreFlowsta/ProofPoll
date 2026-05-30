@@ -102,6 +102,7 @@ pub fn run() {
                 let migration_handle = app_handle.clone();
                 match conductor::start_holochain(
                     app_handle,
+                    startup_state.clone(),
                     data_dir,
                     resource_dir,
                     passphrase,

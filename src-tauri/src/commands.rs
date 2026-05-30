@@ -23,7 +23,7 @@ use holochain_types::prelude::{
     ActionHash, AgentPubKey, ExternIO, FunctionName, Record, ZomeName,
 };
 use lair_keystore_api::prelude::LairClient;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 // ── Entry types matching the zome definitions ─────────────────────────
@@ -230,6 +230,52 @@ impl AppState {
             migration_state: tokio::sync::Mutex::new(migration_state),
         }
     }
+}
+
+/// Wipe every encryption-paired file under data_dir, generate a fresh
+/// random passphrase, persist it, and update the AppState mutex so any
+/// subsequent code path sees the new value. Returns the new passphrase
+/// for the caller to use immediately.
+///
+/// Called from `conductor::start_holochain` when the first attempt fails
+/// with a SQLCipher hmac mismatch — the only recoverable response to
+/// that error is to drop the orphaned encrypted state and start fresh.
+/// Nothing user-recoverable lives in either directory: agent keys are
+/// regenerated every install, and user-authored polls/votes come back
+/// through the Vault backup restore flow on next sign-in.
+pub fn nuke_state_and_regenerate_passphrase(data_dir: &Path, app_state: &AppState) -> String {
+    log::warn!(
+        "Performing full state reset under {:?} (lair-passphrase + lair/ + conductor/)",
+        data_dir,
+    );
+    let passphrase_path = data_dir.join("lair-passphrase");
+    if let Err(e) = std::fs::remove_file(&passphrase_path) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            log::warn!("remove lair-passphrase: {}", e);
+        }
+    }
+    if let Err(e) = std::fs::remove_dir_all(data_dir.join("lair")) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            log::warn!("remove_dir_all lair: {}", e);
+        }
+    }
+    if let Err(e) = std::fs::remove_dir_all(data_dir.join("conductor")) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            log::warn!("remove_dir_all conductor: {}", e);
+        }
+    }
+
+    let new_passphrase = generate_passphrase();
+    if let Err(e) = std::fs::write(&passphrase_path, &new_passphrase) {
+        log::error!(
+            "Failed to write regenerated lair-passphrase to {:?}: {}",
+            passphrase_path, e,
+        );
+    }
+
+    *app_state.passphrase.lock().unwrap() = new_passphrase.clone();
+    log::info!("State reset complete; new passphrase persisted and in-memory");
+    new_passphrase
 }
 
 fn generate_passphrase() -> String {

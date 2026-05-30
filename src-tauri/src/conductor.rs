@@ -346,22 +346,32 @@ pub struct StartupResult {
     pub needs_migration: bool,
 }
 
-/// Public entry point. Runs the full startup once; if it fails we kill
-/// any leftover children, wait briefly for OS resources to free, and try
-/// a second time on a fresh process.
+/// Public entry point. Runs one full startup; on failure, performs the
+/// right recovery for the error class and retries once.
 ///
-/// Why: on Windows the first fresh-install run sometimes leaves lair or
-/// the conductor in a state where the next clean start succeeds — the
-/// retry automates the manual "close the app and reopen" workaround
-/// users would otherwise have to do. The Vault adopted the same pattern
-/// in `flowsta-vault` commit 3774082 for the same reason.
+/// Two failure modes are handled distinctly:
+///
+/// 1. SQLCipher hmac mismatch — lair's `store_file` or the conductor's
+///    DHT/source-chain DBs are encrypted under a passphrase that no
+///    longer pairs with the current one (typical after a partial
+///    uninstall left orphaned crypto material behind). The only
+///    recoverable response is to wipe both data dirs and the passphrase
+///    file, regenerate, and start fresh. Nothing user-recoverable lives
+///    in those dirs — agent keys are regenerated every install and
+///    user-authored data comes back through the Vault backup restore
+///    flow on next sign-in.
+///
+/// 2. Any other startup failure — usually a transient kitsune/Iroh hiccup
+///    or a Windows lock-release race on first install. Kill leftover
+///    children, wait briefly, retry on a fresh process.
 pub async fn start_holochain(
     app_handle: tauri::AppHandle,
+    app_state: std::sync::Arc<crate::commands::AppState>,
     data_dir: PathBuf,
     resource_dir: PathBuf,
     passphrase: String,
 ) -> Result<StartupResult, String> {
-    match start_holochain_attempt(
+    let first_err = match start_holochain_attempt(
         app_handle.clone(),
         data_dir.clone(),
         resource_dir.clone(),
@@ -370,25 +380,45 @@ pub async fn start_holochain(
     .await
     {
         Ok(result) => return Ok(result),
-        Err(e) => {
-            log::warn!(
-                "[start_holochain] first attempt failed: {} — auto-restarting",
-                e,
-            );
-            let _ = app_handle.emit(
-                "conductor-status",
-                ConductorStatus::Starting {
-                    message: "First-run setup needs a quick restart...".into(),
-                },
-            );
-            // Brief pause so the admin WS port is released and any
-            // process tear-down completes before the second attempt
-            // binds the same resources.
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        }
-    }
+        Err(e) => e,
+    };
 
-    start_holochain_attempt(app_handle, data_dir, resource_dir, passphrase).await
+    let is_hmac_error = first_err.contains("hmac check failed")
+        || first_err.contains("SQL logic error")
+        || first_err.contains("error decrypting page");
+
+    let retry_passphrase = if is_hmac_error {
+        log::warn!(
+            "[start_holochain] SQLCipher hmac mismatch on first attempt — performing full state reset: {}",
+            first_err,
+        );
+        let _ = app_handle.emit(
+            "conductor-status",
+            ConductorStatus::Starting {
+                message: "Recovering from corrupted state — full reset...".into(),
+            },
+        );
+        crate::commands::nuke_state_and_regenerate_passphrase(&data_dir, &app_state)
+    } else {
+        log::warn!(
+            "[start_holochain] first attempt failed: {} — auto-restarting",
+            first_err,
+        );
+        let _ = app_handle.emit(
+            "conductor-status",
+            ConductorStatus::Starting {
+                message: "First-run setup needs a quick restart...".into(),
+            },
+        );
+        passphrase
+    };
+
+    // Brief pause so the admin WS port is released and any process
+    // tear-down completes before the second attempt binds the same
+    // resources.
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+    start_holochain_attempt(app_handle, data_dir, resource_dir, retry_passphrase).await
 }
 
 /// One full startup attempt: lair → connect → conductor → install DNAs.
