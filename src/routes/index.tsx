@@ -3,7 +3,7 @@ import { Link, useNavigate } from "@builder.io/qwik-city";
 import { setSignInIntent } from "~/lib/signin";
 import { invoke } from "@tauri-apps/api/core";
 import { linkedContext } from "~/lib/context";
-import { getAllPolls, getPollVotes, getPollFlags, getFlagThreshold, type PollListItem } from "~/lib/holochain";
+import { getAllPolls, getPollVotes, getPollFlags, getFlagThreshold, loadMyAgentSet, type PollListItem } from "~/lib/holochain";
 
 type Filter = "current" | "archive" | "created" | "voted";
 
@@ -17,6 +17,9 @@ export default component$(() => {
   const showSignIn = useSignal(false);
   const filter = useSignal<Filter>("current");
   const myAgent = useSignal<string | null>(null);
+  // All agent keys belonging to this user (across installs/devices), for
+  // recognising their own polls/votes. See loadMyAgentSet.
+  const myAgentSet = useSignal<Set<string>>(new Set());
   // Set of poll hashes the user has voted in
   const votedPolls = useSignal<Set<string>>(new Set());
   const votedLoading = useSignal(false);
@@ -37,6 +40,7 @@ export default component$(() => {
       ]);
       polls.value = allPolls;
       myAgent.value = status.agent_pub_key;
+      myAgentSet.value = await loadMyAgentSet(status.agent_pub_key);
       flagThreshold.value = threshold;
 
       // Load flag counts in background. Flags only exist on v1.1 polls.
@@ -76,7 +80,7 @@ export default component$(() => {
         polls.value.map(async (p) => {
           try {
             const votes = await getPollVotes(p.hash, p.dna_version);
-            const voted = votes.some((v) => v.author === myAgent.value);
+            const voted = votes.some((v) => myAgentSet.value.has(v.author));
             return voted ? p.hash : null;
           } catch {
             return null;
@@ -99,7 +103,7 @@ export default component$(() => {
     } else if (filter.value === "archive") {
       result = result.filter((p) => p.poll.closes_at && p.poll.closes_at <= now);
     } else if (filter.value === "created") {
-      result = result.filter((p) => p.author === myAgent.value);
+      result = result.filter((p) => myAgentSet.value.has(p.author));
     } else if (filter.value === "voted") {
       result = result.filter((p) => votedPolls.value.has(p.hash));
     }

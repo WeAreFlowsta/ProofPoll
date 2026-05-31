@@ -168,6 +168,43 @@ export async function getIdentityLink(): Promise<IdentityLinkData | null> {
   return invoke<IdentityLinkData | null>("get_identity_link");
 }
 
+/**
+ * The set of Holochain agent keys that all belong to THIS user — used to
+ * recognise the user's own polls/votes/flags regardless of which device or
+ * install authored them.
+ *
+ * Why a set, not a single key: ProofPoll generates a fresh conductor agent
+ * key on every install. The user's stable identity is their Flowsta Vault
+ * agent; each install links its local agent to that Vault agent via an
+ * IsSamePerson attestation. `get_linked_agents(vaultAgent)` therefore returns
+ * every ProofPoll agent the user has ever linked (this is a designed-in query
+ * — the agent-linking zome indexes the link from the Vault agent's pubkey too).
+ *
+ * IMPORTANT: this is for RECOGNITION (read) only. Mutating an entry
+ * (delete a poll, remove a flag) is still bound to the CURRENT local agent —
+ * Holochain only lets the original author update/delete, so a different linked
+ * agent cannot. Use the local agent directly for those gates, not this set.
+ *
+ * Best-effort: if the user has never linked (fresh, not signed in) or the
+ * Vault link isn't available, the set is just the local agent.
+ */
+export async function loadMyAgentSet(
+  localAgent: string | null,
+): Promise<Set<string>> {
+  const set = new Set<string>();
+  if (localAgent) set.add(localAgent);
+  try {
+    const link = await getIdentityLink();
+    if (link?.vault_agent_pub_key) {
+      const siblings = await getLinkedAgents(link.vault_agent_pub_key);
+      for (const a of siblings) set.add(a);
+    }
+  } catch {
+    // Not linked / conductor not ready / offline — local agent only.
+  }
+  return set;
+}
+
 export async function revokeIdentityLink(): Promise<void> {
   return invoke<void>("revoke_identity_link");
 }

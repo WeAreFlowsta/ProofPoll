@@ -25,6 +25,7 @@ import {
   removeFlag,
   saveVoteRationale,
   getVoteRationale,
+  loadMyAgentSet,
   type Poll,
   type VoteData,
   type FlagData,
@@ -44,6 +45,8 @@ export default component$(() => {
   const pollDnaVersion = useSignal<"1.0" | "1.1" | "1.2" | "1.3">("1.3");
   const votes = useSignal<VoteData[]>([]);
   const myAgent = useSignal<string | null>(null);
+  // All agent keys belonging to this user (recognition only). See loadMyAgentSet.
+  const myAgentSet = useSignal<Set<string>>(new Set());
   const selectedOption = useSignal<number | null>(null);
   const loading = useSignal(true);
   const voting = useSignal(false);
@@ -80,6 +83,7 @@ export default component$(() => {
         "get_app_status",
       );
       myAgent.value = status.agent_pub_key;
+      myAgentSet.value = await loadMyAgentSet(status.agent_pub_key);
 
       // Get the poll first so we know which DHT it lives on (dna_version).
       // Votes and flags depend on dna_version, so they're fetched after.
@@ -106,16 +110,24 @@ export default component$(() => {
       flags.value = flagsResult;
 
       if (myAgent.value) {
-        const myVote = votesResult.find((v) => v.author === myAgent.value);
-        hasVoted.value = !!myVote;
-        myVoteHash.value = myVote?.vote.hash ?? null;
+        // hasVoted is RECOGNITION: true if ANY of my linked agents voted, so a
+        // reinstalled user isn't offered a duplicate vote.
+        hasVoted.value = votesResult.some((v) => myAgentSet.value.has(v.author));
+
+        // myVote/myVoteHash + myFlag are tied to MUTATION / private data of the
+        // CURRENT agent: the vote rationale is encrypted by this agent's key and
+        // can only be read/written by it, and unflag can only remove this
+        // agent's flag. So these stay bound to the current local agent, not the
+        // wider set.
+        const myCurrentVote = votesResult.find((v) => v.author === myAgent.value);
+        myVoteHash.value = myCurrentVote?.vote.hash ?? null;
         myFlag.value = flagsResult.find(
           (f) => f.author === myAgent.value,
         ) ?? null;
 
-        // Load existing rationale if we voted
-        if (myVote?.vote.hash) {
-          getVoteRationale(myVote.vote.hash)
+        // Load existing rationale if this agent voted (its own encrypted note).
+        if (myCurrentVote?.vote.hash) {
+          getVoteRationale(myCurrentVote.vote.hash)
             .then((r) => { rationale.value = r; })
             .catch(() => {});
         }
@@ -297,7 +309,7 @@ export default component$(() => {
         </div>
 
         {/* Flag / unflag — only on v1.1 and v1.2 polls (v1.0 has no Flag entry type) */}
-        {linked.value && myAgent.value && pollAuthor.value !== myAgent.value && (pollDnaVersion.value !== "1.0") && (
+        {linked.value && myAgent.value && !myAgentSet.value.has(pollAuthor.value ?? "") && (pollDnaVersion.value !== "1.0") && (
           <div class="mt-3">
             {flagError.value && (
               <div class="text-red-400 text-xs mb-2">{flagError.value}</div>
