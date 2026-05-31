@@ -3980,7 +3980,7 @@ dependencies = [
 
 [[package]]
 name = "proofpoll"
-version = "0.2.0-beta24"
+version = "0.2.0-beta25"
 dependencies = [
  "base64 0.22.1",
  "hex",
