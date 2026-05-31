@@ -165,14 +165,6 @@ pub struct AppState {
     pub lair_client: tokio::sync::Mutex<Option<LairClient>>,
     /// Current migration state (persisted to disk).
     pub migration_state: tokio::sync::Mutex<crate::migration::MigrationState>,
-    /// One-shot channel the frontend uses to hand the conductor startup its
-    /// reinstall-recovery decision. The frontend fetches the Vault backup
-    /// (which must happen webview-side for the Origin to match the linked app)
-    /// and calls `provide_recovery_decision` with the payload (or `None`).
-    /// Startup awaits this before touching lair so it can come up as the
-    /// recovered agent. Set once at setup; taken when the decision arrives.
-    pub recovery_decision_tx:
-        Mutex<Option<tokio::sync::oneshot::Sender<Option<serde_json::Value>>>>,
 }
 
 impl AppState {
@@ -236,30 +228,8 @@ impl AppState {
             passphrase: Mutex::new(passphrase),
             lair_client: tokio::sync::Mutex::new(None),
             migration_state: tokio::sync::Mutex::new(migration_state),
-            recovery_decision_tx: Mutex::new(None),
         }
     }
-}
-
-/// Tauri command: the frontend hands the conductor startup its reinstall-
-/// recovery decision. `payload` is the canonical backup JSON fetched from the
-/// Vault (webview-side, so the Origin matches the linked app), or `None` when
-/// there's nothing to recover (fresh user, Vault absent, or older backup
-/// without lair fields). Startup awaits this once before starting lair.
-#[tauri::command]
-pub fn provide_recovery_decision(
-    state: tauri::State<'_, std::sync::Arc<AppState>>,
-    payload: Option<serde_json::Value>,
-) -> Result<(), String> {
-    let has_payload = payload.is_some();
-    if let Some(tx) = state.recovery_decision_tx.lock().unwrap().take() {
-        // Receiver dropped only if startup already proceeded (timeout); ignore.
-        let _ = tx.send(payload);
-        log::info!("Recovery decision received from frontend (payload present: {})", has_payload);
-    } else {
-        log::warn!("provide_recovery_decision called but channel already consumed (startup may have timed out waiting)");
-    }
-    Ok(())
 }
 
 /// Wipe every encryption-paired file under data_dir, generate a fresh
@@ -1898,23 +1868,19 @@ pub async fn decode_record_for_export(
 ///   - leaves the signed `raw_record` inside the encrypted backup.
 ///
 /// Architecture note: this captures the user's ENTIRE source chain via the
-/// admin `dump_full_state`, not just Poll/Vote app entries. That completeness
-/// is required for restore: `recovery::graft_recovered_records` rebuilds the
-/// chain from these `raw_record`s, and a graft of a partial chain (missing
-/// genesis / agent-linking / cap-grant actions) would fail chain-continuity
-/// validation. Each `raw_record` is a verbatim `SourceChainDumpRecord` so the
-/// recovery side can round-trip it back into a `Record`.
+/// admin `dump_full_state`, not just Poll/Vote app entries — so the CAL export
+/// is the user's complete, signed chain. Each `raw_record` is a verbatim
+/// `SourceChainDumpRecord` (a fully portable signed record).
 ///
 /// On top of the raw records we layer the human-readable view + per-type
-/// counts for the app entries we can decode (Poll, Vote, Flag) — this is what
-/// Vault renders on the Your Data page and inlines into the CAL §4.2.1 export.
+/// counts for the app entries we can decode (Poll, Vote) — this is what Vault
+/// renders on the Your Data page and inlines into the CAL §4.2.1 export.
 /// Infrastructure records (Dna, AgentValidationPkg, CapGrant, …) carry their
-/// raw_record for graft but no human_readable (they're chain plumbing, not
-/// user data).
+/// raw_record but no human_readable (they're chain plumbing, not user data).
 ///
 /// The three lair files are appended at the top level so the backup is also
-/// CAL-complete: data PLUS the cryptographic keys needed to operate it. See
-/// `recovery::read_lair_backup_fields`.
+/// CAL-complete: data PLUS the cryptographic keys needed to operate it
+/// independently. See `read_lair_backup_fields`.
 #[tauri::command]
 pub async fn build_canonical_backup(
     state: tauri::State<'_, std::sync::Arc<AppState>>,
@@ -2027,7 +1993,7 @@ pub async fn build_canonical_backup(
     //    useless for recovery and we'd rather ship a data-only backup than a
     //    misleading one.
     if let Some((passphrase, config_yaml, store_b64)) =
-        crate::recovery::read_lair_backup_fields(&state.data_dir)
+        read_lair_backup_fields(&state.data_dir)
     {
         payload["lair_passphrase"] = serde_json::json!(passphrase);
         payload["lair_keystore_config"] = serde_json::json!(config_yaml);
@@ -2133,4 +2099,18 @@ fn action_variant_label(action: &holochain_integrity_types::Action) -> String {
         Action::Delete(_) => "Delete",
     }
     .to_string()
+}
+
+/// Read the three lair files and return them base64-encoded / stringified for
+/// inclusion in the CAL §4.2.1 backup (the cryptographic keys the user needs to
+/// operate their data independently). Returns `None` if any is missing — we
+/// include all three or none.
+fn read_lair_backup_fields(data_dir: &Path) -> Option<(String, String, String)> {
+    use base64::Engine;
+    let passphrase = std::fs::read_to_string(data_dir.join("lair-passphrase")).ok()?;
+    let config_yaml =
+        std::fs::read_to_string(data_dir.join("lair").join("lair-keystore-config.yaml")).ok()?;
+    let store_bytes = std::fs::read(data_dir.join("lair").join("store_file")).ok()?;
+    let store_b64 = base64::engine::general_purpose::STANDARD.encode(&store_bytes);
+    Some((passphrase, config_yaml, store_b64))
 }

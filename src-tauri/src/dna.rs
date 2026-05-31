@@ -20,7 +20,7 @@ use holochain_client::{
     IssueAppAuthenticationTokenPayload,
 };
 use holochain_types::app::AppBundleSource;
-use holochain_types::prelude::{AgentPubKey, CellId};
+use holochain_types::prelude::AgentPubKey;
 use std::path::Path;
 
 // ── Version constants ─────────────────────────────────────────────────
@@ -55,12 +55,6 @@ pub struct InstallResult {
     pub v1_1_available: bool,
     /// True if v1.2 is installed and usable (for migration reads).
     pub v1_2_available: bool,
-    /// Set only on the recovery path: v1.3 was installed with the recovered
-    /// agent key and `ignore_genesis_failure: true`, and was deliberately
-    /// LEFT DISABLED so the caller can graft the recovered source chain
-    /// before enabling. Carries the v1.3 cell id to graft onto. `None` on the
-    /// normal (non-recovery) path, where v1.3 is installed AND enabled here.
-    pub recovery_cell_id: Option<CellId>,
 }
 
 /// Install ProofPoll DNAs, handling upgrades across all versions.
@@ -68,16 +62,9 @@ pub struct InstallResult {
 /// - Fresh install: installs v1.3 only.
 /// - Upgrade from v1.2: installs v1.3 alongside v1.2, flags migration needed.
 /// - Already current: re-enables v1.3, keeps older versions for migration reads.
-///
-/// `recovery_agent`: when `Some`, this is a reinstall-recovery: install v1.3
-/// using the recovered agent key, with `ignore_genesis_failure: true`, and
-/// leave it DISABLED so the caller can graft the recovered source chain before
-/// enabling. Only meaningful on a fresh install (no v1.3 present yet); ignored
-/// if v1.3 is already installed. On the normal path pass `None`.
 pub async fn install_dnas(
     admin_port: u16,
     resource_dir: &Path,
-    recovery_agent: Option<AgentPubKey>,
 ) -> Result<InstallResult, String> {
     let admin_ws = AdminWebsocket::connect(
         format!("localhost:{}", admin_port),
@@ -179,58 +166,7 @@ pub async fn install_dnas(
         }
     }
 
-    // Recovery path: fresh install (no v1.3) + a recovered agent key. Install
-    // v1.3 with that key and ignore_genesis_failure, leave it DISABLED, and
-    // return the cell id so the caller can graft the recovered chain before
-    // enabling. We return EARLY here — graft + enable + verify happen in the
-    // caller (conductor.rs), then setup_app_interface proceeds as normal.
-    if !v1_3_installed {
-        if let Some(rec_agent) = recovery_agent {
-            let happ_path = resource_dir.join(HAPP_FILE_V1_3);
-            if !happ_path.exists() {
-                return Err(format!("ProofPoll v1.3 hApp bundle not found at {:?}", happ_path));
-            }
-            log::info!(
-                "Recovery install of ProofPoll v1.3 with recovered agent {} (ignore_genesis_failure, deferred enable)...",
-                rec_agent,
-            );
-            let payload = InstallAppPayload {
-                source: AppBundleSource::Path(happ_path),
-                agent_key: Some(rec_agent.clone()),
-                installed_app_id: Some(APP_ID_V1_3.to_string()),
-                network_seed: None,
-                roles_settings: None,
-                ignore_genesis_failure: true,
-            };
-            let app_info = admin_ws
-                .install_app(payload)
-                .await
-                .map_err(|e| format!("Failed to install v1.3 DNA (recovery): {}", e))?;
-
-            // Extract the provisioned v1.3 cell id for the graft step.
-            let cell_id = app_info
-                .cell_info
-                .values()
-                .flat_map(|cells| cells.iter())
-                .find_map(|c| match c {
-                    CellInfo::Provisioned(p) => Some(p.cell_id.clone()),
-                    _ => None,
-                })
-                .ok_or("No provisioned cell after recovery install")?;
-
-            log::info!("Recovery install complete; cell left disabled for graft");
-            return Ok(InstallResult {
-                agent_pub_key: app_info.agent_pub_key,
-                needs_migration: false,
-                v1_0_available: v1_0_installed,
-                v1_1_available: v1_1_installed,
-                v1_2_available: v1_2_installed,
-                recovery_cell_id: Some(cell_id),
-            });
-        }
-    }
-
-    // Normal path: install v1.3 if not present — reuse the most recent agent
+    // Install v1.3 if not present — reuse the most recent agent
     // key so identity links survive.
     if !v1_3_installed {
         let agent_key = v1_2_agent_key.as_ref()
@@ -300,7 +236,6 @@ pub async fn install_dnas(
         v1_0_available: v1_0_installed,
         v1_1_available: v1_1_installed,
         v1_2_available: v1_2_installed,
-        recovery_cell_id: None,
     })
 }
 

@@ -49,38 +49,6 @@ export default component$(() => {
   const migrationDismissed = useSignal(false);
   const disconnecting = useSignal(false);
 
-  // Reinstall recovery handshake. Runs as early as possible on mount: fetch
-  // this app's backup from the Vault (webview-side, so the request Origin
-  // matches the linked app) and hand it to the Rust conductor startup, which
-  // is waiting to decide whether to come up as the user's recovered agent.
-  // Always resolves the decision — null when there's nothing to recover — so
-  // a fresh first launch isn't blocked. Recovery itself (writing lair files,
-  // installing with the recovered agent, grafting the source chain) happens
-  // automatically in Rust; there is no user prompt. See
-  // build-docs/current/LAIR_RECOVERY_AND_CAL_COMPLIANCE.md.
-  useVisibleTask$(async () => {
-    let payload: unknown = null;
-    try {
-      const sdk = await import("@flowsta/holochain");
-      payload = await sdk.retrieveLairRecoveryPayload({
-        clientId: import.meta.env.VITE_FLOWSTA_CLIENT_ID,
-      });
-    } catch (e) {
-      console.warn(
-        "[ProofPoll] recovery payload fetch failed:",
-        (e as Error).message,
-      );
-    }
-    try {
-      await invoke("provide_recovery_decision", { payload });
-    } catch (e) {
-      console.warn(
-        "[ProofPoll] provide_recovery_decision failed:",
-        (e as Error).message,
-      );
-    }
-  });
-
   useVisibleTask$(({ cleanup }) => {
     let active = true;
     let stopAutoBackup: (() => void) | null = null;
@@ -673,11 +641,6 @@ export default component$(() => {
         </div>
       )}
 
-      {/* Reinstall recovery runs automatically at startup (see the recovery
-          handshake useVisibleTask$ above and the Rust conductor startup). The
-          conductor emits "Restoring your account…" / "Restoring your polls and
-          votes…" status while it grafts, surfaced by the normal startup UI —
-          no separate prompt or progress modal. */}
     </div>
   );
 });
