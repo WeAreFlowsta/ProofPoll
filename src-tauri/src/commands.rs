@@ -1307,13 +1307,20 @@ pub async fn get_linked_agents(
     let client = state.app_client.lock().await;
     let client = client.as_ref().ok_or("Conductor not ready")?;
 
-    let agent = AgentPubKey::try_from(agent_pub_key)
+    let agent = AgentPubKey::try_from(agent_pub_key.clone())
         .map_err(|e| format!("Invalid agent key: {:?}", e))?;
     let payload = ExternIO::encode(agent).map_err(|e| e.to_string())?;
     let result = call_zome(client, AGENT_LINKING_ZOME, "get_linked_agents", payload).await?;
 
     let agents: Vec<AgentPubKey> = result.decode().map_err(|e| e.to_string())?;
-    Ok(agents.iter().map(|a| a.to_string()).collect())
+    let out: Vec<String> = agents.iter().map(|a| a.to_string()).collect();
+    // Diagnostic: surface what the link graph returns so cross-device identity
+    // recognition can be verified from the log rather than assumed.
+    log::info!(
+        "[identity] get_linked_agents({}) -> {} agent(s): {:?}",
+        agent_pub_key, out.len(), out,
+    );
+    Ok(out)
 }
 
 // ── Flag types and commands (v1.1 — replace with your moderation system) ──

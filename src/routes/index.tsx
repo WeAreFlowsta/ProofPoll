@@ -276,7 +276,11 @@ export default component$(() => {
         </div>
       ) : polls.value.length === 0 ? (
         <div class="text-center py-16">
-          <p class="text-gray-400 text-lg mb-4">No polls yet</p>
+          <p class="text-gray-400 text-lg mb-2">No polls yet</p>
+          <p class="text-gray-500 text-sm mb-4">
+            If you just opened ProofPoll, polls may still be syncing from the
+            network — they'll appear here automatically within a minute or two.
+          </p>
           {linked.value ? (
             <Link
               href="/create/"
