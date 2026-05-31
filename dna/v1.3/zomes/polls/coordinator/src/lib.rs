@@ -139,6 +139,54 @@ pub fn delete_poll(action_hash: ActionHash) -> ExternResult<ActionHash> {
 
 // ── Vote functions ─────────────────────────────────────────────────────
 
+/// Call the agent-linking zome (same cell) to get the agents directly linked
+/// to `agent`. Local same-cell call by the cell's own agent → no cap secret.
+fn linked_agents(agent: AgentPubKey) -> ExternResult<Vec<AgentPubKey>> {
+    let response = call(
+        CallTargetCell::Local,
+        "agent_linking",
+        "get_linked_agents".into(),
+        None,
+        agent,
+    )?;
+    match response {
+        ZomeCallResponse::Ok(io) => io
+            .decode()
+            .map_err(|e| wasm_error!(format!("decode linked agents: {:?}", e))),
+        other => Err(wasm_error!(format!(
+            "get_linked_agents call failed: {:?}",
+            other
+        ))),
+    }
+}
+
+/// The full set of agent keys belonging to this person: the current agent plus
+/// every ProofPoll agent linked to the same Flowsta Vault identity (across the
+/// user's other devices/installs). Used so a reinstalled user can't vote twice.
+///
+/// Two hops: `linked_agents(me)` → the Vault agent(s) I'm linked to; then
+/// `linked_agents(vault)` → all the local ProofPoll agents linked to that Vault
+/// identity (the agent-linking zome indexes the link from the Vault pubkey too).
+///
+/// Degrades gracefully: if the agent-linking zome can't be reached for any
+/// reason, falls back to just the current agent (the prior per-agent behaviour)
+/// rather than blocking the vote.
+fn my_identity_agents(my_agent: &AgentPubKey) -> BTreeSet<AgentPubKey> {
+    let mut set = BTreeSet::new();
+    set.insert(my_agent.clone());
+    if let Ok(hubs) = linked_agents(my_agent.clone()) {
+        for hub in hubs {
+            if let Ok(siblings) = linked_agents(hub.clone()) {
+                for s in siblings {
+                    set.insert(s);
+                }
+            }
+            set.insert(hub);
+        }
+    }
+    set
+}
+
 #[hdk_extern]
 pub fn cast_vote(input: CastVoteInput) -> ExternResult<ActionHash> {
     let poll_record = get(input.poll_action_hash.clone(), GetOptions::default())?
@@ -166,14 +214,18 @@ pub fn cast_vote(input: CastVoteInput) -> ExternResult<ActionHash> {
         return Err(wasm_error!("Display name is required for public polls"));
     }
 
-    // Check for double-vote
+    // Check for double-vote — across ALL of this person's agents, not just the
+    // current one. ProofPoll mints a fresh agent key per install, so a
+    // per-agent check would let a reinstalled (or multi-device) user vote
+    // again. We dedup against the user's full linked-agent set instead.
     let my_agent = agent_info()?.agent_initial_pubkey;
+    let my_agents = my_identity_agents(&my_agent);
     let existing_links = get_links(
         LinkQuery::try_new(input.poll_action_hash.clone(), LinkTypes::PollToVotes)?,
         GetStrategy::default(),
     )?;
     for link in &existing_links {
-        if link.author == my_agent {
+        if my_agents.contains(&link.author) {
             return Err(wasm_error!("You have already voted on this poll"));
         }
     }
