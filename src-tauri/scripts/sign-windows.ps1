@@ -1,3 +1,19 @@
+# Windows code-signing hook, invoked by Tauri's bundle.windows.signCommand
+# (see src-tauri/tauri.conf.json) once per produced artifact.
+#
+# REQUIRES a Windows code-signing certificate — OV or EV — from a CA such as
+# SSL.com, DigiCert, Sectigo, or Azure Trusted Signing. This script drives
+# SSL.com's eSigner (cloud HSM) via CodeSignTool; the credentials come from
+# the ESIGNER_* GitHub Actions secrets, never from the repo. NO certificate
+# or key is stored here.
+#
+# FORKING: if your CA isn't SSL.com, replace the CodeSignTool invocation below
+# with your provider's signing tool (e.g. Azure Trusted Signing's
+# `azuresigntool`, or signtool.exe with a local cert) and read its credentials
+# from your own secrets. If you have no cert at all, leave the ESIGNER_*
+# secrets unset — the build skips signing and ships an unsigned (SmartScreen-
+# warned) installer. See "Code Signing (Releases)" in README.md.
+
 param(
     [Parameter(Mandatory = $true, Position = 0)]
     [string]$FilePath

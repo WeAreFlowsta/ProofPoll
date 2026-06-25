@@ -40,6 +40,17 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       release_id: ${{ steps.create-release.outputs.result }}
+    # Drive the release-notes signing line from what's actually configured.
+    # WINDOWS_SIGNED is 'true' only when the eSigner secrets exist (this repo);
+    # a fork without them advertises its Windows build as unsigned rather than
+    # inheriting a "verified publisher FLOWSTA" claim it can't back. The
+    # publisher name is NOT hardcoded — set a `WINDOWS_PUBLISHER` repo variable
+    # (Settings → Secrets and variables → Actions → Variables) to your own
+    # signed publisher name; the official build sets it to FLOWSTA.
+    env:
+      WINDOWS_SIGNED: ${{ secrets.ESIGNER_USERNAME != '' }}
+      WINDOWS_PUBLISHER: ${{ vars.WINDOWS_PUBLISHER }}
+      MACOS_SIGNED: ${{ secrets.APPLE_SIGNING_IDENTITY != '' }}
     steps:
       - uses: actions/checkout@v5
 
@@ -57,6 +68,17 @@ jobs:
             // pre-releases. Marking pre-releases correctly keeps them out
             // of GitHub's "Latest" slot when published.
             const isPrerelease = version.includes('-');
+            // Describe each platform's bundle honestly based on whether
+            // signing is actually configured for THIS repo (see job env).
+            const winSigned = process.env.WINDOWS_SIGNED === 'true';
+            const winPublisher = (process.env.WINDOWS_PUBLISHER || '').trim();
+            const macSigned = process.env.MACOS_SIGNED === 'true';
+            const windowsLine = winSigned
+              ? `- **Windows** — \`.exe\` installer or \`.msi\`${winPublisher ? ` (code-signed; verified publisher **${winPublisher}**)` : ' (code-signed)'}`
+              : '- **Windows** — `.exe` installer or `.msi` (unsigned — SmartScreen shows a warning on first launch; verify via `SHA256SUMS.txt` or build from source)';
+            const macLine = macSigned
+              ? '- **macOS** — `.dmg` (Intel or Apple Silicon, signed + notarized)'
+              : '- **macOS** — `.dmg` (Intel or Apple Silicon; unsigned — Gatekeeper requires right-click → Open on first launch)';
             const body = [
               `## ProofPoll v${version}`,
               '',
@@ -77,8 +99,8 @@ jobs:
               '### Downloads',
               'Pick your platform from the assets below:',
               '- **Linux** — `.deb`, `.rpm`, or `.AppImage`',
-              '- **macOS** — `.dmg` (Intel or Apple Silicon)',
-              '- **Windows** — `.exe` installer or `.msi` (code-signed; verified publisher **FLOWSTA**)',
+              macLine,
+              windowsLine,
               '',
               "**Verify your download (optional):** `sha256sum -c SHA256SUMS.txt` (Linux) or `shasum -a 256 -c SHA256SUMS.txt` (macOS).",
             ].join('\n');

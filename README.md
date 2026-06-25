@@ -526,6 +526,59 @@ fork), the release falls back to the development defaults above.
 
 ---
 
+## Code Signing (Releases)
+
+**You do not need any of this to build, run, or fork ProofPoll.** The
+release workflow signs only when the relevant secrets are present; a fork
+with no signing secrets produces **unsigned** installers and the release
+notes say so. Unsigned bundles run fine — the OS just shows a first-launch
+warning (Windows SmartScreen / macOS Gatekeeper).
+
+Signing is its own thing per platform, and **none of the certificates,
+private keys, or credentials live in this repo** — they are all read from
+GitHub Actions **secrets** at build time (see the `env:` block in the build
+job). Cloning or forking the repo gives you the signing *plumbing*, never the
+*credentials*; you cannot sign as anyone but yourself.
+
+### What each platform requires
+
+| Platform | What you need | Roughly |
+|---|---|---|
+| **Linux** | Nothing. `.deb`/`.rpm`/`.AppImage` are unsigned by convention. | Free |
+| **macOS** | An **Apple Developer account** ($99/yr) for a "Developer ID Application" certificate, plus notarization via an App Store Connect API key. Without it, users must right-click → Open once. | $99/yr |
+| **Windows** | A code-signing certificate from a CA — **OV** (Organization Validation) or **EV** (Extended Validation). EV clears SmartScreen reputation immediately; OV warms up over time/downloads. Issued by services such as **SSL.com**, **DigiCert**, **Sectigo**, or **Azure Trusted Signing**. Modern certs are stored in an HSM/cloud signer, not a local `.pfx`. | ~$100–600/yr |
+
+The official ProofPoll build signs Windows via **SSL.com eSigner** (cloud
+HSM, driven by [`src-tauri/scripts/sign-windows.ps1`](src-tauri/scripts/sign-windows.ps1)
+through Tauri's `windows.signCommand`) and macOS via a Developer ID cert +
+notarization. A fork can use any provider — swap the sign step/script for
+your CA's tool.
+
+### Wiring up your own signing
+
+Add these as **repository secrets** (Settings → Secrets and variables →
+Actions). Any you leave unset simply disables that platform's signing step:
+
+| Secret | Platform | Purpose |
+|---|---|---|
+| `APPLE_CERTIFICATE` / `APPLE_CERTIFICATE_PASSWORD` | macOS | base64 of your Developer ID `.p12` + its password |
+| `APPLE_SIGNING_IDENTITY` | macOS | e.g. `Developer ID Application: Your Name (TEAMID)` |
+| `APPLE_API_KEY` / `APPLE_API_KEY_PATH` / `APPLE_API_ISSUER` | macOS | App Store Connect API key for notarization |
+| `ESIGNER_USERNAME` / `ESIGNER_PASSWORD` / `ESIGNER_CREDENTIAL_ID` / `ESIGNER_TOTP_SECRET` | Windows | SSL.com eSigner credentials (replace with your CA's equivalents if not using SSL.com) |
+
+And one **repository variable** (not a secret — it's public anyway):
+
+| Variable | Purpose |
+|---|---|
+| `WINDOWS_PUBLISHER` | The publisher name shown in your release notes when Windows signing is on (e.g. your company name). Left unset, signed builds just say "code-signed"; unset *and* unsigned, the notes say "unsigned". |
+
+> **Do not** advertise a build as signed by a publisher whose certificate you
+> don't control. The workflow derives the release-notes signing line from the
+> actual secrets/variable above precisely so a fork never inherits a false
+> "verified publisher" claim.
+
+---
+
 ## Project Structure
 
 ```
