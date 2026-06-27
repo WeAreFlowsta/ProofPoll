@@ -86,7 +86,7 @@ jobs:
               '',
               'ProofPoll is a free, open-source desktop app for polls and votes where the results actually mean something:',
               '',
-              '- **One vote, one real person.** Voters link a verified [Flowsta](https://flowsta.com) identity, so every vote resolves to a single human — even across multiple devices — and duplicates are dropped.',
+              '- **One identity, one vote.** Voters link a verified [Flowsta](https://flowsta.com) identity, so every vote resolves to a single identity — even across all their devices — and duplicates are dropped.',
               "- **No one can rewrite or delete it.** Polls and votes live on a peer-to-peer Holochain network, replicated and validated across everyone who runs the app. There's no admin who can change a result or take a poll down — not even us.",
               '- **Private data on a public network.** Attach a private rationale to a vote, or draft a poll before publishing — ProofPoll encrypts it on your machine before it ever leaves.',
               '',

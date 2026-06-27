@@ -4,7 +4,7 @@
 
 ProofPoll is a free, open-source desktop app for polls and votes where the results actually mean something. It runs on Linux, macOS, and Windows. Two things set it apart from any normal poll:
 
-- **One vote, one real person.** Voters link a verified Flowsta identity, so every vote resolves to a single human — even across multiple devices — and duplicates are dropped. No emails to harvest, no accounts to farm; just sybil-resistant results.
+- **One identity, one vote.** Voters link a verified Flowsta identity, so every vote resolves to a single identity — even across all your devices — and duplicates are dropped. No emails to harvest, no burner logins; votes are deduplicated cryptographically per identity.
 - **No one can rewrite or delete it.** Polls and votes live on a peer-to-peer network (Holochain), replicated and validated across everyone who runs the app. There's no admin who can change a result or take a poll down — not even us. Polls can be community-flagged as spam or misleading, but nothing is ever silently deleted.
 
 It even does something most people think is impossible: **private data on a public network.** Add a private rationale to a vote, or draft a poll before publishing it, and ProofPoll encrypts it on your machine before it ever leaves — peers store the ciphertext but can't read a byte of it.
