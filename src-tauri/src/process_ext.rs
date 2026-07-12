@@ -394,6 +394,11 @@ mod windows_hide {
     /// `CASCADIA_HOSTING_WINDOW_CLASS` window whose title is the full path to
     /// the sidecar binary — so the title (not the owning process) is how we
     /// find them. The classic `conhost` window titles the same way.
+    ///
+    /// ## For forking developers
+    /// If you rename the bundled sidecars (see the README rename checklist),
+    /// update these markers to match, or console windows will stay visible
+    /// on Windows - the app otherwise works, so the breakage is easy to miss.
     const SIDECAR_TITLE_MARKERS: &[&str] = &["proofpoll-holochain", "proofpoll-lair-keystore"];
 
     /// Hide every console-host window whose title names one of our sidecars,

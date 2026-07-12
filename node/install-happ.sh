@@ -3,16 +3,22 @@
 #
 # Prerequisites:
 #   - Container "proofpoll-node" is running (docker compose up -d)
-#   - proofpoll_v1_0_happ.happ file is in this directory
+#   - proofpoll_v1_3_happ.happ file is in this directory
 #
 # Usage: bash install-happ.sh
+#
+# Keep HAPP_FILE / APP_ID (and proofpoll-happ-config.json: name, happUrl,
+# networkSeed) in step with ACTIVE_APP_ID in src-tauri/src/dna.rs - a node
+# pinned to an old DNA version joins the wrong (empty) network.
+# For forking developers: rename the container, files, and ids here and in
+# docker-compose.yml / setup.sh / proofpoll-happ-config.json to your app's.
 
 set -euo pipefail
 
 CONTAINER="proofpoll-node"
-HAPP_FILE="proofpoll_v1_0_happ.happ"
+HAPP_FILE="proofpoll_v1_3_happ.happ"
 CONFIG_FILE="proofpoll-happ-config.json"
-APP_ID="proofpoll_v1_0"
+APP_ID="proofpoll_v1_3"
 
 # Check the hApp file exists locally
 if [ ! -f "$HAPP_FILE" ]; then

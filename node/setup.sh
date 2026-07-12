@@ -18,7 +18,7 @@
 #      sudo bash setup.sh
 #
 #   3. Copy the hApp file to the server:
-#      gcloud compute scp ../src-tauri/resources/proofpoll_v1_0_happ.happ \
+#      gcloud compute scp ../src-tauri/resources/proofpoll_v1_3_happ.happ \
 #        proofpoll-node:~/node/ --zone=us-central1-a
 #
 #   4. Install the hApp:
@@ -66,6 +66,6 @@ echo ""
 echo "=== Container running ==="
 echo "Next steps:"
 echo "  1. Copy the hApp file to this directory:"
-echo "     scp proofpoll_v1_0_happ.happ <this-server>:~/node/"
+echo "     scp proofpoll_v1_3_happ.happ <this-server>:~/node/"
 echo "  2. Run: bash install-happ.sh"
 echo ""

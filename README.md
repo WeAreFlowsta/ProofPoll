@@ -58,7 +58,10 @@ This README focuses on the *fork mechanics* — what to rename, what to keep, wh
 #     (0.6.0 hc CLI produces bundles the 0.6.1 conductor reads — no recompile
 #     needed for the 0.6.0 → 0.6.1 non-breaking upgrade.)
 # - Node.js 18+
-# - flowsta-agent-linking repo cloned at ../flowsta-agent-linking/
+# - flowsta-agent-linking repo cloned as a SIBLING directory
+#     (../flowsta-agent-linking/ next to this repo, not inside it):
+#     git clone https://github.com/WeAreFlowsta/flowsta-agent-linking ../flowsta-agent-linking
+#     The DNA build scripts path-depend on it; cloning ProofPoll alone won't build.
 
 # Build all DNA versions
 bash build-all.sh
@@ -157,6 +160,9 @@ These identifiers **must** change or your app will conflict with ProofPoll:
 | npm package name | `package.json` | `proofpoll` | `yourapp` |
 | Bundled sidecars | `src-tauri/tauri.conf.json` (`externalBin`) | `binaries/proofpoll-holochain`, `binaries/proofpoll-lair-keystore` | `binaries/yourapp-holochain`, `binaries/yourapp-lair-keystore` |
 | Sidecar resolver calls | `src-tauri/src/conductor.rs` + `src-tauri/src/lair.rs` | `sidecar_path("proofpoll-…")` | `sidecar_path("yourapp-…")` |
+| Windows console markers | `src-tauri/src/process_ext.rs` (`SIDECAR_TITLE_MARKERS`) | `proofpoll-holochain`, `proofpoll-lair-keystore` | your sidecar names (or console windows stay visible on Windows) |
+| Bundled hApp resource | `src-tauri/tauri.conf.json` (`resources`) | `resources/proofpoll_v1_3_happ.happ` | your hApp filename (in step with `HAPP_FILE_*` in `dna.rs`) |
+| App icons | `src-tauri/icons/` | ProofPoll artwork | your artwork (paths stay the same; regenerate from your `source.svg`) |
 | CI binary download | `.github/workflows/build-release.yml` | downloads to `binaries/proofpoll-{holochain,lair-keystore}-<triple>` | `binaries/yourapp-{holochain,lair-keystore}-<triple>` |
 | DNA names | `dna/*/workdir/dna.yaml` | `proofpoll_v1_*` | `yourapp_v1_*` |
 | Network seeds | `dna/*/workdir/dna.yaml` | `proofpoll-network-v1.*` | `yourapp-network-v1.*` |
@@ -168,11 +174,15 @@ Then update these Rust constants:
 | File | What to change |
 |---|---|
 | `src-tauri/src/dna.rs` | `APP_ID_V1_*` and `HAPP_FILE_V1_*` constants |
-| `src-tauri/src/commands.rs` | `ROLE_NAME` constant |
+| `src-tauri/src/commands.rs` | `APP_NAME` constant (user-facing name in Vault dialogs, backups, exports) and `ROLE_NAME` constant |
 | `src-tauri/src/migration.rs` | `ROLE_NAME` constant |
-| `src-tauri/src/dna.rs` | `"proofpoll"` origin string in WebSocket connects |
+| `src-tauri/src/dna.rs` + `src-tauri/src/commands.rs` | `"proofpoll"` origin string in WebSocket connects (cosmetic, but keep it yours) |
+| `src-tauri/src/lib.rs` | log `file_name` (`proofpoll` → your app's log name; cosmetic) |
+| `src/lib/signin.ts` | `proofpoll.signin.*` storage keys |
 
 Update build scripts (`dna/*/build.sh`, `build-all.sh`) — change hApp filenames.
+
+**Committed build artifacts**: the `.wasm`/`.dna`/`.happ` files under `dna/v1.3/workdir/` and `src-tauri/resources/` are ProofPoll's canonical builds, committed on purpose - rebuilding a DNA changes its hash, and a changed hash is a different network, so ProofPoll itself must never rebuild them casually. As a forker the opposite applies: **delete them and build your own** (`build-all.sh`) so your app gets its own DNA hash and network.
 
 **Critical**: The `network_seed` in `dna.yaml` determines which DHT your app joins. Two apps with the same network seed share a DHT. Always use a unique seed.
 
@@ -524,6 +534,25 @@ reads `PROOFPOLL_BOOTSTRAP_URL`, `PROOFPOLL_SIGNAL_URL`,
 secrets and exposes them to the build. If none are set (e.g. a fresh
 fork), the release falls back to the development defaults above.
 
+### Always-on node (`node/`)
+
+A DHT is only as durable as its peers. [`node/`](node/) deploys a small
+always-on conductor (Docker, fits a GCE e2-micro) that keeps your app's
+network alive when no desktop user happens to be online: `setup.sh`
+provisions the box, `docker-compose.yml` runs the edge-node image, and
+`install-happ.sh` + `proofpoll-happ-config.json` install the hApp with the
+right network seed.
+
+Two things to keep straight:
+
+- **Version pinning.** The node config names a specific hApp file, app id,
+  and network seed. Keep them in step with `ACTIVE_APP_ID` in
+  [`src-tauri/src/dna.rs`](src-tauri/src/dna.rs) whenever you migrate DNA
+  versions - a node pinned to an old version sits on the wrong (empty)
+  network doing nothing.
+- **Forks:** rename the container, volume, hApp file, app id, and seed in
+  all four `node/` files to your app's values (they are ProofPoll's).
+
 ---
 
 ## Code Signing (Releases)
@@ -608,6 +637,8 @@ ProofPoll/
 │       ├── dna.rs              #   Multi-version DNA install + WebSocket setup
 │       ├── migration.rs        #   DNA migration orchestration
 │       ├── lair.rs             #   Lair keystore management
+│       ├── process_ext.rs      #   Windows console-window hygiene (sidecar markers)
+│       ├── sidecar.rs          #   Sidecar path resolution
 │       └── lib.rs              #   App setup, command registration, startup
 ├── src/                        # Qwik TypeScript frontend
 │   ├── lib/
@@ -621,6 +652,11 @@ ProofPoll/
 │       ├── create/             #   Content creation form (+ save as draft)
 │       ├── drafts/             #   Encrypted draft polls page
 │       └── identity/           #   Flowsta identity linking
+├── node/                       # Always-on node deployment (Docker; see Network Infrastructure)
+│   ├── setup.sh                #   Provision a small VM (Docker + compose)
+│   ├── docker-compose.yml      #   Edge-node conductor container
+│   ├── install-happ.sh         #   Install the hApp into the running node
+│   └── proofpoll-happ-config.json  # App id + network seed the node joins (keep in step with dna.rs)
 ├── .env                        # VITE_FLOWSTA_CLIENT_ID
 ├── build-all.sh                # Build all DNA versions
 ├── package.json                # Node dependencies

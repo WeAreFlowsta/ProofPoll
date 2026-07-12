@@ -1,10 +1,10 @@
 {
   "app": {
-    "name": "proofpoll_v1_0",
-    "version": "1.0.0",
-    "happUrl": "file:///data/happ/proofpoll_v1_0_happ.happ",
+    "name": "proofpoll_v1_3",
+    "version": "1.3.0",
+    "happUrl": "file:///data/happ/proofpoll_v1_3_happ.happ",
     "modifiers": {
-      "networkSeed": "proofpoll-network-v1.0",
+      "networkSeed": "proofpoll-network-v1.3",
       "properties": {}
     }
   },

@@ -292,6 +292,10 @@ fn generate_passphrase() -> String {
 // Change ROLE_NAME to match your happ.yaml role id.
 // Change POLLS_ZOME to match your coordinator zome name.
 
+/// User-facing app name - shown in Vault dialogs and carried in backup
+/// payloads and data exports. Forks: change once here; the frontend has its
+/// own copies (see the README's rename checklist).
+const APP_NAME: &str = "ProofPoll";
 /// Must match the role `id` in your happ.yaml.
 const ROLE_NAME: &str = "proofpoll";
 /// Your app's coordinator zome name (from dna.yaml).
@@ -1082,7 +1086,7 @@ pub async fn revoke_identity_link(
     // Best-effort: notify Vault via IPC
     let agent_key = state.agent_pub_key.lock().unwrap().clone();
     if let Some(agent_key) = agent_key {
-        let _ = notify_vault_revoke("ProofPoll", &agent_key).await;
+        let _ = notify_vault_revoke(APP_NAME, &agent_key).await;
     }
 
     Ok(())
@@ -1295,10 +1299,11 @@ pub async fn get_export_data(
         .as_secs();
 
     Ok(serde_json::json!({
-        "_readme": concat!(
-            "Your complete ProofPoll data export. Includes polls you created, ",
-            "votes you cast, private vote rationales (decrypted), and draft polls (decrypted). ",
-            "Your cryptographic keys are included for full data portability (CAL compliance).",
+        "_readme": format!(
+            "Your complete {} data export. Includes polls you created, \
+             votes you cast, private vote rationales (decrypted), and draft polls (decrypted). \
+             Your cryptographic keys are included for full data portability (CAL compliance).",
+            APP_NAME
         ),
 
         "format": {
@@ -1311,10 +1316,11 @@ pub async fn get_export_data(
         },
 
         "keys": {
-            "_readme": concat!(
-                "Your lair keystore contains the private signing key for your ProofPoll identity. ",
-                "The passphrase unlocks it. To restore: decode lair_keystore_data from base64, ",
-                "save as 'store_file' in a lair directory, and run lair-keystore with the passphrase.",
+            "_readme": format!(
+                "Your lair keystore contains the private signing key for your {} identity. \
+                 The passphrase unlocks it. To restore: decode lair_keystore_data from base64, \
+                 save as 'store_file' in a lair directory, and run lair-keystore with the passphrase.",
+                APP_NAME
             ),
             "lair_passphrase": passphrase,
             "lair_keystore_data": lair_keystore_data,
@@ -2115,10 +2121,13 @@ pub async fn build_canonical_backup(
     // 5. Assemble the canonical payload.
     let mut payload = serde_json::json!({
         "version": 1,
-        "_readme": "Your ProofPoll data, backed up automatically by Flowsta Vault. Encrypted with your device key — only you can read it. Each record below carries a plain-English view of what you authored AND a signed Holochain record for restore. The lair_* fields are the cryptographic keys that let you recover this identity on a fresh install.",
+        "_readme": format!(
+            "Your {} data, backed up automatically by Flowsta Vault. Encrypted with your device key — only you can read it. Each record below carries a plain-English view of what you authored AND a signed Holochain record for restore. The lair_* fields are the cryptographic keys that let you recover this identity on a fresh install.",
+            APP_NAME
+        ),
         "license": "Cryptographic Autonomy License v1.0 (CAL-1.0)",
         "app": {
-            "name": "ProofPoll",
+            "name": APP_NAME,
         },
         "agent_pub_key": my_key,
         "exported_at_iso": format!("unix:{}",
