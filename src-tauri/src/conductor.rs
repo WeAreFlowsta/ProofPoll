@@ -358,8 +358,11 @@ pub struct StartupResult {
 ///    recoverable response is to wipe both data dirs and the passphrase
 ///    file, regenerate, and start fresh. Nothing user-recoverable lives
 ///    in those dirs — agent keys are regenerated every install and
-///    user-authored data comes back through the Vault backup restore
-///    flow on next sign-in.
+///    user-authored data comes back via recognition on next sign-in:
+///    the fresh agent joins the user's identity link graph
+///    (get_my_agent_set) and their polls/votes re-sync from the DHT.
+///    The Vault backup is the CAL export + last-resort copy, not the
+///    recovery path.
 ///
 /// 2. Any other startup failure — usually a transient kitsune/Iroh hiccup
 ///    or a Windows lock-release race on first install. Kill leftover
