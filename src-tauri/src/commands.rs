@@ -184,9 +184,11 @@ impl AppState {
         // `sqlcipher_page_cipher: hmac check failed`. Detect that mismatch
         // here and wipe everything for a clean restart.
         //
-        // Nothing user-recoverable lives in either dir: agent keys are
-        // regenerated every install, and user-authored polls/votes come back
-        // through the Vault backup restore flow on next sign-in.
+        // The wiped state is already unusable (lair cannot open it), so
+        // nothing recoverable is lost HERE - but be precise about what a
+        // fresh keystore means: the new install authors under a NEW agent
+        // key. Polls/votes stay visible on the shared network under the old
+        // key; there is no flow that re-adopts their authorship.
         let pp = passphrase_path.exists();
         let cfg = lair_config_path.exists();
         let store = lair_store_path.exists();
@@ -240,9 +242,10 @@ impl AppState {
 /// Called from `conductor::start_holochain` when the first attempt fails
 /// with a SQLCipher hmac mismatch — the only recoverable response to
 /// that error is to drop the orphaned encrypted state and start fresh.
-/// Nothing user-recoverable lives in either directory: agent keys are
-/// regenerated every install, and user-authored polls/votes come back
-/// through the Vault backup restore flow on next sign-in.
+/// The dropped state is already unopenable, so nothing recoverable is lost
+/// here - but the reset is not free either: the fresh keystore means a NEW
+/// agent key. Polls/votes stay visible on the shared network under the old
+/// key; no flow re-adopts their authorship.
 pub fn nuke_state_and_regenerate_passphrase(data_dir: &Path, app_state: &AppState) -> String {
     log::warn!(
         "Performing full state reset under {:?} (lair-passphrase + lair/ + conductor/)",
@@ -526,10 +529,8 @@ pub async fn create_poll(
     closes_at: Option<i64>,
     poll_type: Option<String>,
 ) -> Result<String, String> {
-    // Require a linked Flowsta identity — frontend gating alone is bypassable.
-    if load_identity_link(&state.data_dir).is_none() {
-        return Err("Sign in with Flowsta to create polls".to_string());
-    }
+    // Live identity match, not just file presence - see require_identity_match.
+    require_identity_match(&state).await?;
 
     let client = state.app_client.lock().await;
     let client = client.as_ref().ok_or("Conductor not ready")?;
@@ -734,6 +735,7 @@ pub async fn delete_poll(
     state: tauri::State<'_, std::sync::Arc<AppState>>,
     action_hash: String,
 ) -> Result<String, String> {
+    require_identity_match(&state).await?;
     let client = state.app_client.lock().await;
     let client = client.as_ref().ok_or("Conductor not ready")?;
 
@@ -761,11 +763,10 @@ pub async fn cast_vote(
         "cast_vote: dna_version={}, poll_type={:?}, option_index={}",
         dna_version, poll_type, option_index,
     );
-    // Require a linked Flowsta identity — frontend gating alone is bypassable.
-    if load_identity_link(&state.data_dir).is_none() {
-        log::error!("cast_vote: rejected — no identity link in data dir");
-        return Err("Sign in with Flowsta to vote".to_string());
-    }
+    // Live identity match, not just file presence - a public vote publishes
+    // the cached display name/photo to the shared DHT under this agent key,
+    // which is irreversible, so the person must actually be present.
+    require_identity_match(&state).await?;
     let cached = load_cached_profile(&state.data_dir);
     log::info!(
         "cast_vote: identity link present, cached profile: display_name={:?}, has_picture={}",
@@ -975,6 +976,77 @@ fn delete_identity_link(data_dir: &std::path::Path) {
     let _ = std::fs::remove_file(path);
 }
 
+// ── Write authorization (the ONE chokepoint) ──────────────────────────
+//
+// Every command that writes to the shared DHT authorizes here. Forks:
+// route new write commands through this function too - per-command
+// checks are how `publish_draft` shipped with no gate at all.
+//
+// Policy (fail closed):
+//   - no identity link on this device        → refuse (sign in first)
+//   - Vault unreachable or locked            → refuse (cannot confirm who
+//     is present; DHT writes are irreversible, so "can't tell" means no)
+//   - Vault unlocked under a DIFFERENT key   → refuse (someone else's
+//     Vault is open on this machine - their name/photo must never be
+//     published under this install's agent key)
+//   - Vault unlocked under the linked key    → allow
+//
+// This is deliberately the OPPOSITE default to read paths, which keep
+// working offline: reading your own polls needs no proof of presence,
+// publishing under an identity does.
+
+/// Human-readable refusals; the frontend shows these verbatim.
+pub(crate) const ERR_NOT_LINKED: &str = "Sign in with Flowsta first";
+pub(crate) const ERR_VAULT_UNCONFIRMED: &str =
+    "Flowsta Vault isn't running - open it so ProofPoll can confirm it's you, then try again";
+pub(crate) const ERR_VAULT_LOCKED: &str =
+    "Your Flowsta Vault is locked - unlock it, then try again";
+pub(crate) const ERR_IDENTITY_MISMATCH: &str =
+    "Your Flowsta Vault is signed in as a different identity than the one connected here - \
+     unlock the matching Vault, or disconnect and reconnect on the Identity page";
+
+/// Live `(unlocked, agent_pub_key)` from the local Vault, or None when
+/// unreachable. Single fixed port, short timeout - a slow Vault reads as
+/// unconfirmable, which refuses (never allows).
+async fn vault_live_identity() -> Option<(bool, Option<String>)> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .ok()?;
+    let v: serde_json::Value = client
+        .get("http://127.0.0.1:27777/status")
+        .send()
+        .await
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+    Some((
+        v["unlocked"].as_bool().unwrap_or(false),
+        v["agent_pub_key"].as_str().map(String::from),
+    ))
+}
+
+pub(crate) async fn require_identity_match(
+    state: &std::sync::Arc<AppState>,
+) -> Result<IdentityLinkData, String> {
+    let link = load_identity_link(&state.data_dir).ok_or(ERR_NOT_LINKED)?;
+    let (unlocked, live) = vault_live_identity()
+        .await
+        .ok_or(ERR_VAULT_UNCONFIRMED)?;
+    if !unlocked {
+        return Err(ERR_VAULT_LOCKED.into());
+    }
+    // Both sides come from the Vault's construct_agent_pub_key_string, so
+    // plain string equality is exact - no re-parsing (and no holo_hash
+    // checksum surprises).
+    match live {
+        Some(ref key) if *key == link.vault_agent_pub_key => Ok(link),
+        Some(_) => Err(ERR_IDENTITY_MISMATCH.into()),
+        None => Err(ERR_VAULT_LOCKED.into()),
+    }
+}
+
 #[tauri::command]
 pub fn get_cached_profile(
     state: tauri::State<'_, std::sync::Arc<AppState>>,
@@ -983,11 +1055,16 @@ pub fn get_cached_profile(
 }
 
 #[tauri::command]
-pub fn save_profile_cache(
+pub async fn save_profile_cache(
     state: tauri::State<'_, std::sync::Arc<AppState>>,
     display_name: Option<String>,
     profile_picture: Option<String>,
-) {
+) -> Result<(), String> {
+    // Rust-side gate, not frontend discipline: this cache is what public
+    // votes publish to the shared DHT (irreversibly), and the frontend
+    // refreshes it from /status in three places. A different identity's
+    // name/photo must never land here.
+    require_identity_match(&state).await?;
     save_cached_profile(
         &state.data_dir,
         &CachedProfile {
@@ -995,6 +1072,7 @@ pub fn save_profile_cache(
             profile_picture,
         },
     );
+    Ok(())
 }
 
 // ── Identity linking commands (Flowsta infrastructure — keep as-is) ───
@@ -1010,6 +1088,28 @@ pub async fn commit_identity_link(
     vault_agent_pub_key: String,
     vault_signature: String,
 ) -> Result<String, String> {
+    // Never silently REBIND this install to a different identity than the
+    // one already linked - the launch-time auto-relink would otherwise
+    // adopt whichever identity happens to be unlocked, and the next public
+    // vote would publish their name under this agent key. Disconnecting
+    // first is the explicit path.
+    let previous = load_identity_link(&state.data_dir);
+    if let Some(ref existing) = previous {
+        if existing.vault_agent_pub_key != vault_agent_pub_key {
+            return Err(ERR_IDENTITY_MISMATCH.into());
+        }
+    }
+    // And the identity being bound must actually be the one present.
+    let (unlocked, live) = vault_live_identity()
+        .await
+        .ok_or(ERR_VAULT_UNCONFIRMED)?;
+    if !unlocked {
+        return Err(ERR_VAULT_LOCKED.into());
+    }
+    if live.as_deref() != Some(vault_agent_pub_key.as_str()) {
+        return Err(ERR_IDENTITY_MISMATCH.into());
+    }
+
     let client = state.app_client.lock().await;
     let client = client.as_ref().ok_or("Conductor not ready")?;
 
@@ -1036,6 +1136,27 @@ pub async fn commit_identity_link(
 
     let action_hash: ActionHash = result.decode().map_err(|e| e.to_string())?;
     let action_hash_str = action_hash.to_string();
+
+    // A re-link supersedes the previous entry - revoke it so repeated
+    // links can't accumulate orphaned IsSamePerson entries on the DHT
+    // (the file only ever remembers the newest hash). Best-effort: the
+    // new link is already committed either way.
+    if let Some(existing) = previous {
+        if existing.entry_action_hash != action_hash_str {
+            match ActionHash::try_from(existing.entry_action_hash.clone()) {
+                Ok(old_hash) => {
+                    if let Ok(payload) = ExternIO::encode(old_hash) {
+                        if let Err(e) =
+                            call_zome(client, AGENT_LINKING_ZOME, "revoke_link", payload).await
+                        {
+                            log::warn!("could not revoke the superseded identity link: {}", e);
+                        }
+                    }
+                }
+                Err(e) => log::warn!("superseded identity link hash unparseable: {:?}", e),
+            }
+        }
+    }
 
     // Persist the link data for later revocation
     let now = std::time::SystemTime::now()
@@ -1080,35 +1201,16 @@ pub async fn revoke_identity_link(
     let payload = ExternIO::encode(action_hash).map_err(|e| e.to_string())?;
     call_zome(client, AGENT_LINKING_ZOME, "revoke_link", payload).await?;
 
-    // Delete local persistence
+    // Delete local persistence - INCLUDING the profile cache, or the next
+    // link under a different identity could publish the previous person's
+    // name/photo on their first public vote.
     delete_identity_link(&state.data_dir);
+    let _ = std::fs::remove_file(profile_cache_path(&state.data_dir));
 
-    // Best-effort: notify Vault via IPC
-    let agent_key = state.agent_pub_key.lock().unwrap().clone();
-    if let Some(agent_key) = agent_key {
-        let _ = notify_vault_revoke(APP_NAME, &agent_key).await;
-    }
-
-    Ok(())
-}
-
-/// Best-effort notification to Vault that identity link was revoked.
-async fn notify_vault_revoke(app_name: &str, app_agent_pub_key: &str) -> Result<(), String> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(3))
-        .build()
-        .map_err(|e| e.to_string())?;
-
-    let body = serde_json::json!({
-        "app_name": app_name,
-        "app_agent_pub_key": app_agent_pub_key,
-    });
-
-    let _ = client
-        .post("http://127.0.0.1:27777/revoke-identity")
-        .json(&body)
-        .send()
-        .await;
+    // The Vault-side notification happens from the WEBVIEW (identity page),
+    // not here: the Vault authorizes /revoke-identity by the caller's
+    // Origin header, which a Rust reqwest doesn't carry - the old
+    // Rust-side POST was silently 403'd on every unlink ever made.
 
     Ok(())
 }
@@ -1277,22 +1379,6 @@ pub async fn get_export_data(
         }
     }
 
-    // CAL compliance: include cryptographic key access information
-    let passphrase = state.passphrase.lock().unwrap().clone();
-    let lair_dir = state.data_dir.join("lair");
-
-    // Include lair keystore data (store_file) for portable key backup.
-    let store_file_path = lair_dir.join("store_file");
-    let lair_keystore_data = if store_file_path.exists() {
-        use base64::Engine;
-        match std::fs::read(&store_file_path) {
-            Ok(bytes) => Some(base64::engine::general_purpose::STANDARD.encode(&bytes)),
-            Err(_) => None,
-        }
-    } else {
-        None
-    };
-
     let exported_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -1301,29 +1387,17 @@ pub async fn get_export_data(
     Ok(serde_json::json!({
         "_readme": format!(
             "Your complete {} data export. Includes polls you created, \
-             votes you cast, private vote rationales (decrypted), and draft polls (decrypted). \
-             Your cryptographic keys are included for full data portability (CAL compliance).",
+             votes you cast, private vote rationales (decrypted), and draft polls (decrypted).",
             APP_NAME
         ),
 
         "format": {
-            "version": 4,
+            "version": 5,
             "exported_at": exported_at,
         },
 
         "you": {
             "agent_pub_key": my_key,
-        },
-
-        "keys": {
-            "_readme": format!(
-                "Your lair keystore contains the private signing key for your {} identity. \
-                 The passphrase unlocks it. To restore: decode lair_keystore_data from base64, \
-                 save as 'store_file' in a lair directory, and run lair-keystore with the passphrase.",
-                APP_NAME
-            ),
-            "lair_passphrase": passphrase,
-            "lair_keystore_data": lair_keystore_data,
         },
 
         "polls_created": {
@@ -1534,10 +1608,8 @@ pub async fn flag_poll(
     poll_action_hash: String,
     reason: String,
 ) -> Result<String, String> {
-    // Require a linked Flowsta identity — frontend gating alone is bypassable.
-    if load_identity_link(&state.data_dir).is_none() {
-        return Err("Sign in with Flowsta to flag polls".to_string());
-    }
+    // Live identity match, not just file presence - see require_identity_match.
+    require_identity_match(&state).await?;
 
     let client = state.app_client.lock().await;
     let client = client.as_ref().ok_or("Conductor not ready")?;
@@ -1598,6 +1670,7 @@ pub async fn remove_flag(
     state: tauri::State<'_, std::sync::Arc<AppState>>,
     flag_action_hash: String,
 ) -> Result<String, String> {
+    require_identity_match(&state).await?;
     let client = state.app_client.lock().await;
     let client = client.as_ref().ok_or("Conductor not ready")?;
 
@@ -1693,6 +1766,9 @@ pub async fn save_vote_rationale(
     vote_action_hash: String,
     rationale_text: String,
 ) -> Result<String, String> {
+    // Encrypted, but its LINK to the vote is public - "this agent
+    // rationalized this vote" is identity-bearing. Same gate.
+    require_identity_match(&state).await?;
     let agent_bytes = get_agent_ed25519_bytes(&state)?;
 
     // Encrypt the rationale — acquire lair first, then app client (lock ordering)
@@ -1778,6 +1854,9 @@ pub async fn save_draft_poll(
     closes_at: Option<i64>,
     poll_type: Option<String>,
 ) -> Result<String, String> {
+    // Encrypted-to-self, but still authored + timestamped on the shared
+    // DHT under this agent key - same gate as every other write.
+    require_identity_match(&state).await?;
     let agent_bytes = get_agent_ed25519_bytes(&state)?;
 
     let draft = serde_json::json!({
@@ -1888,6 +1967,9 @@ pub async fn publish_draft(
     state: tauri::State<'_, std::sync::Arc<AppState>>,
     draft_action_hash: String,
 ) -> Result<String, String> {
+    // Publishing reaches create_poll on the shared DHT - same gate as the
+    // direct path (this command shipped ungated once; never again).
+    require_identity_match(&state).await?;
     let draft_hash = parse_action_hash(&draft_action_hash)?;
     let agent_bytes = get_agent_ed25519_bytes(&state)?;
 
@@ -1948,6 +2030,7 @@ pub async fn delete_draft(
     state: tauri::State<'_, std::sync::Arc<AppState>>,
     draft_action_hash: String,
 ) -> Result<String, String> {
+    require_identity_match(&state).await?;
     let hash = parse_action_hash(&draft_action_hash)?;
     let client = state.app_client.lock().await;
     let client = client.as_ref().ok_or("Conductor not ready")?;
@@ -2035,14 +2118,18 @@ pub async fn decode_record_for_export(
 /// Infrastructure records (Dna, AgentValidationPkg, CapGrant, …) carry their
 /// raw_record but no human_readable (they're chain plumbing, not user data).
 ///
-/// The three lair files are appended at the top level so the backup is also
-/// CAL-complete: data PLUS the cryptographic keys needed to operate it
-/// independently. See `read_lair_backup_fields`.
+/// The backup carries data only - never the lair keystore or passphrase
+/// (see the note at the end of this function).
 #[tauri::command]
 pub async fn build_canonical_backup(
     state: tauri::State<'_, std::sync::Arc<AppState>>,
 ) -> Result<serde_json::Value, String> {
     use holochain_client::{AdminWebsocket, CellInfo};
+
+    // This payload is written into the linked Vault's backup slot. Same
+    // gate as the DHT writes: if the Vault present right now belongs to a
+    // different identity, this data must not land in their slot.
+    require_identity_match(&state).await?;
 
     let my_key = {
         let key = state.agent_pub_key.lock().unwrap();
@@ -2119,10 +2206,10 @@ pub async fn build_canonical_backup(
         .collect();
 
     // 5. Assemble the canonical payload.
-    let mut payload = serde_json::json!({
+    let payload = serde_json::json!({
         "version": 1,
         "_readme": format!(
-            "Your {} data, backed up automatically by Flowsta Vault. Encrypted with your device key — only you can read it. Each record below carries a plain-English view of what you authored AND a signed Holochain record for restore. The lair_* fields are the cryptographic keys that let you recover this identity on a fresh install.",
+            "Your {} data, backed up automatically by Flowsta Vault. Encrypted with your device key — only you can read it. Each record below carries a plain-English view of what you authored AND a signed Holochain record. No private keys ride this backup.",
             APP_NAME
         ),
         "license": "Cryptographic Autonomy License v1.0 (CAL-1.0)",
@@ -2149,19 +2236,13 @@ pub async fn build_canonical_backup(
         ],
     });
 
-    // 6. Append the lair recovery fields (data + keys = CAL-complete). If any
-    //    of the three files is missing we omit all three — a partial set is
-    //    useless for recovery and we'd rather ship a data-only backup than a
-    //    misleading one.
-    if let Some((passphrase, config_yaml, store_b64)) =
-        read_lair_backup_fields(&state.data_dir)
-    {
-        payload["lair_passphrase"] = serde_json::json!(passphrase);
-        payload["lair_keystore_config"] = serde_json::json!(config_yaml);
-        payload["lair_keystore_data"] = serde_json::json!(store_b64);
-    } else {
-        log::warn!("build_canonical_backup: lair files incomplete; shipping data-only backup (no recovery fields)");
-    }
+    // The hourly backup deliberately ships NO private key material. It used
+    // to append the lair passphrase and full keystore for a restore flow
+    // that never existed - a plaintext signing key parked in the Vault slot,
+    // readable by whichever identity's Vault received it, buying nothing.
+    // Restoring a chain onto a fresh install re-authors under a new agent
+    // key by design; if authorship recovery is ever wanted, it will be a
+    // deliberate per-app key escrow, not a keystore dump riding every hour.
 
     Ok(payload)
 }
@@ -2264,16 +2345,3 @@ fn action_variant_label(action: &holochain_integrity_types::Action) -> String {
     .to_string()
 }
 
-/// Read the three lair files and return them base64-encoded / stringified for
-/// inclusion in the CAL §4.2.1 backup (the cryptographic keys the user needs to
-/// operate their data independently). Returns `None` if any is missing — we
-/// include all three or none.
-fn read_lair_backup_fields(data_dir: &Path) -> Option<(String, String, String)> {
-    use base64::Engine;
-    let passphrase = std::fs::read_to_string(data_dir.join("lair-passphrase")).ok()?;
-    let config_yaml =
-        std::fs::read_to_string(data_dir.join("lair").join("lair-keystore-config.yaml")).ok()?;
-    let store_bytes = std::fs::read(data_dir.join("lair").join("store_file")).ok()?;
-    let store_b64 = base64::engine::general_purpose::STANDARD.encode(&store_bytes);
-    Some((passphrase, config_yaml, store_b64))
-}

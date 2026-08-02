@@ -159,6 +159,15 @@ export default component$(() => {
       } finally {
         linking.value = false;
       }
+    } else if (autoLink.value && linkedVaultKey.value) {
+      // A stale link exists - the auto-link intent used to be dropped here
+      // with no message at all, leaving "Connect with current account" a
+      // silent no-op. Rebinding is deliberately a two-step: disconnect the
+      // old identity first (the backend refuses silent rebinds too).
+      autoLink.value = false;
+      error.value =
+        "This install is already connected to a Flowsta identity. To connect " +
+        "a different account, disconnect the current one below first.";
     }
 
     // No local polling needed — the layout's linkPoll watches link state
@@ -229,6 +238,23 @@ export default component$(() => {
 
     try {
       await revokeIdentityLink();
+      // Tell the Vault to drop its side of the link too. From the webview
+      // (not Rust) so the request carries this app's Origin header - the
+      // Vault attributes and authorizes the revocation by it. Best-effort:
+      // the local revocation above is what ends authority.
+      try {
+        await fetch("http://127.0.0.1:27777/revoke-identity", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            app_name: "ProofPoll",
+            app_agent_pub_key: agentKey.value,
+          }),
+          signal: AbortSignal.timeout(3000),
+        });
+      } catch {
+        // Vault not running - its stale entry is cosmetic
+      }
       linkedVaultKey.value = null;
       linkStateCtx.value = "unlinked";
       linkedCtx.value = false;

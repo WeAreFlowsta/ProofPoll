@@ -6,15 +6,20 @@ import { createContextId, type Signal } from "@builder.io/qwik";
  * boolean leaves users in the lurch when the Vault is closed or when they
  * change Flowsta accounts.
  *
- * - `linked`   — Vault is running and recognises this app's agent.
+ * - `linked`   — Vault is running, unlocked under the SAME identity this
+ *                install is bound to, and recognises this app's agent.
  *                Full feature access.
- * - `offline`  — Vault isn't running but we have a local link record.
- *                Trust local state, all features stay enabled — the user
- *                is still themselves, the Vault just isn't open right now.
- * - `mismatch` — Vault is running but doesn't recognise this app's agent.
- *                Surface a banner asking the user to reconnect with their
- *                current Flowsta account or disconnect deliberately. Don't
- *                auto-revoke; the user might have switched accounts
+ * - `offline`  — Vault isn't reachable (or is locked) but we have a local
+ *                link record. READ-ONLY: everything on this device stays
+ *                visible, but writes to the shared network wait until the
+ *                identity can be confirmed. Publishing under an identity
+ *                needs proof of presence; reading your own data does not.
+ *                (The Rust write gates enforce this regardless of the UI.)
+ * - `mismatch` — Vault is running but is unlocked under a DIFFERENT
+ *                identity than the one linked here, or doesn't recognise
+ *                this app's agent. Surface a banner asking the user to
+ *                unlock the matching Vault or disconnect deliberately.
+ *                Don't auto-revoke; the user might have switched accounts
  *                temporarily or restored from a different recovery phrase.
  * - `unlinked` — No DHT entry, no local record. Show the Flowsta sign-in CTA.
  */
@@ -23,13 +28,10 @@ export type LinkState = "linked" | "offline" | "mismatch" | "unlinked";
 export const linkStateContext = createContextId<Signal<LinkState>>("app.linkState");
 
 /**
- * Permissive boolean derived from `linkStateContext`: true when the user
- * can read AND take actions (write polls, vote, comment). Equivalent to
- * `state === 'linked' || state === 'offline'`.
- *
- * Existing pages can keep using this for show/hide decisions. The Vault
- * mismatch state is handled by a top-level banner in the layout, so pages
- * don't each need to re-implement the explanatory UI.
+ * Boolean derived from `linkStateContext`: true when the user can take
+ * actions (write polls, vote, comment). Equivalent to `state === 'linked'`
+ * — a CONFIRMED identity, nothing less. Read-only surfaces should key on
+ * the rich state, not this.
  */
 export const linkedContext = createContextId<Signal<boolean>>("app.linked");
 

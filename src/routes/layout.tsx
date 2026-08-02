@@ -98,95 +98,117 @@ export default component$(() => {
       }
     };
 
+    // ONE state computation for both poll loops - two copies of this logic
+    // is how they drifted apart before.
+    //
+    // Inputs, in order of authority:
+    //   • Local file — `getIdentityLink()` holds the Vault identity this
+    //     install is bound to. Its `vault_agent_pub_key` vs the LIVE
+    //     /status.agent_pub_key is the PRIMARY signal: /link-status matches
+    //     on the app's agent key only and carries no vault identity, so it
+    //     cannot detect an account switch (and the Vault's linked-apps file
+    //     survives one).
+    //   • DHT entry — `getLinkedAgents` non-empty if an `IsSamePersonEntry`
+    //     was committed.
+    //   • Vault liveness/opinion — `getFlowstaLinkStatus()` demoted to a
+    //     liveness + app-link probe.
+    const computeLinkState = async (agentPubKey: string): Promise<LinkState> => {
+      const dhtLinked = await getLinkedAgents(agentPubKey)
+        .then((a) => a.length > 0)
+        .catch(() => false);
+      const localLink = await getIdentityLink().catch(() => null);
+      if (!dhtLinked && !localLink) return "unlinked";
+
+      // Primary: compare the linked identity against whoever is actually
+      // unlocked right now.
+      let vaultLive: { unlocked?: boolean; agent_pub_key?: string | null } | null = null;
+      try {
+        const resp = await fetch("http://127.0.0.1:27777/status", {
+          signal: AbortSignal.timeout(2000),
+        });
+        if (resp.ok) vaultLive = await resp.json();
+      } catch {
+        // Vault not reachable
+      }
+      if (
+        vaultLive?.unlocked &&
+        vaultLive.agent_pub_key &&
+        localLink &&
+        vaultLive.agent_pub_key !== localLink.vault_agent_pub_key
+      ) {
+        return "mismatch";
+      }
+      if (!vaultLive) return "offline";
+
+      const vaultStatus = await getFlowstaLinkStatus({
+        clientId: import.meta.env.VITE_FLOWSTA_CLIENT_ID,
+        localAgentPubKey: agentPubKey,
+      }).catch(() => ({ state: "offline" as const }));
+      if (vaultStatus.state === "linked") return "linked";
+      if (vaultStatus.state === "offline") return "offline";
+      // Vault is running and says no link for this app's agent - the user
+      // unlinked deliberately or switched accounts. Surface the choice via
+      // the banner; never auto-revoke their data.
+      return "mismatch";
+    };
+
     const poll = async () => {
       while (active) {
         try {
           const s = await invoke<AppStatus>("get_app_status");
           status.value = s;
           if (s.ready) {
-            // Compute the rich link state in one pass — see context.ts for
-            // why we don't just use a boolean.
-            //
-            // Three inputs:
-            //   • DHT entry — `getLinkedAgents` returns a non-empty list if
-            //     we previously committed an `IsSamePersonEntry` to our DHT.
-            //   • Local file — `getIdentityLink()` returns a record if we
-            //     stored the Vault's signature locally (survives DNA migration
-            //     and app restarts).
-            //   • Vault opinion — `getFlowstaLinkStatus()` returns one of
-            //     `linked` / `unlinked` / `offline`, distinguishing "Vault
-            //     says no" from "Vault not running".
             if (s.agent_pub_key) {
-              const dhtLinked = await getLinkedAgents(s.agent_pub_key)
-                .then((a) => a.length > 0)
-                .catch(() => false);
-              const hasLocalLink = await getIdentityLink()
-                .then((l) => !!l)
-                .catch(() => false);
+              const state = await computeLinkState(s.agent_pub_key);
+              linkState.value = state;
+              // Writes require a CONFIRMED identity - `offline` is
+              // read-only now (the Rust write gates enforce this
+              // regardless; the UI just tells the truth about it).
+              linked.value = state === "linked";
 
-              if (!dhtLinked && !hasLocalLink) {
-                // No evidence either way — user has never linked.
-                linkState.value = "unlinked";
-                linked.value = false;
-              } else {
-                const vaultStatus = await getFlowstaLinkStatus({
-                  clientId: import.meta.env.VITE_FLOWSTA_CLIENT_ID,
-                  localAgentPubKey: s.agent_pub_key,
-                });
-
-                if (vaultStatus.state === "linked") {
-                  linkState.value = "linked";
-                  linked.value = true;
-
-                  // Migration race: Vault confirms the link but the new
-                  // DNA's DHT doesn't have an entry yet. Recreate it in
-                  // the background so peers can verify this identity link.
-                  if (!dhtLinked) {
-                    const agentPubKey = s.agent_pub_key;
-                    import("@flowsta/holochain")
-                      .then(async ({ linkFlowstaIdentity }) => {
-                        try {
-                          const result = await linkFlowstaIdentity({
-                            appName: "ProofPoll",
-                            clientId: import.meta.env.VITE_FLOWSTA_CLIENT_ID,
-                            localAgentPubKey: agentPubKey,
-                          });
-                          if (result.success) {
-                            await commitIdentityLink(
-                              result.payload.vaultAgentPubKey,
-                              result.payload.vaultSignature,
-                            );
-                            console.log("[ProofPoll] DHT identity link re-created after migration");
-                          }
-                        } catch {
-                          // Vault dialog dismissed — link still works locally
+              // Migration race: Vault confirms the link but the new DNA's
+              // DHT doesn't have an entry yet. Recreate it in the
+              // background so peers can verify. Safe against account
+              // switches: commit_identity_link hard-refuses binding any
+              // identity other than the one already linked AND live.
+              if (state === "linked") {
+                const dhtLinked = await getLinkedAgents(s.agent_pub_key)
+                  .then((a) => a.length > 0)
+                  .catch(() => false);
+                if (!dhtLinked) {
+                  const agentPubKey = s.agent_pub_key;
+                  import("@flowsta/holochain")
+                    .then(async ({ linkFlowstaIdentity }) => {
+                      try {
+                        const result = await linkFlowstaIdentity({
+                          appName: "ProofPoll",
+                          clientId: import.meta.env.VITE_FLOWSTA_CLIENT_ID,
+                          localAgentPubKey: agentPubKey,
+                        });
+                        if (result.success) {
+                          await commitIdentityLink(
+                            result.payload.vaultAgentPubKey,
+                            result.payload.vaultSignature,
+                          );
+                          console.log("[ProofPoll] DHT identity link re-created after migration");
                         }
-                      })
-                      .catch(() => {});
-                  }
-                } else if (vaultStatus.state === "offline") {
-                  // Vault not running. Trust local state — features stay
-                  // enabled. The user is still themselves.
-                  linkState.value = "offline";
-                  linked.value = true;
-                } else {
-                  // Vault is running and says no link for this app's agent.
-                  // Could mean the user unlinked deliberately OR switched
-                  // Flowsta accounts. Either way, surface the choice to the
-                  // user via the banner — DON'T auto-revoke their data.
-                  linkState.value = "mismatch";
-                  linked.value = false;
+                      } catch {
+                        // Vault dialog dismissed or identity guard refused —
+                        // the local link still works for display
+                      }
+                    })
+                    .catch(() => {});
                 }
               }
             }
 
             // Load profile: cache first, then Vault refresh.
-            // The Vault only needs to be running for the FIRST identity link.
-            // After that, profile-cache.json has the display name and picture.
-            // If the Vault is running, we refresh the cache in case the user
-            // changed their name or picture. If not, cached data is fine.
-            if (linked.value) {
-              // 1. Load from local cache (works without Vault)
+            // The cached name/picture DISPLAY when linked or offline (who
+            // this install is connected to), but the cache is only ever
+            // REFRESHED in the confirmed-linked state - the Rust side
+            // refuses save_profile_cache on an identity mismatch anyway,
+            // because this cache is what public votes publish to the DHT.
+            if (linkState.value === "linked" || linkState.value === "offline") {
               try {
                 const cached = await getCachedProfile();
                 if (cached) {
@@ -196,8 +218,8 @@ export default component$(() => {
               } catch {
                 // No cache yet
               }
-
-              // 2. Try to refresh from Vault (may be locked or closed)
+            }
+            if (linkState.value === "linked") {
               try {
                 const resp = await fetch("http://127.0.0.1:27777/status", {
                   signal: AbortSignal.timeout(2000),
@@ -208,8 +230,12 @@ export default component$(() => {
                     displayName.value = vault.display_name;
                     if (vault.profile_picture)
                       profilePicture.value = vault.profile_picture;
-                    // Save to cache for next startup
-                    saveProfileCache(vault.display_name, vault.profile_picture || null);
+                    // Save to cache for next startup (Rust re-verifies the
+                    // identity before writing)
+                    await saveProfileCache(
+                      vault.display_name,
+                      vault.profile_picture || null,
+                    ).catch(() => {});
                   }
                 }
               } catch {
@@ -249,37 +275,20 @@ export default component$(() => {
         // or unlinked from the Vault UI at any moment, and the layout
         // banner needs to reflect it within the polling cadence.
         const wasLinked = linked.value;
-        const dhtLinked = await getLinkedAgents(s.agent_pub_key)
-          .then((a) => a.length > 0)
-          .catch(() => false);
-        const hasLocalLink = await getIdentityLink()
-          .then((l) => !!l)
-          .catch(() => false);
-
-        let nextState: LinkState;
-        if (!dhtLinked && !hasLocalLink) {
-          nextState = "unlinked";
-        } else {
-          const vaultStatus = await getFlowstaLinkStatus({
-            clientId: import.meta.env.VITE_FLOWSTA_CLIENT_ID,
-            localAgentPubKey: s.agent_pub_key,
-          });
-          if (vaultStatus.state === "linked") nextState = "linked";
-          else if (vaultStatus.state === "offline") nextState = "offline";
-          else nextState = "mismatch";
-        }
+        const nextState = await computeLinkState(s.agent_pub_key);
 
         linkState.value = nextState;
-        const nowLinked = nextState === "linked" || nextState === "offline";
+        const nowLinked = nextState === "linked";
         linked.value = nowLinked;
 
-        // Start/stop auto-backup based on link status
+        // Start/stop auto-backup on CONFIRMED identity only
         if (nowLinked && !wasLinked) startBackup();
         if (!nowLinked && wasLinked) stopBackup();
 
-        // Fetch profile when linked but profile is missing
-        if (nowLinked && !displayName.value) {
-          // Try cache first
+        // Fetch profile when linked but profile is missing. Cache display
+        // is fine in `offline` too; refreshing the cache is linked-only
+        // (Rust refuses it otherwise).
+        if ((nowLinked || nextState === "offline") && !displayName.value) {
           try {
             const cached = await getCachedProfile();
             if (cached?.display_name) {
@@ -287,8 +296,7 @@ export default component$(() => {
               if (cached.profile_picture) profilePicture.value = cached.profile_picture;
             }
           } catch {}
-          // Then try Vault
-          if (!displayName.value) {
+          if (nowLinked && !displayName.value) {
             try {
               const resp = await fetch("http://127.0.0.1:27777/status", {
                 signal: AbortSignal.timeout(2000),
@@ -299,7 +307,10 @@ export default component$(() => {
                   displayName.value = vault.display_name;
                   if (vault.profile_picture)
                     profilePicture.value = vault.profile_picture;
-                  saveProfileCache(vault.display_name, vault.profile_picture || null);
+                  await saveProfileCache(
+                    vault.display_name,
+                    vault.profile_picture || null,
+                  ).catch(() => {});
                 }
               }
             } catch {
