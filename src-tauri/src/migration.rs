@@ -220,6 +220,32 @@ pub async fn run_migration(
         }
     }
 
+    // The migration re-authors this agent's data onto the new DHT - a
+    // write, so it takes the same identity gate as every other write.
+    // A linked install whose Vault identity can't be confirmed right now
+    // WAITS (rechecking every minute this session, then again next
+    // launch) rather than erroring; an install that never linked has
+    // nothing to mismatch and proceeds. We already run inside a spawned
+    // task, so waiting here blocks nothing else.
+    let mut waited_minutes = 0u32;
+    loop {
+        match crate::commands::require_identity_match(state).await {
+            Ok(_) => break,
+            Err(e) if e == crate::commands::ERR_NOT_LINKED => break,
+            Err(e) => {
+                if waited_minutes == 0 {
+                    log::info!("Migration waiting for identity confirmation: {}", e);
+                }
+                if waited_minutes >= 30 {
+                    log::info!("Migration deferred to the next launch (identity still unconfirmable)");
+                    return Ok(());
+                }
+                waited_minutes += 1;
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            }
+        }
+    }
+
     // Give the conductor a moment to fully initialize cells after startup.
     log::info!("Waiting 10s for conductor cells to initialize...");
     tokio::time::sleep(std::time::Duration::from_secs(10)).await;
