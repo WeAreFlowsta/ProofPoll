@@ -21,6 +21,14 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# Pre-release builds skip Authenticode signing (cloud signing services bill
+# per signing operation; beta testers just click through SmartScreen). The
+# release workflow sets this for -beta tags; rc and stable tags never do.
+if ($env:PROOFPOLL_SKIP_WINDOWS_SIGNING -eq "1") {
+    Write-Host "Skipping Authenticode signing (pre-release build): $FilePath"
+    exit 0
+}
+
 # Mirror all output to a log file so CI can dump it on failure
 # (tauri-bundler captures stdout/stderr but drops them on non-zero exit).
 $logDir = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { [System.IO.Path]::GetTempPath() }

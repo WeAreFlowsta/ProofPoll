@@ -264,18 +264,32 @@ jobs:
           mkdir -p ~/private_keys
           echo -n "$APPLE_API_KEY_PATH" | base64 --decode -o ~/private_keys/AuthKey_${APPLE_API_KEY}.p8
 
+      # Betas skip Authenticode signing (cloud signing bills per operation;
+      # sign-windows.ps1 no-ops when the env below is set). Release
+      # candidates and stable tags sign as always.
+      - name: Detect beta build
+        id: prerelease
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#proofpoll-v}"
+          if [[ "$VERSION" == *-beta* ]]; then
+            echo "is_beta=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_beta=0" >> "$GITHUB_OUTPUT"
+          fi
+
       # Windows code signing via SSL.com eSigner — only runs when the
       # ESIGNER secrets are configured. Without them, the Windows bundle
       # is unsigned (SmartScreen will warn on first launch).
       - name: Setup Java (Windows)
-        if: runner.os == 'Windows' && env.ESIGNER_USERNAME != ''
+        if: runner.os == 'Windows' && env.ESIGNER_USERNAME != '' && steps.prerelease.outputs.is_beta == '0'
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
       - name: Download CodeSignTool (Windows)
-        if: runner.os == 'Windows' && env.ESIGNER_USERNAME != ''
+        if: runner.os == 'Windows' && env.ESIGNER_USERNAME != '' && steps.prerelease.outputs.is_beta == '0'
         shell: pwsh
         run: |
           $url = "https://github.com/SSLcom/CodeSignTool/releases/download/v1.3.2/CodeSignTool-v1.3.2.zip"
@@ -308,6 +322,8 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # sign-windows.ps1 no-ops when this is 1 (betas skip signing).
+          PROOFPOLL_SKIP_WINDOWS_SIGNING: ${{ steps.prerelease.outputs.is_beta }}
           # Default the signing identity to '-' (ad-hoc) when not on
           # macOS or when the secret isn't configured. tauri-action's
           # macOS sign step errors otherwise.
