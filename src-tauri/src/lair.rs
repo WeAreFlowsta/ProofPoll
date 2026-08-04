@@ -247,3 +247,67 @@ pub async fn wait_for_lair_socket(connection_url: &str, timeout_secs: u64) -> Re
         timeout_secs, socket_path
     ))
 }
+
+/// Import a 32-byte seed into a running lair keystore (ported from the
+/// Flowsta Vault, which installs its conductor agent from an app-held seed
+/// the same way). Lair's `import_seed` API requires the payload sealed via
+/// x25519 crypto_box to a key lair controls; this wraps that transparently.
+/// Idempotent: an existing entry under `tag` is returned as-is.
+pub async fn import_seed_to_lair(
+    client: &LairClient,
+    seed_bytes: &[u8; 32],
+    tag: &str,
+) -> LairResult<SeedInfo> {
+    use lair_keystore_api::dependencies::sodoken;
+
+    match client.get_entry(tag.into()).await {
+        Ok(LairEntryInfo::Seed { seed_info, .. }) => {
+            log::info!("Seed '{}' already exists in lair, reusing", tag);
+            return Ok(seed_info);
+        }
+        _ => {}
+    }
+
+    let helper = match client.new_seed("_import_helper".into(), None, false).await {
+        Ok(h) => h,
+        Err(_) => match client.get_entry("_import_helper".into()).await {
+            Ok(LairEntryInfo::Seed { seed_info, .. }) => seed_info,
+            _ => {
+                return Err(lair_keystore_api::dependencies::one_err::OneErr::new(
+                    "Failed to create or fetch _import_helper seed",
+                ))
+            }
+        },
+    };
+
+    let mut sender_pub = [0u8; sodoken::crypto_box::XSALSA_PUBLICKEYBYTES];
+    let mut sender_sec =
+        sodoken::SizedLockedArray::<{ sodoken::crypto_box::XSALSA_SECRETKEYBYTES }>::new()?;
+    sodoken::crypto_box::xsalsa_keypair(&mut sender_pub, &mut *sender_sec.lock())?;
+
+    let mut nonce = [0u8; sodoken::crypto_box::XSALSA_NONCEBYTES];
+    sodoken::random::randombytes_buf(&mut nonce)?;
+
+    let recipient_pub_bytes: &[u8; 32] = &*helper.x25519_pub_key.0;
+    let mut cipher = vec![0u8; seed_bytes.len() + sodoken::crypto_box::XSALSA_MACBYTES];
+    sodoken::crypto_box::xsalsa_easy(
+        &mut cipher,
+        seed_bytes,
+        &nonce,
+        recipient_pub_bytes,
+        &*sender_sec.lock(),
+    )?;
+
+    let sender_pub_key = BinDataSized(Arc::new(sender_pub));
+    client
+        .import_seed(
+            sender_pub_key,
+            helper.x25519_pub_key,
+            None,
+            nonce,
+            cipher.into(),
+            tag.into(),
+            false,
+        )
+        .await
+}

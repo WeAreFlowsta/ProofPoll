@@ -25,6 +25,7 @@ mod commands;
 mod conductor;
 mod crypto;
 mod dna;
+mod device_seed;
 mod lair;
 pub mod migration;
 mod process_ext;
