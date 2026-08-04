@@ -1392,7 +1392,7 @@ pub async fn get_export_data(
         ),
 
         "format": {
-            "version": 5,
+            "version": 6,
             "exported_at": exported_at,
         },
 
@@ -2209,7 +2209,7 @@ pub async fn build_canonical_backup(
     let payload = serde_json::json!({
         "version": 1,
         "_readme": format!(
-            "Your {} data, backed up automatically by Flowsta Vault. Encrypted with your device key — only you can read it. Each record below carries a plain-English view of what you authored AND a signed Holochain record. No private keys ride this backup.",
+            "Your {} data, backed up automatically by Flowsta Vault. Encrypted with your device key — only you can read it. Each record below carries a plain-English view of what you authored AND a signed Holochain record. The app_keys block holds your agent seed, so a restore continues as the SAME author.",
             APP_NAME
         ),
         "license": "Cryptographic Autonomy License v1.0 (CAL-1.0)",
@@ -2235,14 +2235,33 @@ pub async fn build_canonical_backup(
             }
         ],
     });
+    let mut payload = payload;
+    // The means of authorship travels WITH the data (CAL): the agent seed
+    // this device authors under. Encrypted at rest in the Vault, readable in
+    // the user's own export - that is the point. Installs whose agent
+    // predates the app-held seed have nothing to escrow yet and say so.
+    match crate::device_seed::load(&state.data_dir) {
+        Ok(Some(seed)) => {
+            payload["app_keys"] = serde_json::json!({
+                "_readme": "The agent seed this device signs with. Import it on a new machine to keep authoring as the same agent. Keep any export of this file private.",
+                "device_seed_hex": seed.device_seed_hex,
+                "version": seed.version,
+            });
+        }
+        Ok(None) => {
+            payload["app_keys"] = serde_json::json!({
+                "_readme": "This install's agent key predates escrowable seeds, so no seed can be included. Re-key from Settings to make future exports carry your authorship.",
+                "device_seed_hex": serde_json::Value::Null,
+            });
+        }
+        Err(e) => log::warn!("[backup] could not read the device seed: {}", e),
+    }
 
-    // The hourly backup deliberately ships NO private key material. It used
-    // to append the lair passphrase and full keystore for a restore flow
-    // that never existed - a plaintext signing key parked in the Vault slot,
-    // readable by whichever identity's Vault received it, buying nothing.
-    // Restoring a chain onto a fresh install re-authors under a new agent
-    // key by design; if authorship recovery is ever wanted, it will be a
-    // deliberate per-app key escrow, not a keystore dump riding every hour.
+    // The backup carries the AGENT SEED and nothing else key-shaped: never
+    // the lair passphrase or keystore again (0.2.2 shipped both, hourly, for
+    // a restore flow that did not exist). The seed is the targeted escrow
+    // that makes an export CAL-whole and lets a restore resume the same
+    // author, without handing over the whole keystore.
 
     Ok(payload)
 }
