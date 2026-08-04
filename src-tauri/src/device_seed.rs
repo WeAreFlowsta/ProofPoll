@@ -128,3 +128,30 @@ mod tests {
         assert_eq!(&k1.get_raw_39()[0..3], &[0x84, 0x20, 0x24]);
     }
 }
+
+/// Load-or-create the device seed, import it into lair, and return the
+/// agent key - the fresh-install path. The key is built from LAIR's derived
+/// public key and cross-checked against the app-side derivation, so the
+/// conductor can always sign for the agent we install with.
+pub async fn ensure_device_agent(
+    client: &lair_keystore_api::prelude::LairClient,
+    data_dir: &Path,
+) -> Result<holochain_types::prelude::AgentPubKey, String> {
+    let seed = match load(data_dir)? {
+        Some(s) => s,
+        None => {
+            log::info!("[seed] generating device agent seed (app-held, escrowed in backups)");
+            generate_and_store(data_dir)?
+        }
+    };
+    let info = crate::lair::import_seed_to_lair(client, &seed.seed_bytes()?, SEED_TAG)
+        .await
+        .map_err(|e| format!("seed import into lair failed: {}", e))?;
+    let lair_pk: [u8; 32] = *info.ed25519_pub_key.0;
+    let lair_key = holochain_types::prelude::AgentPubKey::from_raw_32(lair_pk.to_vec());
+    let derived = agent_pub_key(&seed)?;
+    if derived != lair_key {
+        return Err("lair-derived agent key differs from the recovery file's derivation".into());
+    }
+    Ok(lair_key)
+}

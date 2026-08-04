@@ -555,7 +555,8 @@ async fn start_holochain_attempt(
     }
 
     let install_result =
-        match crate::dna::install_dnas(ADMIN_WS_PORT, &resource_dir).await {
+        match crate::dna::install_dnas(ADMIN_WS_PORT, &resource_dir, &lair_client, &data_dir).await
+        {
             Ok(r) => r,
             Err(e) => fail_with_full_cleanup!(format!("DNA installation failed: {}", e)),
         };

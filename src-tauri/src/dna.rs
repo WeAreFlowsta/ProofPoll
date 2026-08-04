@@ -65,6 +65,8 @@ pub struct InstallResult {
 pub async fn install_dnas(
     admin_port: u16,
     resource_dir: &Path,
+    lair_client: &lair_keystore_api::prelude::LairClient,
+    data_dir: &Path,
 ) -> Result<InstallResult, String> {
     let admin_ws = AdminWebsocket::connect(
         format!("localhost:{}", admin_port),
@@ -169,10 +171,19 @@ pub async fn install_dnas(
     // Install v1.3 if not present — reuse the most recent agent
     // key so identity links survive.
     if !v1_3_installed {
-        let agent_key = v1_2_agent_key.as_ref()
+        let agent_key = match v1_2_agent_key.as_ref()
             .or(v1_1_agent_key.as_ref())
             .or(v1_0_agent_key.as_ref())
-            .cloned();
+            .cloned()
+        {
+            Some(k) => Some(k),
+            // Brand-new install: the agent seed originates app-side so the
+            // canonical backup can escrow it - the export carries the means
+            // of authorship, and a restore resumes the SAME agent.
+            None => Some(
+                crate::device_seed::ensure_device_agent(lair_client, data_dir).await?,
+            ),
+        };
 
         let happ_path = resource_dir.join(HAPP_FILE_V1_3);
         if !happ_path.exists() {
