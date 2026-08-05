@@ -221,15 +221,15 @@ pub async fn run_migration(
     }
 
     // The migration re-authors this agent's data onto the new DHT - a
-    // write, so it takes the same identity gate as every other write.
-    // A linked install whose Vault identity can't be confirmed right now
-    // WAITS (rechecking every minute this session, then again next
-    // launch) rather than erroring; an install that never linked has
-    // nothing to mismatch and proceeds. We already run inside a spawned
-    // task, so waiting here blocks nothing else.
+    // write, so it takes the same tier-1 gate as every other basic write:
+    // a signed-in install proceeds without an unlock; only a DIFFERENT
+    // identity demonstrably present makes it WAIT (rechecking every
+    // minute this session, then again next launch) rather than erroring.
+    // An install that never linked has nothing to mismatch and proceeds.
+    // We already run inside a spawned task, so waiting blocks nothing.
     let mut waited_minutes = 0u32;
     loop {
-        match crate::commands::require_identity_match(state).await {
+        match crate::commands::require_identity_link(state).await {
             Ok(_) => break,
             Err(e) if e == crate::commands::ERR_NOT_LINKED => break,
             Err(e) => {

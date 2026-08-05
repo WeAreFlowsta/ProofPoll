@@ -537,8 +537,9 @@ pub async fn create_poll(
     closes_at: Option<i64>,
     poll_type: Option<String>,
 ) -> Result<String, String> {
-    // Live identity match, not just file presence - see require_identity_match.
-    require_identity_match(&state).await?;
+    // Tier-1 gate: signed-in install, no unlock required - but never while
+    // a different identity's Vault is open. See require_identity_link.
+    require_identity_link(&state).await?;
 
     let client = state.app_client.lock().await;
     let client = client.as_ref().ok_or("Conductor not ready")?;
@@ -743,7 +744,7 @@ pub async fn delete_poll(
     state: tauri::State<'_, std::sync::Arc<AppState>>,
     action_hash: String,
 ) -> Result<String, String> {
-    require_identity_match(&state).await?;
+    require_identity_link(&state).await?;
     let client = state.app_client.lock().await;
     let client = client.as_ref().ok_or("Conductor not ready")?;
 
@@ -771,10 +772,12 @@ pub async fn cast_vote(
         "cast_vote: dna_version={}, poll_type={:?}, option_index={}",
         dna_version, poll_type, option_index,
     );
-    // Live identity match, not just file presence - a public vote publishes
-    // the cached display name/photo to the shared DHT under this agent key,
-    // which is irreversible, so the person must actually be present.
-    require_identity_match(&state).await?;
+    // Tier-1 gate: a public vote publishes the CACHED display name/photo -
+    // material this install already holds for its linked identity - so a
+    // signed-in install suffices. The cache itself only ever refreshes
+    // under the strict gate, and a different identity demonstrably present
+    // still refuses.
+    require_identity_link(&state).await?;
     let cached = load_cached_profile(&state.data_dir);
     log::info!(
         "cast_vote: identity link present, cached profile: display_name={:?}, has_picture={}",
@@ -984,24 +987,31 @@ fn delete_identity_link(data_dir: &std::path::Path) {
     let _ = std::fs::remove_file(path);
 }
 
-// ── Write authorization (the ONE chokepoint) ──────────────────────────
+// ── Write authorization (the ONE chokepoint, two tiers) ───────────────
 //
-// Every command that writes to the shared DHT authorizes here. Forks:
-// route new write commands through this function too - per-command
-// checks are how `publish_draft` shipped with no gate at all.
+// Every command that writes to the shared DHT authorizes through one of
+// these two functions. Forks: route new write commands through them too -
+// per-command checks are how `publish_draft` once shipped with no gate.
 //
-// Policy (fail closed):
+// Tier 1 - `require_identity_link` (basic use: polls, votes, flags,
+// drafts, deletes, backups). The user shouldn't have to unlock their
+// Vault for everyday actions on a machine they already signed in on:
 //   - no identity link on this device        → refuse (sign in first)
-//   - Vault unreachable or locked            → refuse (cannot confirm who
-//     is present; DHT writes are irreversible, so "can't tell" means no)
 //   - Vault unlocked under a DIFFERENT key   → refuse (someone else's
-//     Vault is open on this machine - their name/photo must never be
-//     published under this install's agent key)
-//   - Vault unlocked under the linked key    → allow
+//     Vault is demonstrably open on this machine - nothing may be
+//     authored under this install's agent while they're present)
+//   - Vault unreachable or locked            → ALLOW as the linked
+//     identity (a locked Vault on the user's own machine is the normal
+//     resting state, not an anomaly)
 //
-// This is deliberately the OPPOSITE default to read paths, which keep
-// working offline: reading your own polls needs no proof of presence,
-// publishing under an identity does.
+// Tier 2 - `require_identity_match` (identity-bearing operations that
+// COPY FROM or REBIND to the live Vault: profile-cache refresh, seed
+// adopt/re-key; the link ceremony has its own equivalent checks). These
+// stay fail-closed on presence: unreachable or locked also refuses,
+// because what they write comes from whoever is actually there.
+//
+// Reads keep working with no link at all - reading polls needs no proof
+// of anything.
 
 /// Human-readable refusals; the frontend shows these verbatim.
 pub(crate) const ERR_NOT_LINKED: &str = "Sign in with Flowsta first";
@@ -1053,6 +1063,22 @@ pub(crate) async fn require_identity_match(
         Some(_) => Err(ERR_IDENTITY_MISMATCH.into()),
         None => Err(ERR_VAULT_LOCKED.into()),
     }
+}
+
+/// Tier-1 gate: the install must be signed in (identity link on disk), but
+/// the Vault does not have to be running or unlocked. The one hard refusal
+/// is a DIFFERENT identity demonstrably present - that is never ambiguous
+/// and never allowed.
+pub(crate) async fn require_identity_link(
+    state: &std::sync::Arc<AppState>,
+) -> Result<IdentityLinkData, String> {
+    let link = load_identity_link(&state.data_dir).ok_or(ERR_NOT_LINKED)?;
+    if let Some((unlocked, Some(ref live))) = vault_live_identity().await {
+        if unlocked && *live != link.vault_agent_pub_key {
+            return Err(ERR_IDENTITY_MISMATCH.into());
+        }
+    }
+    Ok(link)
 }
 
 #[tauri::command]
@@ -1630,8 +1656,9 @@ pub async fn flag_poll(
     poll_action_hash: String,
     reason: String,
 ) -> Result<String, String> {
-    // Live identity match, not just file presence - see require_identity_match.
-    require_identity_match(&state).await?;
+    // Tier-1 gate: signed-in install, no unlock required - but never while
+    // a different identity's Vault is open. See require_identity_link.
+    require_identity_link(&state).await?;
 
     let client = state.app_client.lock().await;
     let client = client.as_ref().ok_or("Conductor not ready")?;
@@ -1692,7 +1719,7 @@ pub async fn remove_flag(
     state: tauri::State<'_, std::sync::Arc<AppState>>,
     flag_action_hash: String,
 ) -> Result<String, String> {
-    require_identity_match(&state).await?;
+    require_identity_link(&state).await?;
     let client = state.app_client.lock().await;
     let client = client.as_ref().ok_or("Conductor not ready")?;
 
@@ -1790,7 +1817,7 @@ pub async fn save_vote_rationale(
 ) -> Result<String, String> {
     // Encrypted, but its LINK to the vote is public - "this agent
     // rationalized this vote" is identity-bearing. Same gate.
-    require_identity_match(&state).await?;
+    require_identity_link(&state).await?;
     let agent_bytes = get_agent_ed25519_bytes(&state)?;
 
     // Encrypt the rationale — acquire lair first, then app client (lock ordering)
@@ -1878,7 +1905,7 @@ pub async fn save_draft_poll(
 ) -> Result<String, String> {
     // Encrypted-to-self, but still authored + timestamped on the shared
     // DHT under this agent key - same gate as every other write.
-    require_identity_match(&state).await?;
+    require_identity_link(&state).await?;
     let agent_bytes = get_agent_ed25519_bytes(&state)?;
 
     let draft = serde_json::json!({
@@ -1991,7 +2018,7 @@ pub async fn publish_draft(
 ) -> Result<String, String> {
     // Publishing reaches create_poll on the shared DHT - same gate as the
     // direct path (this command shipped ungated once; never again).
-    require_identity_match(&state).await?;
+    require_identity_link(&state).await?;
     let draft_hash = parse_action_hash(&draft_action_hash)?;
     let agent_bytes = get_agent_ed25519_bytes(&state)?;
 
@@ -2052,7 +2079,7 @@ pub async fn delete_draft(
     state: tauri::State<'_, std::sync::Arc<AppState>>,
     draft_action_hash: String,
 ) -> Result<String, String> {
-    require_identity_match(&state).await?;
+    require_identity_link(&state).await?;
     let hash = parse_action_hash(&draft_action_hash)?;
     let client = state.app_client.lock().await;
     let client = client.as_ref().ok_or("Conductor not ready")?;
@@ -2152,7 +2179,7 @@ pub async fn build_canonical_backup(
     // This payload is written into the linked Vault's backup slot. Same
     // gate as the DHT writes: if the Vault present right now belongs to a
     // different identity, this data must not land in their slot.
-    require_identity_match(&state).await?;
+    require_identity_link(&state).await?;
 
     // Escrow gate (fail closed): refuse to build a payload that would
     // replace a Vault backup escrowing a DIFFERENT seed than this device's -

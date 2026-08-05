@@ -187,10 +187,11 @@ export default component$(() => {
             if (s.agent_pub_key) {
               const state = await computeLinkState(s.agent_pub_key);
               linkState.value = state;
-              // Writes require a CONFIRMED identity - `offline` is
-              // read-only now (the Rust write gates enforce this
-              // regardless; the UI just tells the truth about it).
-              linked.value = state === "linked";
+              // Basic writes need a signed-in install, not a live Vault -
+              // `offline` (linked, Vault locked or closed) is writable.
+              // `mismatch` and `unlinked` stay read-only (the Rust gates
+              // enforce this regardless; the UI just tells the truth).
+              linked.value = state === "linked" || state === "offline";
 
               // Migration race: Vault confirms the link but the new DNA's
               // DHT doesn't have an entry yet. Recreate it in the
@@ -267,6 +268,12 @@ export default component$(() => {
               } catch {
                 // Vault not running — cached profile (if any) is already loaded
               }
+            }
+            // Backups run for any signed-in install - "offline" included:
+            // the Vault accepts backup posts while locked (once unlocked
+            // this session), and every guard fails closed when it can't
+            // confirm the slot. Mismatch/unlinked stay stopped.
+            if (linkState.value === "linked" || linkState.value === "offline") {
               startBackup();
             }
 
@@ -305,11 +312,13 @@ export default component$(() => {
 
         linkState.value = nextState;
         const nowLinked = nextState === "linked";
-        linked.value = nowLinked;
+        // Signed-in installs are writable without an unlock; only
+        // mismatch/unlinked are read-only.
+        linked.value = nowLinked || nextState === "offline";
 
-        // Start/stop auto-backup on CONFIRMED identity only
-        if (nowLinked && !wasLinked) startBackup();
-        if (!nowLinked && wasLinked) stopBackup();
+        // Backups follow writability (both are idempotent to call).
+        if (linked.value) startBackup();
+        else stopBackup();
 
         // A completed sign-in retires the step-2 restore prompt (the Rust
         // side clears the marker in commit_identity_link).
