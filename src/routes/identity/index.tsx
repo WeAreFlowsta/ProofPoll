@@ -363,7 +363,14 @@ export default component$(() => {
       <h1 class="text-2xl font-bold mb-6">Identity</h1>
 
       {loading.value ? (
-        <div class="text-gray-400">Loading...</div>
+        <div class="flex flex-col items-center justify-center py-16 gap-4">
+          <div class="w-8 h-8 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin" />
+          <p class="text-gray-400">Getting your identity ready...</p>
+          <p class="text-gray-500 text-sm max-w-xs text-center">
+            Checking your local node - right after install or restore this
+            can take a moment while the network syncs.
+          </p>
+        </div>
       ) : linkedVaultKey.value && hasLocalLink.value ? (
         /* ── Linked state ── */
         <div class="space-y-6">

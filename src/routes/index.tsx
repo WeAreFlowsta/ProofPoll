@@ -263,10 +263,11 @@ export default component$(() => {
       )}
 
       {loading.value ? (
-        <div class="text-gray-400">
-          <p>Loading polls...</p>
+        <div class="flex flex-col items-center justify-center py-16 gap-4">
+          <div class="w-8 h-8 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin" />
+          <p class="text-gray-400">Loading polls...</p>
           {loadingSlow.value && (
-            <p class="text-gray-500 text-sm mt-2">
+            <p class="text-gray-500 text-sm">
               Syncing with the network — first load can take a moment.
             </p>
           )}
