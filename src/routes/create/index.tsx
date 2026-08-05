@@ -138,7 +138,9 @@ export default component$(() => {
       draftSaved.value = true;
       setTimeout(() => { draftSaved.value = false; }, 3000);
     } catch (e: any) {
-      error.value = e.message || "Failed to save draft";
+      // Tauri rejections are plain strings - e.message is undefined on
+      // them, and dropping String(e) is how the real error disappeared.
+      error.value = e.message || String(e) || "Failed to save draft";
     } finally {
       savingDraft.value = false;
     }

@@ -660,3 +660,254 @@ pub fn spawn_health_monitor(
         }
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Full-stack probe for the "Failed to save draft" report: real lair,
+    /// real conductor, the BUNDLED v1.3 happ, a fresh install whose agent
+    /// derives from the app-held seed (exactly a new user's runtime), then
+    /// the exact save_draft_poll body minus the Vault identity gate.
+    /// Local-only (spins sidecar binaries); run with --ignored.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "spins the full local Holochain stack"]
+    async fn fresh_install_can_create_encrypted_draft() {
+        let data_dir =
+            std::env::temp_dir().join(format!("pp-draft-probe-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data_dir);
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let lair_dir = data_dir.join("lair");
+        let conductor_dir = data_dir.join("conductor");
+        let passphrase = "probe-passphrase-0123456789";
+        let resource_dir =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources");
+
+        let (mut lair_child, url) =
+            crate::lair::start_lair_process(&lair_dir, passphrase).expect("lair start");
+        let mut conductor_child: Option<Child> = None;
+
+        let result = async {
+            crate::lair::wait_for_lair_socket(&url, 15).await?;
+            let mut lair_client = None;
+            for _ in 0..20 {
+                match crate::lair::connect_to_lair(&url, passphrase).await {
+                    Ok(c) => {
+                        lair_client = Some(c);
+                        break;
+                    }
+                    Err(_) => tokio::time::sleep(std::time::Duration::from_millis(250)).await,
+                }
+            }
+            let lair_client = lair_client.ok_or("could not connect to lair")?;
+
+            let config_path = generate_conductor_config(&conductor_dir, &url, ADMIN_WS_PORT)?;
+            let mut child = start_conductor_process(&config_path, &conductor_dir, passphrase)?;
+            match wait_for_admin_ws(ADMIN_WS_PORT, 30, &mut child, &conductor_dir).await {
+                Ok(()) => {}
+                Err(e) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(e);
+                }
+            }
+            conductor_child = Some(child);
+
+            // Fresh install: no prior apps, so this derives the agent from
+            // the app-held seed - the escrow model's runtime.
+            let install =
+                crate::dna::install_dnas(ADMIN_WS_PORT, &resource_dir, &lair_client, &data_dir)
+                    .await?;
+            let (_port, app_client, _v0, _v1, _v2) =
+                crate::dna::setup_app_interface(ADMIN_WS_PORT, false, false, false).await?;
+
+            // save_draft_poll's body, verbatim minus the Vault gate.
+            let raw = install.agent_pub_key.get_raw_39();
+            let mut agent_bytes = [0u8; 32];
+            agent_bytes.copy_from_slice(&raw[3..35]);
+            let (nonce, cipher) =
+                crate::crypto::encrypt_to_self(&lair_client, agent_bytes, b"{\"title\":\"probe\"}")
+                    .await?;
+
+            #[derive(serde::Serialize, Debug)]
+            struct Input {
+                cipher: Vec<u8>,
+                nonce: Vec<u8>,
+                link_as: String,
+                related_hash: Option<holochain_types::prelude::ActionHash>,
+            }
+            let payload = holochain_types::prelude::ExternIO::encode(Input {
+                cipher,
+                nonce: nonce.to_vec(),
+                link_as: "draft_poll".to_string(),
+                related_hash: None,
+            })
+            .map_err(|e| e.to_string())?;
+            let result = crate::commands::call_zome(
+                &app_client,
+                "polls",
+                "create_encrypted_entry",
+                payload,
+            )
+            .await?;
+            let hash: holochain_types::prelude::ActionHash =
+                result.decode().map_err(|e| e.to_string())?;
+            println!("draft created: {}", hash);
+
+            // And read it back the way the Drafts page does.
+            let payload =
+                holochain_types::prelude::ExternIO::encode(()).map_err(|e| e.to_string())?;
+            let records = crate::commands::call_zome(&app_client, "polls", "get_my_drafts", payload)
+                .await?;
+            let records: Vec<holochain_types::prelude::Record> =
+                records.decode().map_err(|e| e.to_string())?;
+            println!("drafts listed: {}", records.len());
+            if records.is_empty() {
+                return Err("draft created but not listed".to_string());
+            }
+            Ok::<(), String>(())
+        }
+        .await;
+
+        if let Some(mut c) = conductor_child {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+        let _ = lair_child.kill();
+        let _ = lair_child.wait();
+        let _ = std::fs::remove_dir_all(&data_dir);
+        result.expect("fresh-install draft probe");
+    }
+
+    /// Upgrade-path variant: a v1.2 app exists first (conductor-born agent,
+    /// the pre-escrow world), v1.3 inherits that agent - Eric's runtime if
+    /// the beta went over a 0.2.x install. Local-only; run with --ignored.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "spins the full local Holochain stack"]
+    async fn upgraded_install_can_create_encrypted_draft() {
+        use holochain_client::AdminWebsocket;
+        use holochain_types::prelude::{AppBundleSource, InstallAppPayload};
+
+        let data_dir =
+            std::env::temp_dir().join(format!("pp-draft-upg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data_dir);
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let lair_dir = data_dir.join("lair");
+        let conductor_dir = data_dir.join("conductor");
+        let passphrase = "probe-passphrase-0123456789";
+        let resource_dir =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources");
+
+        let (mut lair_child, url) =
+            crate::lair::start_lair_process(&lair_dir, passphrase).expect("lair start");
+        let mut conductor_child: Option<Child> = None;
+
+        let result = async {
+            crate::lair::wait_for_lair_socket(&url, 15).await?;
+            let mut lair_client = None;
+            for _ in 0..20 {
+                match crate::lair::connect_to_lair(&url, passphrase).await {
+                    Ok(c) => {
+                        lair_client = Some(c);
+                        break;
+                    }
+                    Err(_) => tokio::time::sleep(std::time::Duration::from_millis(250)).await,
+                }
+            }
+            let lair_client = lair_client.ok_or("could not connect to lair")?;
+
+            let config_path = generate_conductor_config(&conductor_dir, &url, ADMIN_WS_PORT)?;
+            let mut child = start_conductor_process(&config_path, &conductor_dir, passphrase)?;
+            match wait_for_admin_ws(ADMIN_WS_PORT, 30, &mut child, &conductor_dir).await {
+                Ok(()) => {}
+                Err(e) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(e);
+                }
+            }
+            conductor_child = Some(child);
+
+            // Pre-install v1.2 with a CONDUCTOR-GENERATED agent (what 0.2.x
+            // installs have), so install_dnas takes the inherit branch.
+            let admin_ws = AdminWebsocket::connect(
+                format!("localhost:{}", ADMIN_WS_PORT),
+                Some("proofpoll".to_string()),
+            )
+            .await
+            .map_err(|e| format!("admin connect: {}", e))?;
+            let legacy_agent = admin_ws
+                .generate_agent_pub_key()
+                .await
+                .map_err(|e| format!("generate agent: {}", e))?;
+            let payload = InstallAppPayload {
+                source: AppBundleSource::Path(resource_dir.join("proofpoll_v1_2_happ.happ")),
+                agent_key: Some(legacy_agent.clone()),
+                installed_app_id: Some(crate::dna::APP_ID_V1_2.to_string()),
+                network_seed: None,
+                roles_settings: None,
+                ignore_genesis_failure: false,
+            };
+            admin_ws
+                .install_app(payload)
+                .await
+                .map_err(|e| format!("install v1.2: {}", e))?;
+            admin_ws
+                .enable_app(crate::dna::APP_ID_V1_2.to_string())
+                .await
+                .map_err(|e| format!("enable v1.2: {}", e))?;
+
+            let install =
+                crate::dna::install_dnas(ADMIN_WS_PORT, &resource_dir, &lair_client, &data_dir)
+                    .await?;
+            if install.agent_pub_key != legacy_agent {
+                return Err("v1.3 did not inherit the v1.2 agent".to_string());
+            }
+            let (_port, app_client, _v0, _v1, _v2) =
+                crate::dna::setup_app_interface(ADMIN_WS_PORT, false, false, true).await?;
+
+            let raw = install.agent_pub_key.get_raw_39();
+            let mut agent_bytes = [0u8; 32];
+            agent_bytes.copy_from_slice(&raw[3..35]);
+            let (nonce, cipher) =
+                crate::crypto::encrypt_to_self(&lair_client, agent_bytes, b"{\"title\":\"probe\"}")
+                    .await?;
+
+            #[derive(serde::Serialize, Debug)]
+            struct Input {
+                cipher: Vec<u8>,
+                nonce: Vec<u8>,
+                link_as: String,
+                related_hash: Option<holochain_types::prelude::ActionHash>,
+            }
+            let payload = holochain_types::prelude::ExternIO::encode(Input {
+                cipher,
+                nonce: nonce.to_vec(),
+                link_as: "draft_poll".to_string(),
+                related_hash: None,
+            })
+            .map_err(|e| e.to_string())?;
+            let result = crate::commands::call_zome(
+                &app_client,
+                "polls",
+                "create_encrypted_entry",
+                payload,
+            )
+            .await?;
+            let hash: holochain_types::prelude::ActionHash =
+                result.decode().map_err(|e| e.to_string())?;
+            println!("upgrade-path draft created: {}", hash);
+            Ok::<(), String>(())
+        }
+        .await;
+
+        if let Some(mut c) = conductor_child {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+        let _ = lair_child.kill();
+        let _ = lair_child.wait();
+        let _ = std::fs::remove_dir_all(&data_dir);
+        result.expect("upgrade-install draft probe");
+    }
+}

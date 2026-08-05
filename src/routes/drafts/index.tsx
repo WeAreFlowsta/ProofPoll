@@ -22,7 +22,7 @@ export default component$(() => {
     try {
       drafts.value = await getMyDrafts();
     } catch (e: any) {
-      error.value = e.message || "Failed to load drafts";
+      error.value = e.message || String(e) || "Failed to load drafts";
     } finally {
       loading.value = false;
     }
@@ -35,7 +35,7 @@ export default component$(() => {
       const pollHash = await publishDraft(hash);
       await nav(`/poll/#${pollHash}`);
     } catch (e: any) {
-      error.value = e.message || "Failed to publish draft";
+      error.value = e.message || String(e) || "Failed to publish draft";
       publishing.value = null;
     }
   });
@@ -48,7 +48,7 @@ export default component$(() => {
       drafts.value = drafts.value.filter((d) => d.hash !== hash);
       deleteConfirm.value = null;
     } catch (e: any) {
-      error.value = e.message || "Failed to delete draft";
+      error.value = e.message || String(e) || "Failed to delete draft";
     } finally {
       deleting.value = false;
     }

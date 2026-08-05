@@ -248,6 +248,81 @@ pub async fn wait_for_lair_socket(connection_url: &str, timeout_secs: u64) -> Re
     ))
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The scratch-lair harness: spins the real bundled lair binary against
+    /// a temp dir. Probes the exact seam behind "failed to save draft" -
+    /// encrypted entries call lair's crypto_box on the AGENT seed, and since
+    /// fresh installs derive their agent from an IMPORTED seed, that path
+    /// must behave identically to a lair-generated one.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn imported_seed_crypto_box_matches_generated_seed() {
+        let dir = std::env::temp_dir().join(format!("pp-lair-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let passphrase = "test-passphrase-0123456789";
+
+        let (mut child, url) =
+            start_lair_process(&dir, passphrase).expect("lair start");
+        let result = async {
+            wait_for_lair_socket(&url, 15).await?;
+            // The server accepts connections a beat after the socket exists.
+            let mut client = None;
+            for _ in 0..20 {
+                match connect_to_lair(&url, passphrase).await {
+                    Ok(c) => {
+                        client = Some(c);
+                        break;
+                    }
+                    Err(_) => tokio::time::sleep(std::time::Duration::from_millis(250)).await,
+                }
+            }
+            let client = client.ok_or("could not connect to scratch lair")?;
+
+            // Baseline: a lair-generated seed (the pre-escrow agent model).
+            let generated = client
+                .new_seed("generated-agent".into(), None, false)
+                .await
+                .map_err(|e| format!("new_seed: {}", e))?;
+            let gen_pub: [u8; 32] = *generated.ed25519_pub_key.0;
+            let (n1, c1) = crate::crypto::encrypt_to_self(&client, gen_pub, b"baseline")
+                .await
+                .map_err(|e| format!("generated-seed encrypt: {}", e))?;
+            let p1 = crate::crypto::decrypt_from_self(&client, gen_pub, n1, &c1)
+                .await
+                .map_err(|e| format!("generated-seed decrypt: {}", e))?;
+            if p1 != b"baseline" {
+                return Err("generated-seed roundtrip mismatch".to_string());
+            }
+
+            // The escrow model: an app-side seed IMPORTED into lair - what
+            // every fresh install's agent is since the seed escrow landed.
+            let seed = [7u8; 32];
+            let imported = import_seed_to_lair(&client, &seed, "proofpoll-device-seed")
+                .await
+                .map_err(|e| format!("import_seed: {}", e))?;
+            let imp_pub: [u8; 32] = *imported.ed25519_pub_key.0;
+            let (n2, c2) = crate::crypto::encrypt_to_self(&client, imp_pub, b"draft")
+                .await
+                .map_err(|e| format!("imported-seed encrypt: {}", e))?;
+            let p2 = crate::crypto::decrypt_from_self(&client, imp_pub, n2, &c2)
+                .await
+                .map_err(|e| format!("imported-seed decrypt: {}", e))?;
+            if p2 != b"draft" {
+                return Err("imported-seed roundtrip mismatch".to_string());
+            }
+            Ok::<(), String>(())
+        }
+        .await;
+
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = std::fs::remove_dir_all(&dir);
+        result.expect("scratch-lair crypto probe");
+    }
+}
+
 /// Import a 32-byte seed into a running lair keystore (ported from the
 /// Flowsta Vault, which installs its conductor agent from an app-held seed
 /// the same way). Lair's `import_seed` API requires the payload sealed via

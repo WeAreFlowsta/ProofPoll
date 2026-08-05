@@ -366,8 +366,16 @@ pub(crate) async fn call_zome(
                         payload,
                     )
                     .await
-                    .map_err(|e2| friendly_error(&format!("{}", e2)))
+                    .map_err(|e2| {
+                        let raw = format!("{}", e2);
+                        log::warn!("[zome] {}.{} failed after re-enable: {}", zome, fn_name, raw);
+                        friendly_error(&raw)
+                    })
             } else {
+                // The raw error lands in proofpoll.log even when the UI
+                // shows the friendly version - a swallowed message here is
+                // how "Failed to save draft" once shipped with no trail.
+                log::warn!("[zome] {}.{} failed: {}", zome, fn_name, err_str);
                 Err(friendly_error(&err_str))
             }
         }
