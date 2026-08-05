@@ -29,6 +29,7 @@ mod device_seed;
 mod lair;
 pub mod migration;
 mod process_ext;
+mod seed_adopt;
 mod sidecar;
 
 use commands::AppState;
@@ -233,6 +234,11 @@ pub fn run() {
             // See build-docs/current/LAIR_RECOVERY_AND_CAL_COMPLIANCE.md
             commands::decode_record_for_export,
             commands::build_canonical_backup,
+            // ── Agent-seed escrow: adopt / re-key (authorship survives
+            //    machine death) ─────────────────────────────────────
+            seed_adopt::get_seed_escrow_state,
+            seed_adopt::adopt_escrowed_seed,
+            seed_adopt::rekey_device_agent,
             // ── Encrypted entries (v1.3) ───────────────────────────
             commands::save_vote_rationale,
             commands::get_vote_rationale,

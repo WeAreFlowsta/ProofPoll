@@ -12,6 +12,7 @@ import {
   revokeIdentityLink,
   getMigrationStatus,
   getCachedProfile,
+  getSeedEscrowState,
   saveProfileCache,
   type MigrationState,
 } from "~/lib/holochain";
@@ -48,6 +49,9 @@ export default component$(() => {
   const migration = useSignal<MigrationState | null>(null);
   const migrationDismissed = useSignal(false);
   const disconnecting = useSignal(false);
+  // Step 2 of an adopt/re-key: the key was restored, the sign-in hasn't
+  // happened yet (the adopt-relink-pending marker is on disk).
+  const relinkPending = useSignal(false);
 
   useVisibleTask$(({ cleanup }) => {
     let active = true;
@@ -82,7 +86,14 @@ export default component$(() => {
           clientId: import.meta.env.VITE_FLOWSTA_CLIENT_ID,
           appName: "ProofPoll",
           intervalMinutes: 60,
-          getData: () => invoke("build_canonical_backup"),
+          // clientId rides along so the Rust side can check the Vault's
+          // escrowed seed BEFORE building a payload - without that gate, a
+          // fresh install's first backup would overwrite the seed a
+          // machine-death restore needs (see seed_adopt::backup_escrow_gate).
+          getData: () =>
+            invoke("build_canonical_backup", {
+              clientId: import.meta.env.VITE_FLOWSTA_CLIENT_ID,
+            }),
           onSuccess: (r) => console.log(`[ProofPoll] Vault backup: ${r.dataSize} bytes`),
           onError: (e) => console.warn("[ProofPoll] Vault backup skipped:", e.message),
         });
@@ -158,6 +169,14 @@ export default component$(() => {
           const s = await invoke<AppStatus>("get_app_status");
           status.value = s;
           if (s.ready) {
+            // Local marker check only (no Vault round-trip): did an
+            // adopt/re-key commit without its step-2 sign-in yet?
+            try {
+              const report = await getSeedEscrowState(null);
+              relinkPending.value = report.relink_pending;
+            } catch {
+              // Marker unreadable — the identity page still offers the flow
+            }
             if (s.agent_pub_key) {
               const state = await computeLinkState(s.agent_pub_key);
               linkState.value = state;
@@ -284,6 +303,10 @@ export default component$(() => {
         // Start/stop auto-backup on CONFIRMED identity only
         if (nowLinked && !wasLinked) startBackup();
         if (!nowLinked && wasLinked) stopBackup();
+
+        // A completed sign-in retires the step-2 restore prompt (the Rust
+        // side clears the marker in commit_identity_link).
+        if (nowLinked) relinkPending.value = false;
 
         // Fetch profile when linked but profile is missing. Cache display
         // is fine in `offline` too; refreshing the cache is linked-only
@@ -604,6 +627,35 @@ export default component$(() => {
                 </div>
               </div>
             )}
+
+            {/* Step 2 of the restore story: the key was adopted and the app
+                restarted; finishing means signing back in. Stands down as
+                soon as a sign-in completes (the mismatch banner outranks it
+                - one banner voice at a time). */}
+            {relinkPending.value &&
+              linkState.value !== "linked" &&
+              linkState.value !== "mismatch" && (
+                <div class="bg-indigo-900/30 border border-indigo-800/50 rounded-lg px-4 py-3 mb-4">
+                  <p class="text-sm font-medium text-indigo-200">
+                    Step 2 of your restore: sign back in with Flowsta
+                  </p>
+                  <p class="mt-1 text-xs text-indigo-300/90">
+                    Your authorship key is restored. Signing back in connects
+                    it to your Flowsta identity - your polls and votes
+                    reappear as the network syncs (this can take a few
+                    minutes on a fresh install).
+                  </p>
+                  <div class="mt-3">
+                    <button
+                      type="button"
+                      onClick$={handleReconnect}
+                      class="inline-flex items-center rounded-md bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-500"
+                    >
+                      Sign in with Flowsta
+                    </button>
+                  </div>
+                </div>
+              )}
 
             <Slot />
           </>

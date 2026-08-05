@@ -304,7 +304,7 @@ const ROLE_NAME: &str = "proofpoll";
 /// Your app's coordinator zome name (from dna.yaml).
 const POLLS_ZOME: &str = "polls";
 /// Flowsta agent-linking zome — keep as-is for identity integration.
-const AGENT_LINKING_ZOME: &str = "agent_linking";
+pub(crate) const AGENT_LINKING_ZOME: &str = "agent_linking";
 
 fn decode_entry<T: serde::de::DeserializeOwned>(record: &Record) -> Result<T, String> {
     let entry = record
@@ -327,7 +327,7 @@ fn decode_entry<T: serde::de::DeserializeOwned>(record: &Record) -> Result<T, St
 ///
 /// For forking: you don't need to change this function — just call it
 /// with your zome name and function name from your Tauri commands.
-async fn call_zome(
+pub(crate) async fn call_zome(
     client: &AppWebsocket,
     zome: &str,
     fn_name: &str,
@@ -924,7 +924,7 @@ fn identity_link_path(data_dir: &std::path::Path) -> PathBuf {
     data_dir.join("identity-link.json")
 }
 
-fn load_identity_link(data_dir: &std::path::Path) -> Option<IdentityLinkData> {
+pub(crate) fn load_identity_link(data_dir: &std::path::Path) -> Option<IdentityLinkData> {
     let path = identity_link_path(data_dir);
     let json = std::fs::read_to_string(path).ok()?;
     serde_json::from_str(&json).ok()
@@ -1172,6 +1172,10 @@ pub async fn commit_identity_link(
         },
     );
 
+    // A successful sign-in completes step 2 of an adopt/re-key (if one was
+    // pending) - retire the marker so the restore prompt stands down.
+    crate::seed_adopt::clear_relink_marker(&state.data_dir);
+
     Ok(action_hash_str)
 }
 
@@ -1384,7 +1388,7 @@ pub async fn get_export_data(
         .unwrap_or_default()
         .as_secs();
 
-    Ok(serde_json::json!({
+    let mut export = serde_json::json!({
         "_readme": format!(
             "Your complete {} data export. Includes polls you created, \
              votes you cast, private vote rationales (decrypted), and draft polls (decrypted).",
@@ -1427,7 +1431,17 @@ pub async fn get_export_data(
                 "drafts": my_drafts,
             },
         },
-    }))
+    });
+
+    // Format v6: the export carries the means of authorship (CAL) - the
+    // same app_keys block as the canonical backup. Both emitters, per the
+    // D8 precedent.
+    match crate::device_seed::app_keys_json(&state.data_dir) {
+        Ok(keys) => export["app_keys"] = keys,
+        Err(e) => log::warn!("[export] could not read the device seed: {}", e),
+    }
+
+    Ok(export)
 }
 
 /// Core lookup: the agents the agent-linking zome reports as directly linked
@@ -2123,6 +2137,7 @@ pub async fn decode_record_for_export(
 #[tauri::command]
 pub async fn build_canonical_backup(
     state: tauri::State<'_, std::sync::Arc<AppState>>,
+    client_id: Option<String>,
 ) -> Result<serde_json::Value, String> {
     use holochain_client::{AdminWebsocket, CellInfo};
 
@@ -2130,6 +2145,20 @@ pub async fn build_canonical_backup(
     // gate as the DHT writes: if the Vault present right now belongs to a
     // different identity, this data must not land in their slot.
     require_identity_match(&state).await?;
+
+    // Escrow gate (fail closed): refuse to build a payload that would
+    // replace a Vault backup escrowing a DIFFERENT seed than this device's -
+    // on a fresh install after machine death, that overwrite would destroy
+    // the very seed the user needs to adopt. The frontend passes the app's
+    // client_id (it lives in the webview env); without it the escrow cannot
+    // be checked, so no payload is built.
+    let client_id = client_id.ok_or(
+        "backup held: no client_id supplied, so the Vault's escrowed key cannot be checked \
+         first - pass clientId when invoking build_canonical_backup",
+    )?;
+    let probe = crate::seed_adopt::VaultEscrowProbe { client_id };
+    crate::seed_adopt::backup_escrow_gate(&probe, crate::device_seed::load(&state.data_dir))
+        .await?;
 
     let my_key = {
         let key = state.agent_pub_key.lock().unwrap();
@@ -2240,20 +2269,11 @@ pub async fn build_canonical_backup(
     // this device authors under. Encrypted at rest in the Vault, readable in
     // the user's own export - that is the point. Installs whose agent
     // predates the app-held seed have nothing to escrow yet and say so.
-    match crate::device_seed::load(&state.data_dir) {
-        Ok(Some(seed)) => {
-            payload["app_keys"] = serde_json::json!({
-                "_readme": "The agent seed this device signs with. Import it on a new machine to keep authoring as the same agent. Keep any export of this file private.",
-                "device_seed_hex": seed.device_seed_hex,
-                "version": seed.version,
-            });
-        }
-        Ok(None) => {
-            payload["app_keys"] = serde_json::json!({
-                "_readme": "This install's agent key predates escrowable seeds, so no seed can be included. Re-key from Settings to make future exports carry your authorship.",
-                "device_seed_hex": serde_json::Value::Null,
-            });
-        }
+    // An unreadable recovery file only reaches this point when nothing
+    // key-shaped is escrowed yet (the escrow gate above refuses otherwise),
+    // so omitting app_keys here can never shadow an escrowed seed.
+    match crate::device_seed::app_keys_json(&state.data_dir) {
+        Ok(keys) => payload["app_keys"] = keys,
         Err(e) => log::warn!("[backup] could not read the device seed: {}", e),
     }
 

@@ -50,6 +50,16 @@ pub fn load(data_dir: &Path) -> Result<Option<DeviceSeed>, String> {
     Ok(Some(seed))
 }
 
+/// Generate a fresh random seed WITHOUT persisting it. The re-key flow
+/// commits the seed only after the old key-derived state is verifiably
+/// wiped - generation and persistence are deliberately separate steps.
+pub fn generate() -> Result<DeviceSeed, String> {
+    let mut seed = [0u8; 32];
+    lair_keystore_api::dependencies::sodoken::random::randombytes_buf(&mut seed)
+        .map_err(|e| format!("seed generation failed: {}", e))?;
+    Ok(DeviceSeed { device_seed_hex: hex::encode(seed), version: 1 })
+}
+
 /// Generate a fresh random seed and persist it. Refuses to overwrite an
 /// existing file - replacing a seed is an explicit adopt/re-key operation,
 /// never a side effect.
@@ -58,12 +68,48 @@ pub fn generate_and_store(data_dir: &Path) -> Result<DeviceSeed, String> {
     if p.exists() {
         return Err("recovery file already exists".into());
     }
-    let mut seed = [0u8; 32];
-    lair_keystore_api::dependencies::sodoken::random::randombytes_buf(&mut seed)
-        .map_err(|e| format!("seed generation failed: {}", e))?;
-    let ds = DeviceSeed { device_seed_hex: hex::encode(seed), version: 1 };
+    let ds = generate()?;
     store(data_dir, &ds)?;
     Ok(ds)
+}
+
+/// Replace the recovery file with `seed`, preserving whatever is there as a
+/// timestamped sibling first. A key must never be silently destroyed - old
+/// records encrypted to the old agent are unrecoverable without it, so the
+/// adopt/re-key paths keep the outgoing material on disk (same rule as Your
+/// Own AI's `replace_recovery_material`).
+pub fn replace(data_dir: &Path, seed: &DeviceSeed) -> Result<(), String> {
+    let p = recovery_path(data_dir);
+    if p.exists() {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let backup = data_dir.join(format!("proofpoll-recovery.replaced-{}.json", ts));
+        std::fs::rename(&p, &backup)
+            .map_err(|e| format!("could not preserve the old recovery file: {}", e))?;
+    }
+    store(data_dir, seed)
+}
+
+/// The `app_keys` block both export emitters carry (canonical backup and the
+/// data export): the means of authorship travels WITH the data (CAL).
+/// Installs whose agent predates the app-held seed have nothing to escrow
+/// yet and say so. A corrupt recovery file is an error - the caller decides
+/// whether that blocks (backups do; see the escrow gate) - never silently
+/// exported as "no seed".
+pub fn app_keys_json(data_dir: &Path) -> Result<serde_json::Value, String> {
+    match load(data_dir)? {
+        Some(seed) => Ok(serde_json::json!({
+            "_readme": "The agent seed this device signs with. Import it on a new machine to keep authoring as the same agent. Keep any export of this file private.",
+            "device_seed_hex": seed.device_seed_hex,
+            "version": seed.version,
+        })),
+        None => Ok(serde_json::json!({
+            "_readme": "This install's agent key predates escrowable seeds, so no seed can be included. Re-key from the Identity page to make future exports carry your authorship.",
+            "device_seed_hex": serde_json::Value::Null,
+        })),
+    }
 }
 
 /// Persist a seed (adopt/re-key path). Writes via a temp file + rename so a
@@ -116,6 +162,75 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(recovery_path(&dir), "{not json").unwrap();
         assert!(load(&dir).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn replace_preserves_the_old_file_with_a_timestamp() {
+        let dir = std::env::temp_dir().join(format!("pp-seed-replace-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let old = generate_and_store(&dir).unwrap();
+        let new = generate().unwrap();
+        replace(&dir, &new).unwrap();
+        let loaded = load(&dir).unwrap().expect("seed present");
+        assert!(loaded == new, "replace must commit the incoming seed");
+        let preserved = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("proofpoll-recovery.replaced-")
+            })
+            .count();
+        assert_eq!(preserved, 1, "old seed must be preserved, never destroyed");
+        let raw = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .find(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("proofpoll-recovery.replaced-")
+            })
+            .unwrap();
+        let kept: DeviceSeed =
+            serde_json::from_str(&std::fs::read_to_string(raw.path()).unwrap()).unwrap();
+        assert!(kept == old, "preserved file must hold the outgoing seed");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // The v6 payload-shape contract: what both export emitters embed.
+    #[test]
+    fn app_keys_block_carries_the_seed_when_present() {
+        let dir = std::env::temp_dir().join(format!("pp-seed-keys-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let seed = generate_and_store(&dir).unwrap();
+        let keys = app_keys_json(&dir).unwrap();
+        assert_eq!(
+            keys["device_seed_hex"].as_str(),
+            Some(seed.device_seed_hex.as_str())
+        );
+        assert_eq!(keys["version"].as_u64(), Some(1));
+        assert!(keys["_readme"].as_str().unwrap().contains("same agent"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn app_keys_block_is_an_honest_null_for_legacy_installs() {
+        let dir = std::env::temp_dir().join(format!("pp-seed-legacy-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let keys = app_keys_json(&dir).unwrap();
+        assert!(keys["device_seed_hex"].is_null());
+        assert!(keys["_readme"].as_str().unwrap().contains("Re-key"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn app_keys_block_errors_on_a_corrupt_file_never_null() {
+        let dir = std::env::temp_dir().join(format!("pp-seed-keyscorrupt-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(recovery_path(&dir), "{not json").unwrap();
+        assert!(app_keys_json(&dir).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -45,6 +45,31 @@
 use std::io;
 use std::process::{Child, Command};
 
+/// Terminate a process by PID, platform-correct. `kill` does not exist on
+/// Windows - calling it there is a silent no-op that leaves conductor + lair
+/// running (and their databases locked) straight through resets and key
+/// restores; that exact bug broke Your Own AI's restore/reset/exit until
+/// v0.1.1-beta.4. Windows uses taskkill with /T so the child tree goes too.
+pub fn stop_pid(pid: u32) {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        // Suppress the console window taskkill itself would otherwise flash.
+        // (CREATE_NO_WINDOW is safe HERE: taskkill needs no console handle -
+        // the module-level warning about the flag concerns our long-lived
+        // sidecars, not this one-shot utility.)
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let _ = Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output();
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = Command::new("kill").arg(pid.to_string()).output();
+    }
+}
+
 pub trait CommandExt {
     /// Configure the child to be managed as a vault sidecar:
     /// - Linux: kernel sends `SIGTERM` when the parent dies.

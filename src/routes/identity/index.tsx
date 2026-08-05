@@ -7,9 +7,14 @@ import { readAndClearSignInIntent } from "~/lib/signin";
 import { focusSelf } from "~/lib/window";
 import {
   getLinkedAgents,
+  getIdentityLink,
   commitIdentityLink,
   revokeIdentityLink,
   saveProfileCache,
+  getSeedEscrowState,
+  adoptEscrowedSeed,
+  rekeyDeviceAgent,
+  type SeedEscrowReport,
 } from "~/lib/holochain";
 
 export default component$(() => {
@@ -29,6 +34,75 @@ export default component$(() => {
   const autoLink = useSignal(false);
   const showDetails = useSignal(false);
   const confirmUnlink = useSignal(false);
+  // This install's own binding (identity-link.json). The DHT can show a
+  // link for the adopted agent while the local binding is gone (right
+  // after a key restore) - the local file, not the DHT, is what decides
+  // whether THIS install is signed in and whether auto-link may proceed.
+  const hasLocalLink = useSignal(false);
+  // ── Backups & recovery (agent-seed escrow) ──
+  const seedReport = useSignal<SeedEscrowReport | null>(null);
+  const escrowedHex = useSignal<string | null>(null);
+  const escrowCheckFailed = useSignal(false);
+  const confirmSeed = useSignal<"adopt" | "rekey" | null>(null);
+  const seedBusy = useSignal(false);
+  const seedError = useSignal<string | null>(null);
+  const seedDismissed = useSignal(false);
+
+  // Fetch the escrowed seed from the Vault backup (from the WEBVIEW - the
+  // Vault authorizes backup reads by Origin) and compare against this
+  // install's seed. A failed backup read never invents "synced": the
+  // comparison still runs for the local half (legacy detection) and the
+  // panel says the backup couldn't be checked.
+  const loadSeedState = $(async () => {
+    seedError.value = null;
+    escrowCheckFailed.value = false;
+    let escrowed: string | null = null;
+    try {
+      const { retrieveFromVault } = await import("@flowsta/holochain");
+      const res = await retrieveFromVault({
+        clientId: import.meta.env.VITE_FLOWSTA_CLIENT_ID,
+      });
+      const keys = (res?.data as { app_keys?: { device_seed_hex?: unknown } } | undefined)
+        ?.app_keys;
+      escrowed =
+        typeof keys?.device_seed_hex === "string" ? keys.device_seed_hex : null;
+    } catch {
+      escrowCheckFailed.value = true;
+    }
+    escrowedHex.value = escrowed;
+    try {
+      seedReport.value = await getSeedEscrowState(escrowed);
+    } catch (e: any) {
+      seedError.value = e.message || String(e);
+    }
+  });
+
+  const handleAdopt = $(async () => {
+    if (!escrowedHex.value) return;
+    seedBusy.value = true;
+    seedError.value = null;
+    try {
+      await adoptEscrowedSeed(escrowedHex.value);
+      // On success the app restarts (dev builds exit instead).
+    } catch (e: any) {
+      seedError.value = e.message || String(e);
+      seedBusy.value = false;
+      confirmSeed.value = null;
+    }
+  });
+
+  const handleRekey = $(async () => {
+    seedBusy.value = true;
+    seedError.value = null;
+    try {
+      await rekeyDeviceAgent();
+      // On success the app restarts (dev builds exit instead).
+    } catch (e: any) {
+      seedError.value = e.message || String(e);
+      seedBusy.value = false;
+      confirmSeed.value = null;
+    }
+  });
 
   // Fetch Vault profile and update context for header + this page.
   // Also persists to profile-cache.json so the Rust side (e.g. cast_vote on
@@ -97,6 +171,7 @@ export default component$(() => {
       // Check if already linked on DHT, then ask Vault for the canonical
       // state. We never auto-revoke from here — the layout banner gives the
       // user a clear choice if Vault disagrees with our local state.
+      hasLocalLink.value = (await getIdentityLink().catch(() => null)) !== null;
       if (status.agent_pub_key) {
         const linked = await getLinkedAgents(status.agent_pub_key);
         if (linked.length > 0) {
@@ -107,14 +182,22 @@ export default component$(() => {
           }
         }
       }
+      if (hasLocalLink.value) {
+        // Signed in: surface the seed-escrow state (restore offer, legacy
+        // re-key offer, or the synced checkmark).
+        void loadSeedState();
+      }
     } catch (e) {
       console.error("Failed to get agent key:", e);
     } finally {
       loading.value = false;
     }
 
-    // Auto-trigger linking when navigated with ?link=true
-    if (autoLink.value && !linkedVaultKey.value && agentKey.value) {
+    // Auto-trigger linking when navigated with ?link=true. Keyed off the
+    // LOCAL binding, not the DHT: right after a key restore the DHT shows
+    // the adopted agent's link while this install's binding is gone, and
+    // step 2 of the restore IS this sign-in.
+    if (autoLink.value && !hasLocalLink.value && agentKey.value) {
       autoLink.value = false;
       linking.value = true;
       try {
@@ -132,9 +215,11 @@ export default component$(() => {
             result.payload.vaultSignature,
           );
           linkedVaultKey.value = result.payload.vaultAgentPubKey;
+          hasLocalLink.value = true;
           linkStateCtx.value = "linked";
           linkedCtx.value = true;
           await fetchVaultProfile();
+          void loadSeedState();
           success.value = "Signed in successfully!";
           await focusSelf();
           const target = safeReturnTo.value;
@@ -159,7 +244,7 @@ export default component$(() => {
       } finally {
         linking.value = false;
       }
-    } else if (autoLink.value && linkedVaultKey.value) {
+    } else if (autoLink.value && hasLocalLink.value) {
       // A stale link exists - the auto-link intent used to be dropped here
       // with no message at all, leaving "Connect with current account" a
       // silent no-op. Rebinding is deliberately a two-step: disconnect the
@@ -203,9 +288,11 @@ export default component$(() => {
       );
 
       linkedVaultKey.value = result.payload.vaultAgentPubKey;
+      hasLocalLink.value = true;
       linkStateCtx.value = "linked";
       linkedCtx.value = true;
       await fetchVaultProfile();
+      void loadSeedState();
       success.value = "Signed in successfully!";
       await focusSelf();
       const target = safeReturnTo.value;
@@ -256,6 +343,8 @@ export default component$(() => {
         // Vault not running - its stale entry is cosmetic
       }
       linkedVaultKey.value = null;
+      hasLocalLink.value = false;
+      seedReport.value = null;
       linkStateCtx.value = "unlinked";
       linkedCtx.value = false;
       displayName.value = null;
@@ -275,7 +364,7 @@ export default component$(() => {
 
       {loading.value ? (
         <div class="text-gray-400">Loading...</div>
-      ) : linkedVaultKey.value ? (
+      ) : linkedVaultKey.value && hasLocalLink.value ? (
         /* ── Linked state ── */
         <div class="space-y-6">
           {/* Profile card */}
@@ -322,6 +411,183 @@ export default component$(() => {
               {success.value}
             </div>
           )}
+
+          {/* ── Backups & recovery: the agent-seed escrow story ──
+              One panel, one voice at a time: restore conflict outranks the
+              legacy re-key offer outranks the synced checkmark. */}
+          <div class="bg-gray-900 border border-gray-800 rounded-lg p-6">
+            <h2 class="text-sm font-semibold text-white mb-1">
+              Backups &amp; recovery
+            </h2>
+            <p class="text-xs text-gray-500 mb-3">
+              Your polls and votes back up to your Flowsta Vault
+              automatically. The backup also carries the key you author with,
+              so a new machine can continue as you.
+            </p>
+
+            {seedError.value && (
+              <div class="bg-red-900/50 border border-red-700 text-red-300 px-4 py-2 rounded-lg text-sm mb-3">
+                {seedError.value}
+              </div>
+            )}
+
+            {/* Restore conflict: bringing this device back takes two steps */}
+            {seedReport.value?.state === "conflict" && !seedDismissed.value && (
+              <div class="rounded-lg border border-amber-700/60 bg-amber-900/20 p-4">
+                <p class="text-sm font-medium text-amber-200">
+                  Bringing this device back takes two steps
+                </p>
+                <p class="mt-1 text-xs text-gray-400">
+                  Your Vault backup carries a different authorship key than
+                  this device is using - usually because this is a fresh
+                  install while your backup kept the key from the previous
+                  one. Step 1 restores that key (ProofPoll restarts). Step
+                  2, after the restart: sign back in, and your polls and
+                  votes reappear as the network syncs.
+                </p>
+                {confirmSeed.value !== "adopt" ? (
+                  <div class="mt-3 flex flex-col-reverse gap-2 sm:flex-row sm:items-center sm:justify-end">
+                    <button
+                      type="button"
+                      onClick$={() => (seedDismissed.value = true)}
+                      class="text-sm text-gray-500 hover:text-gray-300 px-4 py-2"
+                    >
+                      Not now
+                    </button>
+                    <button
+                      type="button"
+                      onClick$={() => (confirmSeed.value = "adopt")}
+                      class="bg-amber-600 hover:bg-amber-500 text-white font-medium px-4 py-2 rounded-full text-sm"
+                    >
+                      Step 1: Restore my key
+                    </button>
+                  </div>
+                ) : (
+                  <div class="mt-3 bg-gray-900/60 border border-amber-900/50 rounded-lg p-3">
+                    <p class="text-xs text-gray-300 mb-3">
+                      Restoring replaces this install's key and restarts
+                      ProofPoll. Anything published from THIS install stays
+                      on the network but will no longer count as yours, and
+                      this install's drafts and private notes are lost. On a
+                      machine you just set up, there is nothing to lose.
+                    </p>
+                    <div class="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+                      <button
+                        type="button"
+                        onClick$={() => (confirmSeed.value = null)}
+                        disabled={seedBusy.value}
+                        class="text-sm text-gray-400 hover:text-gray-200 px-4 py-2"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="button"
+                        onClick$={handleAdopt}
+                        disabled={seedBusy.value}
+                        class="bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white font-medium px-4 py-2 rounded-full text-sm"
+                      >
+                        {seedBusy.value
+                          ? "Restoring - ProofPoll will restart..."
+                          : "Restore key and restart"}
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Legacy install: one-time re-key offer */}
+            {seedReport.value?.state === "legacy" && (
+              <div class="rounded-lg border border-gray-700 bg-gray-800/40 p-4">
+                <p class="text-sm font-medium text-gray-200">
+                  Protect your authorship in backups
+                </p>
+                <p class="mt-1 text-xs text-gray-400">
+                  This install's key was created before backups could carry
+                  one, so your exports hold your records but not the means
+                  to keep authoring as you. A one-time key upgrade fixes
+                  that for everything you publish from now on. Polls and
+                  votes you've already published stay on the network under
+                  the old key and remain verifiable as yours historically -
+                  but they'll no longer show as yours in this app.
+                </p>
+                {confirmSeed.value !== "rekey" ? (
+                  <div class="mt-3 flex flex-col-reverse gap-2 sm:flex-row sm:items-center sm:justify-end">
+                    <button
+                      type="button"
+                      onClick$={() => (confirmSeed.value = "rekey")}
+                      class="bg-indigo-600 hover:bg-indigo-500 text-white font-medium px-4 py-2 rounded-full text-sm"
+                    >
+                      Upgrade my key
+                    </button>
+                  </div>
+                ) : (
+                  <div class="mt-3 bg-gray-900/60 border border-gray-700 rounded-lg p-3">
+                    <p class="text-xs text-gray-300 mb-3">
+                      ProofPoll restarts with the new key, then asks you to
+                      sign back in. This install's drafts and private notes
+                      do not carry over. This is a one-time choice - you can
+                      also keep things as they are, and your exports stay
+                      records-only.
+                    </p>
+                    <div class="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+                      <button
+                        type="button"
+                        onClick$={() => (confirmSeed.value = null)}
+                        disabled={seedBusy.value}
+                        class="text-sm text-gray-400 hover:text-gray-200 px-4 py-2"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="button"
+                        onClick$={handleRekey}
+                        disabled={seedBusy.value}
+                        class="bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white font-medium px-4 py-2 rounded-full text-sm"
+                      >
+                        {seedBusy.value
+                          ? "Upgrading - ProofPoll will restart..."
+                          : "Upgrade key and restart"}
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Synced: the quiet good state */}
+            {seedReport.value?.state === "synced" &&
+              (escrowCheckFailed.value ? (
+                <p class="text-xs text-amber-300/90">
+                  Couldn't check your Vault backup just now - your authorship
+                  key rides along with the next successful backup.
+                </p>
+              ) : (
+                <p class="text-xs text-green-400">
+                  ✓ Your authorship key rides your Vault backups - an export
+                  can restore it on a new machine.
+                </p>
+              ))}
+
+            {/* Local recovery file unreadable and nothing escrowed to adopt */}
+            {seedReport.value?.state === "local_unreadable" && (
+              <p class="text-xs text-red-300">
+                This install's key recovery file can't be read, and no backup
+                holds a key to restore. New backups carry your records only.
+                The file is never overwritten automatically - see
+                proofpoll.log for details.
+              </p>
+            )}
+
+            {/* Couldn't check the backup and the local state alone decides
+                nothing (conflict detection needs the backup) */}
+            {!seedReport.value && escrowCheckFailed.value && (
+              <p class="text-xs text-gray-500">
+                Couldn't check your Vault backup just now - open your Vault
+                and revisit this page to see backup and recovery options.
+              </p>
+            )}
+          </div>
 
           {/* Actions */}
           <div class="space-y-3">

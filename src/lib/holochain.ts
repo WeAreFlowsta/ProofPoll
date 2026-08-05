@@ -207,6 +207,51 @@ export async function revokeIdentityLink(): Promise<void> {
   return invoke<void>("revoke_identity_link");
 }
 
+// ── Agent-seed escrow (authorship survives machine death) ─────────────
+
+export interface SeedEscrowReport {
+  /** "synced" | "conflict" | "legacy" | "local_unreadable" */
+  state: "synced" | "conflict" | "legacy" | "local_unreadable";
+  local_seed_present: boolean;
+  /** An adopt/re-key committed and the user hasn't signed back in yet. */
+  relink_pending: boolean;
+}
+
+/**
+ * Compare the seed escrowed in the Vault backup against this install's.
+ * The escrowed hex comes from `retrieveFromVault(...).data.app_keys` -
+ * fetched HERE in the webview because the Vault authorizes backup reads by
+ * the caller's Origin header. Pass null when the backup is absent or
+ * carries no seed.
+ */
+export async function getSeedEscrowState(
+  escrowedSeedHex: string | null,
+): Promise<SeedEscrowReport> {
+  return invoke<SeedEscrowReport>("get_seed_escrow_state", {
+    escrowedSeedHex,
+  });
+}
+
+/**
+ * Step 1 of the restore story: adopt the escrowed seed so this device
+ * continues as the SAME agent. Restarts the app on success (this promise
+ * only settles on failure, or in dev builds where the app exits instead).
+ */
+export async function adoptEscrowedSeed(seedHex: string): Promise<void> {
+  return invoke<void>("adopt_escrowed_seed", {
+    seedHex,
+    acceptDataLoss: true,
+  });
+}
+
+/**
+ * One-time re-key for installs whose agent predates the app-held seed.
+ * Restarts the app on success.
+ */
+export async function rekeyDeviceAgent(): Promise<void> {
+  return invoke<void>("rekey_device_agent", { acceptNewKey: true });
+}
+
 // ── Flagging (community moderation — keep or adapt) ───────────────────
 
 export type FlagReason = "Spam" | "Misleading" | "OffTopic" | "Inappropriate";
