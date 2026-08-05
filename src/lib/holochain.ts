@@ -18,6 +18,7 @@
  */
 
 import { invoke } from "@tauri-apps/api/core";
+import { requestBackupSoon } from "./backup";
 
 // ── App-specific types (replace with your data model) ─────────────────
 
@@ -59,6 +60,17 @@ export interface VoteData {
 
 // ── App-specific operations (replace with your invoke() wrappers) ─────
 
+// Every successful DHT write schedules a debounced Vault backup - the
+// getData-based auto-backup has no write hook of its own, so without this a
+// new poll wouldn't reach the user's Vault until the next launch or hourly
+// tick (see lib/backup.ts). Forks: route new writes through wrappers here
+// and wrap them the same way.
+async function backedUp<T>(write: Promise<T>): Promise<T> {
+  const result = await write;
+  requestBackupSoon();
+  return result;
+}
+
 export async function createPoll(input: {
   title: string;
   description: string;
@@ -68,13 +80,15 @@ export async function createPoll(input: {
 }): Promise<string> {
   // Tauri v2 maps camelCase from JS → snake_case in Rust, so we must send
   // camelCase keys even though the TypeScript interface uses snake_case.
-  return invoke<string>("create_poll", {
-    title: input.title,
-    description: input.description,
-    options: input.options,
-    closesAt: input.closes_at,
-    pollType: input.poll_type,
-  });
+  return backedUp(
+    invoke<string>("create_poll", {
+      title: input.title,
+      description: input.description,
+      options: input.options,
+      closesAt: input.closes_at,
+      pollType: input.poll_type,
+    }),
+  );
 }
 
 export async function getPoll(actionHash: string): Promise<PollDetail | null> {
@@ -86,7 +100,7 @@ export async function getAllPolls(): Promise<PollListItem[]> {
 }
 
 export async function deletePoll(actionHash: string): Promise<string> {
-  return invoke<string>("delete_poll", { actionHash });
+  return backedUp(invoke<string>("delete_poll", { actionHash }));
 }
 
 export async function castVote(
@@ -95,12 +109,14 @@ export async function castVote(
   dnaVersion: "1.0" | "1.1" | "1.2",
   pollType?: PollType,
 ): Promise<string> {
-  return invoke<string>("cast_vote", {
-    pollActionHash,
-    optionIndex,
-    dnaVersion,
-    pollType: pollType ?? null,
-  });
+  return backedUp(
+    invoke<string>("cast_vote", {
+      pollActionHash,
+      optionIndex,
+      dnaVersion,
+      pollType: pollType ?? null,
+    }),
+  );
 }
 
 export async function getPollVotes(
@@ -150,10 +166,12 @@ export async function commitIdentityLink(
   vaultAgentPubKey: string,
   vaultSignature: string,
 ): Promise<string> {
-  return invoke<string>("commit_identity_link", {
-    vaultAgentPubKey,
-    vaultSignature,
-  });
+  return backedUp(
+    invoke<string>("commit_identity_link", {
+      vaultAgentPubKey,
+      vaultSignature,
+    }),
+  );
 }
 
 export async function getLinkedAgents(
@@ -204,6 +222,8 @@ export async function loadMyAgentSet(
 }
 
 export async function revokeIdentityLink(): Promise<void> {
+  // No backedUp here: revoking also tears down the confirmed identity, so a
+  // scheduled backup would only fire into a refusal.
   return invoke<void>("revoke_identity_link");
 }
 
@@ -266,7 +286,7 @@ export async function flagPoll(
   pollActionHash: string,
   reason: FlagReason,
 ): Promise<string> {
-  return invoke<string>("flag_poll", { pollActionHash, reason });
+  return backedUp(invoke<string>("flag_poll", { pollActionHash, reason }));
 }
 
 export async function getPollFlags(
@@ -276,7 +296,7 @@ export async function getPollFlags(
 }
 
 export async function removeFlag(flagActionHash: string): Promise<string> {
-  return invoke<string>("remove_flag", { flagActionHash });
+  return backedUp(invoke<string>("remove_flag", { flagActionHash }));
 }
 
 export async function getFlagThreshold(): Promise<number> {
@@ -325,10 +345,12 @@ export async function saveVoteRationale(
   voteActionHash: string,
   rationaleText: string,
 ): Promise<string> {
-  return invoke<string>("save_vote_rationale", {
-    voteActionHash,
-    rationaleText,
-  });
+  return backedUp(
+    invoke<string>("save_vote_rationale", {
+      voteActionHash,
+      rationaleText,
+    }),
+  );
 }
 
 export async function getVoteRationale(
@@ -344,13 +366,15 @@ export async function saveDraftPoll(input: {
   closes_at: number | null;
   poll_type: PollType;
 }): Promise<string> {
-  return invoke<string>("save_draft_poll", {
-    title: input.title,
-    description: input.description,
-    options: input.options,
-    closesAt: input.closes_at,
-    pollType: input.poll_type,
-  });
+  return backedUp(
+    invoke<string>("save_draft_poll", {
+      title: input.title,
+      description: input.description,
+      options: input.options,
+      closesAt: input.closes_at,
+      pollType: input.poll_type,
+    }),
+  );
 }
 
 export async function getMyDrafts(): Promise<DraftPollItem[]> {
@@ -358,9 +382,9 @@ export async function getMyDrafts(): Promise<DraftPollItem[]> {
 }
 
 export async function publishDraft(draftActionHash: string): Promise<string> {
-  return invoke<string>("publish_draft", { draftActionHash });
+  return backedUp(invoke<string>("publish_draft", { draftActionHash }));
 }
 
 export async function deleteDraft(draftActionHash: string): Promise<string> {
-  return invoke<string>("delete_draft", { draftActionHash });
+  return backedUp(invoke<string>("delete_draft", { draftActionHash }));
 }

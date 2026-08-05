@@ -17,6 +17,7 @@ import {
   type MigrationState,
 } from "~/lib/holochain";
 import { getFlowstaLinkStatus } from "@flowsta/holochain";
+import { setBackupTriggersEnabled } from "~/lib/backup";
 
 
 interface AppStatus {
@@ -73,6 +74,11 @@ export default component$(() => {
     });
 
     const startBackup = async () => {
+      // Write-triggered backups share the auto-backup's on/off signal: a
+      // CONFIRMED identity. The hourly run below covers long sessions; the
+      // write triggers (lib/backup.ts) cover "created a poll, closed the
+      // laptop" - without them, new data waits for the next launch.
+      setBackupTriggersEnabled(true);
       if (stopAutoBackup) return; // Already running
       try {
         const { startAutoBackup } = await import("@flowsta/holochain");
@@ -103,6 +109,7 @@ export default component$(() => {
     };
 
     const stopBackup = () => {
+      setBackupTriggersEnabled(false);
       if (stopAutoBackup) {
         stopAutoBackup();
         stopAutoBackup = null;
