@@ -98,7 +98,7 @@ jobs:
               '',
               '### Downloads',
               'Pick your platform from the assets below:',
-              '- **Linux** — `.deb`, `.rpm`, or `.AppImage`',
+              '- **Linux** — `.deb` or `.rpm` (AppImage is not provided: its sandboxing breaks the embedded Holochain conductor)',
               macLine,
               windowsLine,
               '',

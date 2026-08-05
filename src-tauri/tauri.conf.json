@@ -28,7 +28,14 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": [
+      "deb",
+      "rpm",
+      "dmg",
+      "app",
+      "nsis",
+      "msi"
+    ],
     "externalBin": [
       "binaries/proofpoll-holochain",
       "binaries/proofpoll-lair-keystore"
