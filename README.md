@@ -17,6 +17,16 @@ ProofPoll is built on **[Flowsta Vault](https://flowsta.com/vault/)**, which kee
 
 ## What's New
 
+### v0.3.1 — 2026-08-05
+- **SDK 3.0.0 under the hood.** The backup-status check on the Identity page now tells "no backup yet" apart from "couldn't reach your Vault", and backup writes carry the SDK's identity binding and guards alongside the app's own gates.
+
+### v0.3.0 — 2026-08-05
+- **Your authorship survives losing your machine.** ProofPoll generates its agent seed app-side and escrows it in your encrypted Vault backup - your export now carries your records AND the means of authorship. A guided two-step restore on a new machine continues as the SAME author; encrypted drafts and rationales decrypt again. Legacy installs get a one-time key-upgrade offer.
+- **Backups after every change**, guarded three ways: an empty backup never overwrites a real one, a backup escrowing a different key is never overwritten, and nothing writes into a different identity's Vault.
+- **Vote and draft without unlocking the Vault** - a signed-in install is enough; only operations that copy from or rebind to the live Vault still require presence. A different identity's open Vault always refuses.
+- **All DHT writes route through one two-tier identity chokepoint** (`require_identity_link` / `require_identity_match`) - the fork-facing pattern that keeps new write commands from shipping ungated.
+- Honest zome-error surfacing (on screen and in proofpoll.log), house spinners on first-sync loading states, signed Windows installer, AppImage dropped (its sandboxing breaks the embedded conductor).
+
 ### v0.2.1 — 2026-06-05
 - **Windows builds are now code-signed.** Installers carry Flowsta's SSL.com OV certificate, so Windows shows **FLOWSTA** as the verified publisher instead of a SmartScreen "unknown publisher" warning.
 - **Security:** sanitized voter profile-picture image sources on the poll page (closes a DOM-based XSS finding).
@@ -227,7 +237,7 @@ Keep the migration functions and encrypted entry functions — they're generic.
 - Identity link commands (`commit_identity_link`, `get_identity_link`, etc.)
 - Encrypted entry commands (`save_vote_rationale`, `save_draft_poll`, etc. — adapt names)
 - Migration status commands (`get_migration_status`, `abandon_pending_votes`)
-- The two backup commands (`build_canonical_backup`, `decode_record_for_export`) — each has one `match` arm per entry type; add an arm for every new type you introduce. See [Automatic Backups + Cross-Device Recognition](#automatic-backups--cross-device-recognition) below for the full pattern.
+- The two backup commands (`build_canonical_backup`, `decode_record_for_export`) — each has one `match` arm per entry type; add an arm for every new type you introduce. See [Automatic Backups, Recovery & Seed Escrow](#automatic-backups-recovery--seed-escrow) below for the full pattern.
 - `get_export_data` is deprecated and only kept for legacy callers — new forks should ignore it.
 
 **Register new commands** in `src-tauri/src/lib.rs` → `invoke_handler(tauri::generate_handler![...])`.
@@ -323,25 +333,29 @@ The Flowsta Vault is a separate desktop app that manages the user's identity. Yo
 - `src-tauri/src/commands.rs` — `get_identity_link`, `get_cached_profile`, `save_profile_cache` commands
 - `src/lib/holochain.ts` — TypeScript wrappers for all identity + profile functions
 
-### Automatic Backups + Cross-Device Recognition
+### Automatic Backups, Recovery & Seed Escrow
 
-ProofPoll backs up the user's authored data to Flowsta Vault's encrypted local storage every 60 minutes. The backup uses the canonical v1 payload shape — see **[@flowsta/holochain → Backups](https://docs.flowsta.com/sdk/holochain#backups)** on docs.flowsta.com for the full pattern and the **[canonical payload reference](https://docs.flowsta.com/vault/ipc-reference#canonical-backup-payload-v1)** for the on-the-wire schema. Because Vault recognises the shape, it:
+ProofPoll backs up the user's authored data to Flowsta Vault's encrypted local storage after every successful write (debounced 30 s), plus an hourly heartbeat. The backup uses the canonical v1 payload shape — see **[@flowsta/holochain → Backups](https://docs.flowsta.com/sdk/holochain#backups)** on docs.flowsta.com for the full pattern and the **[canonical payload reference](https://docs.flowsta.com/vault/ipc-reference#canonical-backup-payload-v1)** for the on-the-wire schema. Because Vault recognises the shape, it:
 
 - Renders per-entry-type counts on the Your Data page ("12 polls, 38 votes").
 - Inlines the plain-English view of each record into the user's [Cryptographic Autonomy License](https://github.com/holochain/cryptographic-autonomy-license) §4.2.1 data export — the user can take this file to any compatible Holochain app and use it independently.
 
-**Recovery is recognition, not restore.** On a fresh install or a new machine there is no restore step. When the user signs in with Flowsta, the app resolves their full **linked agent set** — every agent key they've used across devices — with a 2-hop walk through the identity link graph (`get_my_agent_set`). Their polls and votes were never lost: they live on the DHT, authored by those agents, and the app recognises them as the user's own no matter which device created them, re-syncing from the network as the conductor warms up. The Vault backup is the user's portable CAL §4.2.1 export — not the recovery path.
+**Recovery = recognition + seed adoption.** ProofPoll's records need no restoring — they live on the shared DHT, and after sign-in the app resolves the user's full **linked agent set** (a 2-hop walk through the identity link graph, `get_my_agent_set`) so their polls and votes are recognised as theirs from any device. What machine death used to take was the **agent key that authored them**. Since v0.3.0 the app generates that key's 32-byte seed app-side (`device_seed.rs`), imports it into lair, and escrows it in the backup's `app_keys` block — so the user's export carries the means of authorship, as [CAL §4.2.1](https://github.com/holochain/cryptographic-autonomy-license) intends. On a fresh machine the app detects the escrowed seed, offers a guided two-step restore (adopt the key, app restarts, sign back in), and the user continues as the **same author** — encrypted drafts and rationales decrypt again. See **[Seed adoption](https://docs.flowsta.com/sdk/holochain#seed-adoption-shared-dht-apps)** for the model and the safety-critical adopt ordering (`seed_adopt.rs` implements it behind a testable seam).
 
 **Mechanics:**
 
 - Backups work even when the Vault is locked (after first unlock in the session).
 - Each backup overwrites the "latest" label by default (single live backup; the 10-per-app capacity is there if needed).
 - Only the current user's authored data is backed up (filtered by `action.author == agent_pub_key`).
+- Three write guards protect the restore window: empty-over-non-empty refused (SDK), foreign escrowed seed refused (`seed_adopt::backup_escrow_gate`, fail closed), foreign identity refused (app gate + SDK binding).
 - Recognition is read-only — the app reads entries authored by any agent in the user's set; it never re-writes or imports them, so there are no duplicate records or new action hashes.
 
 **Key files:**
 
-- `src/routes/layout.tsx` — the `startAutoBackup()` call.
+- `src/routes/layout.tsx` — the `startAutoBackup()` call (hourly heartbeat).
+- `src/lib/backup.ts` — the write-triggered debounced backup; every write wrapper in `src/lib/holochain.ts` schedules one via the `backedUp()` chokepoint.
+- `src-tauri/src/device_seed.rs` — app-side seed generation, atomic recovery file, lair import with derivation cross-check, the `app_keys` block.
+- `src-tauri/src/seed_adopt.rs` — the adopt/re-key engine (stop processes platform-correctly → wipe key-derived state with verified removal → only then commit the seed), the backup escrow gate, and the escrow-status command behind the Identity page's restore panel.
 - `src-tauri/src/commands.rs` — two backup Tauri commands at the bottom of the file:
   - `build_canonical_backup` — builds the canonical payload from zome queries (replaces the legacy `get_export_data`, which is kept deprecated for backwards compat).
   - `decode_record_for_export` — decodes an entry into plain JSON for the human-readable view.
@@ -349,7 +363,7 @@ ProofPoll backs up the user's authored data to Flowsta Vault's encrypted local s
 
 **Keeping backups in sync with your data model:** when you add a new entry type to your DNA, add one `match` arm in `decode_record_for_export` and one in `build_canonical_backup`'s record-collection loop. The plumbing — encryption, storage, the Your Data UI, the CAL export — is provided by Flowsta Vault.
 
-**For forks:** the two commands above are the entire backup surface area you maintain. Replace `Poll` / `Vote` with your own entry types. The `appName` parameter in `layout.tsx` controls how your app appears in the Vault's Your Data page.
+**For forks:** the two commands above plus the seed modules are the backup surface you maintain — `device_seed.rs`/`seed_adopt.rs` port with only path/tag renames. Replace `Poll` / `Vote` with your own entry types, route every new write through a wrapper in `src/lib/holochain.ts` (that's what keeps backups fresh), and keep writes behind the `require_identity_link`/`require_identity_match` chokepoint in `commands.rs` — per-command gates are how writes ship ungated. The `appName` parameter in `layout.tsx` controls how your app appears in the Vault's Your Data page.
 
 ### Constants reference
 
@@ -459,6 +473,9 @@ These files work for **any** Holochain + Tauri app with zero or minimal changes:
 | `src-tauri/src/conductor.rs` | Starts lair-keystore + holochain conductor, waits for readiness, health monitoring | Change ports if running multiple apps |
 | `src-tauri/src/lair.rs` | Lair keystore init, socket management, passphrase | None |
 | `src-tauri/src/crypto.rs` | Encrypt/decrypt via lair's xsalsa20poly1305 crypto_box | None |
+| `src-tauri/src/device_seed.rs` | App-side agent seed: generation, atomic recovery file, lair import + derivation cross-check | Rename file/tag constants |
+| `src-tauri/src/seed_adopt.rs` | Seed adopt/re-key engine (verified stop→wipe→commit ordering behind a testable seam) + backup escrow gate | Rename paths/constants |
+| `src/lib/backup.ts` | Write-triggered debounced Vault backups for the `getData` auto-backup path | None |
 | `src-tauri/src/dna.rs` | Multi-version DNA install, AppWebsocket per version, signing credentials with CellDisabled recovery | Change app IDs and hApp filenames |
 | `src-tauri/src/migration.rs` | Migration state machine, export/import/retry pattern. Auto-versioned state file | Change entry types, zome names, and source client field |
 | `src/lib/context.ts` | Qwik signals for linked/display state | None |
@@ -573,7 +590,7 @@ job). Cloning or forking the repo gives you the signing *plumbing*, never the
 
 | Platform | What you need | Roughly |
 |---|---|---|
-| **Linux** | Nothing. `.deb`/`.rpm`/`.AppImage` are unsigned by convention. | Free |
+| **Linux** | Nothing. `.deb`/`.rpm` are unsigned by convention. (AppImage is not built - its sandboxing breaks the embedded Holochain conductor.) | Free |
 | **macOS** | An **Apple Developer account** ($99/yr) for a "Developer ID Application" certificate, plus notarization via an App Store Connect API key. Without it, users must right-click → Open once. | $99/yr |
 | **Windows** | A code-signing certificate from a CA — **OV** (Organization Validation) or **EV** (Extended Validation). EV clears SmartScreen reputation immediately; OV warms up over time/downloads. Issued by services such as **SSL.com**, **DigiCert**, **Sectigo**, or **Azure Trusted Signing**. Modern certs are stored in an HSM/cloud signer, not a local `.pfx`. | ~$100–600/yr |
 
@@ -634,6 +651,8 @@ ProofPoll/
 │       ├── commands.rs         #   Tauri commands (app + flags + encrypted entries + migration)
 │       ├── conductor.rs        #   Conductor lifecycle management
 │       ├── crypto.rs           #   Lair-based encryption (xsalsa20poly1305)
+│       ├── device_seed.rs      #   App-side agent seed + escrow (authorship survives machine death)
+│       ├── seed_adopt.rs       #   Seed adopt/re-key engine + backup escrow gate
 │       ├── dna.rs              #   Multi-version DNA install + WebSocket setup
 │       ├── migration.rs        #   DNA migration orchestration
 │       ├── lair.rs             #   Lair keystore management
@@ -642,7 +661,8 @@ ProofPoll/
 │       └── lib.rs              #   App setup, command registration, startup
 ├── src/                        # Qwik TypeScript frontend
 │   ├── lib/
-│   │   ├── holochain.ts        #   Zome call wrappers + types
+│   │   ├── holochain.ts        #   Zome call wrappers + types (writes schedule backups)
+│   │   ├── backup.ts           #   Write-triggered debounced Vault backups
 │   │   ├── context.ts          #   Qwik context signals
 │   │   └── sanitize.ts         #   Input sanitization
 │   └── routes/
