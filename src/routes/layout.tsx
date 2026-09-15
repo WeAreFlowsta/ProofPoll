@@ -83,7 +83,7 @@ export default component$(() => {
       try {
         const { startAutoBackup } = await import("@flowsta/holochain");
         // Use the canonical-shape payload (v0.2.0+ — see
-        // build-docs/current/GENERIC_BACKUP_PLAN.md). The Rust side queries
+        // build-docs/archive/2026-06/GENERIC_BACKUP_PLAN.md). The Rust side queries
         // the user's polls and votes, builds the canonical payload, returns
         // it as JSON. Vault recognises the shape and renders per-entry-type
         // counts in the UI plus inlines human_readable views in CAL §4.2.1
