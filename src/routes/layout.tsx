@@ -614,13 +614,12 @@ export default component$(() => {
                   </svg>
                   <div class="flex-1 min-w-0">
                     <p class="text-sm font-medium text-amber-200">
-                      Your Flowsta account has changed
+                      Your Vault is signed in as someone else
                     </p>
                     <p class="mt-1 text-xs text-amber-300/90">
-                      ProofPoll was connected to a Flowsta account that no
-                      longer matches the one in your Vault. Existing polls
-                      and votes are still yours, but you'll need to
-                      reconnect to create or vote on new ones.
+                      This device was set up with a different Flowsta
+                      identity. Everything here is safe. Connect this
+                      identity to keep going, or switch your Vault back.
                     </p>
                     <div class="mt-3 flex flex-wrap gap-2">
                       <button
@@ -628,7 +627,7 @@ export default component$(() => {
                         onClick$={handleReconnect}
                         class="inline-flex items-center rounded-md bg-amber-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-amber-500"
                       >
-                        Connect with current account
+                        Connect this identity
                       </button>
                       <button
                         type="button"
@@ -653,13 +652,12 @@ export default component$(() => {
               linkState.value !== "mismatch" && (
                 <div class="bg-indigo-900/30 border border-indigo-800/50 rounded-lg px-4 py-3 mb-4">
                   <p class="text-sm font-medium text-indigo-200">
-                    Step 2 of your restore: sign back in with Flowsta
+                    Step 2: sign back in
                   </p>
                   <p class="mt-1 text-xs text-indigo-300/90">
-                    Your authorship key is restored. Signing back in connects
-                    it to your Flowsta identity - your polls and votes
-                    reappear as the network syncs (this can take a few
-                    minutes on a fresh install).
+                    Your backup is restored. Sign in with Flowsta to finish.
+                    Your polls and votes come back as the network syncs,
+                    sometimes a few minutes.
                   </p>
                   <div class="mt-3">
                     <button

@@ -428,8 +428,8 @@ export default component$(() => {
             </h2>
             <p class="text-xs text-gray-500 mb-3">
               Your polls and votes back up to your Flowsta Vault
-              automatically. The backup also carries the key you author with,
-              so a new machine can continue as you.
+              automatically, together with what a new machine needs to
+              continue as you.
             </p>
 
             {seedError.value && (
@@ -442,15 +442,11 @@ export default component$(() => {
             {seedReport.value?.state === "conflict" && !seedDismissed.value && (
               <div class="rounded-lg border border-amber-700/60 bg-amber-900/20 p-4">
                 <p class="text-sm font-medium text-amber-200">
-                  Bringing this device back takes two steps
+                  Pick up where you left off
                 </p>
                 <p class="mt-1 text-xs text-gray-400">
-                  Your Vault backup carries a different authorship key than
-                  this device is using - usually because this is a fresh
-                  install while your backup kept the key from the previous
-                  one. Step 1 restores that key (ProofPoll restarts). Step
-                  2, after the restart: sign back in, and your polls and
-                  votes reappear as the network syncs.
+                  This is a fresh install. Your Vault backup brings it back
+                  in two steps: restore, then sign back in.
                 </p>
                 {confirmSeed.value !== "adopt" ? (
                   <div class="mt-3 flex flex-col-reverse gap-2 sm:flex-row sm:items-center sm:justify-end">
@@ -466,17 +462,17 @@ export default component$(() => {
                       onClick$={() => (confirmSeed.value = "adopt")}
                       class="bg-amber-600 hover:bg-amber-500 text-white font-medium px-4 py-2 rounded-full text-sm"
                     >
-                      Step 1: Restore my key
+                      Step 1: Restore from Vault
                     </button>
                   </div>
                 ) : (
                   <div class="mt-3 bg-gray-900/60 border border-amber-900/50 rounded-lg p-3">
                     <p class="text-xs text-gray-300 mb-3">
-                      Restoring replaces this install's key and restarts
-                      ProofPoll. Anything published from THIS install stays
-                      on the network but will no longer count as yours, and
-                      this install's drafts and private notes are lost. On a
-                      machine you just set up, there is nothing to lose.
+                      ProofPoll restarts as the you from your backup.
+                      Anything created on this fresh install stays on the
+                      network but stops counting as yours, and its drafts
+                      and private notes are lost. On a machine you just set
+                      up, there is nothing to lose.
                     </p>
                     <div class="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
                       <button
@@ -495,7 +491,7 @@ export default component$(() => {
                       >
                         {seedBusy.value
                           ? "Restoring - ProofPoll will restart..."
-                          : "Restore key and restart"}
+                          : "Restore and restart"}
                       </button>
                     </div>
                   </div>
@@ -507,16 +503,15 @@ export default component$(() => {
             {seedReport.value?.state === "legacy" && (
               <div class="rounded-lg border border-gray-700 bg-gray-800/40 p-4">
                 <p class="text-sm font-medium text-gray-200">
-                  Protect your authorship in backups
+                  Make your backups complete
                 </p>
                 <p class="mt-1 text-xs text-gray-400">
-                  This install's key was created before backups could carry
-                  one, so your exports hold your records but not the means
-                  to keep authoring as you. A one-time key upgrade fixes
-                  that for everything you publish from now on. Polls and
-                  votes you've already published stay on the network under
-                  the old key and remain verifiable as yours historically -
-                  but they'll no longer show as yours in this app.
+                  This install predates full backups: a backup could bring
+                  your polls back but not your ability to keep publishing as
+                  you. A one-time upgrade fixes that for everything from now
+                  on. Polls and votes you've already published stay on the
+                  network, verifiable as yours, and stop showing as yours in
+                  this app.
                 </p>
                 {confirmSeed.value !== "rekey" ? (
                   <div class="mt-3 flex flex-col-reverse gap-2 sm:flex-row sm:items-center sm:justify-end">
@@ -525,17 +520,16 @@ export default component$(() => {
                       onClick$={() => (confirmSeed.value = "rekey")}
                       class="bg-indigo-600 hover:bg-indigo-500 text-white font-medium px-4 py-2 rounded-full text-sm"
                     >
-                      Upgrade my key
+                      Upgrade
                     </button>
                   </div>
                 ) : (
                   <div class="mt-3 bg-gray-900/60 border border-gray-700 rounded-lg p-3">
                     <p class="text-xs text-gray-300 mb-3">
-                      ProofPoll restarts with the new key, then asks you to
-                      sign back in. This install's drafts and private notes
-                      do not carry over. This is a one-time choice - you can
-                      also keep things as they are, and your exports stay
-                      records-only.
+                      ProofPoll restarts, then asks you to sign back in.
+                      This install's drafts and private notes do not carry
+                      over. This is a one-time choice - you can also keep
+                      things as they are, and your backups stay records-only.
                     </p>
                     <div class="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
                       <button
@@ -554,7 +548,7 @@ export default component$(() => {
                       >
                         {seedBusy.value
                           ? "Upgrading - ProofPoll will restart..."
-                          : "Upgrade key and restart"}
+                          : "Upgrade and restart"}
                       </button>
                     </div>
                   </div>
@@ -566,23 +560,23 @@ export default component$(() => {
             {seedReport.value?.state === "synced" &&
               (escrowCheckFailed.value ? (
                 <p class="text-xs text-amber-300/90">
-                  Couldn't check your Vault backup just now - your authorship
-                  key rides along with the next successful backup.
+                  Couldn't check your Vault backup just now - it completes
+                  with the next successful backup.
                 </p>
               ) : (
                 <p class="text-xs text-green-400">
-                  ✓ Your authorship key rides your Vault backups - an export
-                  can restore it on a new machine.
+                  ✓ Backed up to your Vault. A new machine can pick up where
+                  you left off.
                 </p>
               ))}
 
             {/* Local recovery file unreadable and nothing escrowed to adopt */}
             {seedReport.value?.state === "local_unreadable" && (
               <p class="text-xs text-red-300">
-                This install's key recovery file can't be read, and no backup
-                holds a key to restore. New backups carry your records only.
-                The file is never overwritten automatically - see
-                proofpoll.log for details.
+                This install's recovery file can't be read, and your Vault
+                holds nothing to restore it from. New backups carry your
+                records only. The file is never overwritten automatically -
+                see proofpoll.log for details.
               </p>
             )}
 
