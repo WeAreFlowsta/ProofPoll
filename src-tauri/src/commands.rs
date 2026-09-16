@@ -149,7 +149,10 @@ pub struct VoteResponse {
 // --- App state ---
 
 pub struct AppState {
+    /// This profile's root: key store, conductor, recovery file, link files.
     pub data_dir: PathBuf,
+    /// The app data dir: holds profiles.json and the profiles/ folder.
+    pub device_root: PathBuf,
     pub conductor_handle: Mutex<Option<ConductorHandle>>,
     pub conductor_status: Mutex<ConductorStatus>,
     pub agent_pub_key: Mutex<Option<String>>,
@@ -169,6 +172,11 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(data_dir: PathBuf) -> Self {
+        let device_root = data_dir.clone();
+        Self::new_with_device_root(data_dir, device_root)
+    }
+
+    pub fn new_with_device_root(data_dir: PathBuf, device_root: PathBuf) -> Self {
         let passphrase_path = data_dir.join("lair-passphrase");
         let lair_config_path = data_dir.join("lair").join("lair-keystore-config.yaml");
         let lair_store_path = data_dir.join("lair").join("store_file");
@@ -220,6 +228,7 @@ impl AppState {
 
         Self {
             data_dir,
+            device_root,
             conductor_handle: Mutex::new(None),
             conductor_status: Mutex::new(ConductorStatus::Stopped),
             agent_pub_key: Mutex::new(None),
@@ -1026,7 +1035,7 @@ pub(crate) const ERR_IDENTITY_MISMATCH: &str =
 /// Live `(unlocked, agent_pub_key)` from the local Vault, or None when
 /// unreachable. Single fixed port, short timeout - a slow Vault reads as
 /// unconfirmable, which refuses (never allows).
-async fn vault_live_identity() -> Option<(bool, Option<String>)> {
+pub(crate) async fn vault_live_identity() -> Option<(bool, Option<String>)> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(3))
         .build()
@@ -1205,6 +1214,8 @@ pub async fn commit_identity_link(
             linked_at: now,
         },
     );
+    // The profile this install runs in now belongs to that identity.
+    crate::profiles::bind_profile(&state.device_root, &state.data_dir, &vault_agent_pub_key);
 
     // A successful sign-in completes step 2 of an adopt/re-key (if one was
     // pending) - retire the marker so the restore prompt stands down.

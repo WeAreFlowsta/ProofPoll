@@ -54,6 +54,7 @@ base64 = "0.22"
 # Hex encoding for the unknown-entry-type fallback in decode_record_for_export,
 # so the user still sees *something* in their Vault export per CAL §4.2.1.
 hex = "0.4"
+sha2 = "0.10"
 
 # HTTP client for IPC notifications to Vault
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
@@ -84,3 +85,6 @@ windows-sys = { version = "0.59", features = [
     "Win32_Security",
     "Win32_System_Threading",
 ] }
+
+[dev-dependencies]
+tempfile = "3"

@@ -37,6 +37,8 @@ use std::sync::Arc;
 use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+mod profiles;
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -66,7 +68,17 @@ pub fn run() {
             log::info!("ProofPoll starting up...");
             log::info!("Data dir: {:?}", data_dir);
 
-            let app_state = Arc::new(AppState::new(data_dir));
+            // Identity profiles: pick (or create) the profile for the Flowsta
+            // identity the Vault has unlocked right now, else the last one
+            // used; a pre-profiles install is moved into a profile first.
+            // Must run BEFORE AppState::new, whose key-store check wipes a
+            // partially present lair.
+            let live_identity = tauri::async_runtime::block_on(commands::vault_live_identity())
+                .and_then(|(unlocked, key)| if unlocked { key } else { None });
+            let profile_root = profiles::select_profile_root(&data_dir, live_identity.as_deref());
+            log::info!("Profile root: {:?}", profile_root);
+
+            let app_state = Arc::new(AppState::new_with_device_root(profile_root, data_dir.clone()));
             app.manage(app_state.clone());
 
             // Resolve the resource directory where the .happ bundle lives.
@@ -76,7 +88,7 @@ pub fn run() {
             // install directory; entries declared as `resources/foo` in
             // tauri.conf.json land under a `resources/` subdir there, so
             // we append that to match dev's layout.
-            let resource_dir = resolve_resource_dir(app.handle(), &app_state.data_dir);
+            let resource_dir = resolve_resource_dir(app.handle(), &app_state.device_root);
 
             // Auto-start the conductor in the background.
             let startup_state = app_state.clone();
