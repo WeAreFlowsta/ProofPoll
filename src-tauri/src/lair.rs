@@ -95,6 +95,13 @@ pub fn start_lair_process(
     }
 
     // Read connection URL from config file.
+    // The config pins absolute paths. After the directory has moved they
+    // must point here, or the key store binds (and we wait on) a socket in
+    // a directory that no longer exists.
+    if let Err(e) = repoint_config(lair_dir) {
+        log::warn!("[lair] config not repointed: {e}");
+    }
+
     let connection_url = read_connection_url(&config_path)?;
 
     // Clean up stale socket file from a previous run. Unix only — Windows
@@ -168,6 +175,72 @@ pub fn read_lair_logs(lair_dir: &Path, stage: &str) -> String {
 }
 
 /// Read the connection URL from lair's config file.
+/// Make `lair-keystore-config.yaml` point at the directory it now lives in.
+///
+/// Lair writes three absolute paths at init: `connectionUrl`
+/// (`unix://<dir>/socket?k=...`), `pidFile` and `storeFile`. The URL's path
+/// is PERCENT-ENCODED (`Application%20Support` on every Mac), so replacing
+/// the old directory as plain text fixes the two file paths and silently
+/// leaves the socket address behind. This parses the URL instead, compares
+/// decoded paths, and lets the URL type do the encoding. Idempotent - safe
+/// on every start, and it repairs a config left stale by an earlier move.
+pub(crate) fn repoint_config(lair_dir: &Path) -> Result<bool, String> {
+    let config_path = lair_dir.join("lair-keystore-config.yaml");
+    if !config_path.exists() {
+        return Ok(false);
+    }
+    let content = std::fs::read_to_string(&config_path)
+        .map_err(|e| format!("lair config unreadable: {e}"))?;
+    let mut changed = false;
+    let mut out: Vec<String> = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim_start();
+        let indent = &line[..line.len() - trimmed.len()];
+        if let Some(rest) = trimmed.strip_prefix("connectionUrl:") {
+            let raw = rest.trim();
+            if let Ok(mut url) = lair_keystore_api::dependencies::url::Url::parse(raw) {
+                if url.scheme() == "unix" {
+                    let decoded = percent_encoding::percent_decode_str(url.path())
+                        .decode_utf8_lossy()
+                        .to_string();
+                    let expected = lair_dir.join("socket");
+                    if Path::new(&decoded) != expected {
+                        url.set_path(&expected.to_string_lossy());
+                        out.push(format!("{indent}connectionUrl: {url}"));
+                        changed = true;
+                        continue;
+                    }
+                }
+            }
+        } else {
+            let mut handled = false;
+            for (key, file) in [("pidFile:", "pid_file"), ("storeFile:", "store_file")] {
+                if let Some(rest) = trimmed.strip_prefix(key) {
+                    let expected = lair_dir.join(file);
+                    if Path::new(rest.trim()) != expected {
+                        out.push(format!("{indent}{key} {}", expected.display()));
+                        changed = true;
+                        handled = true;
+                    }
+                    break;
+                }
+            }
+            if handled {
+                continue;
+            }
+        }
+        out.push(line.to_string());
+    }
+    if !changed {
+        return Ok(false);
+    }
+    let tmp = config_path.with_extension("yaml.tmp");
+    std::fs::write(&tmp, out.join("\n") + "\n").map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, &config_path).map_err(|e| e.to_string())?;
+    log::info!("[lair] key store config repointed to {:?}", lair_dir);
+    Ok(true)
+}
+
 fn read_connection_url(config_path: &Path) -> Result<String, String> {
     let content = std::fs::read_to_string(config_path)
         .map_err(|e| format!("Failed to read lair config at {:?}: {}", config_path, e))?;
@@ -250,6 +323,75 @@ pub async fn wait_for_lair_socket(connection_url: &str, timeout_secs: u64) -> Re
 
 #[cfg(test)]
 mod tests {
+
+    /// The config lair writes on a Mac: the socket address is a URL, so the
+    /// space in "Application Support" is `%20` there and a plain space in
+    /// the two file paths.
+    fn mac_style_config(dir: &Path) -> String {
+        let url_path = dir.to_string_lossy().replace(' ', "%20");
+        format!(
+            "---\nconnectionUrl: unix://{url_path}/socket?k=AbC-123_x\npidFile: {0}/pid_file\nstoreFile: {0}/store_file\nsignatureFallback: none\n",
+            dir.display()
+        )
+    }
+
+    #[test]
+    fn a_moved_key_store_is_repointed_when_its_path_has_a_space() {
+        let tmp = tempfile::tempdir().unwrap();
+        let old = tmp.path().join("Application Support").join("app").join("lair");
+        let new = tmp.path().join("Application Support").join("app").join("profiles").join("local").join("lair");
+        std::fs::create_dir_all(&new).unwrap();
+        // Moved intact: the config still names the old directory everywhere.
+        std::fs::write(new.join("lair-keystore-config.yaml"), mac_style_config(&old)).unwrap();
+
+        assert_eq!(repoint_config(&new), Ok(true));
+        let url = read_connection_url(&new.join("lair-keystore-config.yaml")).unwrap();
+        let parsed = lair_keystore_api::dependencies::url::Url::parse(&url).unwrap();
+        let decoded = percent_encoding::percent_decode_str(parsed.path()).decode_utf8_lossy().to_string();
+        assert_eq!(Path::new(&decoded), new.join("socket"), "the socket address follows the move");
+        assert!(url.contains("Application%20Support"), "and stays a valid encoded URL: {url}");
+        assert!(url.ends_with("?k=AbC-123_x"), "the key in the address is kept: {url}");
+        let after = std::fs::read_to_string(new.join("lair-keystore-config.yaml")).unwrap();
+        assert!(after.contains(&format!("pidFile: {}", new.join("pid_file").display())));
+        assert!(after.contains(&format!("storeFile: {}", new.join("store_file").display())));
+        assert!(after.contains("signatureFallback: none"), "other settings untouched");
+        // Idempotent: a second start changes nothing.
+        assert_eq!(repoint_config(&new), Ok(false));
+    }
+
+    #[test]
+    fn a_config_left_half_fixed_by_a_text_replace_is_healed() {
+        // What 0.7.3-beta.6 left behind on a Mac: the two file paths moved,
+        // the encoded socket address did not.
+        let tmp = tempfile::tempdir().unwrap();
+        let old = tmp.path().join("Application Support").join("app").join("lair");
+        let new = tmp.path().join("Application Support").join("app").join("profiles").join("local").join("lair");
+        std::fs::create_dir_all(&new).unwrap();
+        let half = mac_style_config(&old).replace(
+            &old.to_string_lossy().to_string(),
+            &new.to_string_lossy().to_string(),
+        );
+        assert!(half.contains(&format!("pidFile: {}", new.join("pid_file").display())));
+        assert!(half.contains("app/lair/socket"), "precondition: the socket address is still the old one");
+        std::fs::write(new.join("lair-keystore-config.yaml"), half).unwrap();
+
+        assert_eq!(repoint_config(&new), Ok(true));
+        let url = read_connection_url(&new.join("lair-keystore-config.yaml")).unwrap();
+        assert!(url.contains("profiles/local/lair/socket"), "{url}");
+    }
+
+    #[test]
+    fn a_config_already_in_place_is_left_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("Application Support").join("lair");
+        std::fs::create_dir_all(&dir).unwrap();
+        let original = mac_style_config(&dir);
+        std::fs::write(dir.join("lair-keystore-config.yaml"), &original).unwrap();
+        assert_eq!(repoint_config(&dir), Ok(false));
+        assert_eq!(std::fs::read_to_string(dir.join("lair-keystore-config.yaml")).unwrap(), original);
+    }
+
+
     use super::*;
 
     /// The scratch-lair harness: spins the real bundled lair binary against

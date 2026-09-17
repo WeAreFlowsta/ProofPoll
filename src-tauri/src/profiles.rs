@@ -153,18 +153,11 @@ fn profile_entries(root: &Path) -> Vec<PathBuf> {
 }
 
 /// Lair's config pins absolute paths (connectionUrl, pidFile, storeFile).
-/// After the directory moved, point them at the new location.
-fn rewrite_lair_paths(new_lair_dir: &Path, old_lair_dir: &Path) -> Result<(), String> {
-    let cfg = new_lair_dir.join("lair-keystore-config.yaml");
-    if !cfg.exists() { return Ok(()); }
-    let content = std::fs::read_to_string(&cfg).map_err(|e| format!("lair config unreadable: {}", e))?;
-    let old = old_lair_dir.to_string_lossy().to_string();
-    let new = new_lair_dir.to_string_lossy().to_string();
-    let rewritten = content.replace(&old, &new);
-    if rewritten == content { return Ok(()); }
-    let tmp = cfg.with_extension("yaml.tmp");
-    std::fs::write(&tmp, rewritten).map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp, &cfg).map_err(|e| e.to_string())
+/// After the directory moved, point them at the new location. The socket
+/// address is a percent-encoded URL, so this goes through the URL-aware
+/// repoint, never a plain text replace.
+fn rewrite_lair_paths(new_lair_dir: &Path, _old_lair_dir: &Path) -> Result<(), String> {
+    crate::lair::repoint_config(new_lair_dir).map(|_| ())
 }
 
 /// Move the legacy root layout into `profiles/<folder>/`, all-or-nothing.
