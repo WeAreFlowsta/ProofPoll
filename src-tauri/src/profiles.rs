@@ -214,6 +214,12 @@ pub fn select_profile_root(device_root: &Path, live_identity: Option<&str>) -> P
                 if let Err(e) = profiles.save(device_root) { log::warn!("profiles.json not saved: {}", e); }
                 log::info!("Identity files moved into profile {:?}", root);
             }
+            Err(e) if profile_root(device_root, &folder).join("lair").exists() => {
+                // The move already happened; something recreated a legacy
+                // name at the device root. The profile is the truth - the
+                // legacy root would open as an empty identity.
+                log::warn!("Legacy names at the device root beside a finished profile ({}) - using the profile", e);
+            }
             Err(e) => {
                 log::warn!("Profile relocation skipped: {} - staying on the legacy layout", e);
                 return device_root.to_path_buf();
