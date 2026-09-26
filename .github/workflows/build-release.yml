@@ -70,12 +70,17 @@ jobs:
             const isPrerelease = version.includes('-');
             // Describe each platform's bundle honestly based on whether
             // signing is actually configured for THIS repo (see job env).
-            const winSigned = process.env.WINDOWS_SIGNED === 'true';
+            // Betas skip Windows signing and the MSI (see "Detect beta
+            // build" in the build job), so their line says so.
+            const isBeta = version.includes('-beta');
+            const winSigned = process.env.WINDOWS_SIGNED === 'true' && !isBeta;
             const winPublisher = (process.env.WINDOWS_PUBLISHER || '').trim();
             const macSigned = process.env.MACOS_SIGNED === 'true';
             const windowsLine = winSigned
               ? `- **Windows** — \`.exe\` installer or \`.msi\`${winPublisher ? ` (code-signed; verified publisher **${winPublisher}**)` : ' (code-signed)'}`
-              : '- **Windows** — `.exe` installer or `.msi` (unsigned — SmartScreen shows a warning on first launch; verify via `SHA256SUMS.txt` or build from source)';
+              : isBeta
+                ? '- **Windows** — `.exe` installer (beta builds are not code-signed — SmartScreen shows a warning on first launch; verify via `SHA256SUMS.txt`)'
+                : '- **Windows** — `.exe` installer or `.msi` (unsigned — SmartScreen shows a warning on first launch; verify via `SHA256SUMS.txt` or build from source)';
             const macLine = macSigned
               ? '- **macOS** — `.dmg` (Intel or Apple Silicon, signed + notarized)'
               : '- **macOS** — `.dmg` (Intel or Apple Silicon; unsigned — Gatekeeper requires right-click → Open on first launch)';
