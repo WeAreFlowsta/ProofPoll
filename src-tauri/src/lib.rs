@@ -38,6 +38,7 @@ use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 mod profiles;
+mod vault_probe;
 
 pub fn run() {
     tauri::Builder::default()
@@ -218,6 +219,8 @@ pub fn run() {
             // ── Infrastructure (keep as-is) ───────────────────────
             commands::get_app_status,
             commands::launch_vault,
+            vault_probe::probe_vault,
+            vault_probe::restart_app,
             // ── Your app commands (replace these) ─────────────────
             commands::create_poll,
             commands::get_poll,

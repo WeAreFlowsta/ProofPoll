@@ -241,7 +241,7 @@ impl EscrowProbe for VaultEscrowProbe {
             .build()
             .map_err(|e| e.to_string())?;
         let resp = client
-            .post("http://127.0.0.1:27777/backup/retrieve")
+            .post(format!("{}/backup/retrieve", crate::vault_probe::vault_base_url().await))
             .header("Origin", WEBVIEW_ORIGIN)
             .json(&serde_json::json!({ "client_id": self.client_id }))
             .send()

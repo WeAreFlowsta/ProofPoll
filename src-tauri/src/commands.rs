@@ -1032,26 +1032,13 @@ pub(crate) const ERR_IDENTITY_MISMATCH: &str =
     "Your Flowsta Vault is signed in as a different identity than the one connected here - \
      unlock the matching Vault, or disconnect and reconnect on the Identity page";
 
-/// Live `(unlocked, agent_pub_key)` from the local Vault, or None when
-/// unreachable. Single fixed port, short timeout - a slow Vault reads as
+/// Live `(unlocked, agent_pub_key)` from this user's Vault, or None when
+/// none answers. All three ports at once, another OS user's Vault ignored,
+/// the unlocked one preferred (`vault_probe`); a slow Vault reads as
 /// unconfirmable, which refuses (never allows).
 pub(crate) async fn vault_live_identity() -> Option<(bool, Option<String>)> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(3))
-        .build()
-        .ok()?;
-    let v: serde_json::Value = client
-        .get("http://127.0.0.1:27777/status")
-        .send()
-        .await
-        .ok()?
-        .json()
-        .await
-        .ok()?;
-    Some((
-        v["unlocked"].as_bool().unwrap_or(false),
-        v["agent_pub_key"].as_str().map(String::from),
-    ))
+    let p = crate::vault_probe::find_vault(std::time::Duration::from_secs(3)).await?;
+    Some((p.unlocked, p.agent_pub_key))
 }
 
 pub(crate) async fn require_identity_match(

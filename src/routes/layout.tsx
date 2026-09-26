@@ -17,6 +17,17 @@ import {
   type MigrationState,
 } from "~/lib/holochain";
 import { getFlowstaLinkStatus } from "@flowsta/holochain";
+
+/** What `probe_vault` (Rust) found: this user's Vault, unlocked first. */
+interface VaultProbe {
+  port: number;
+  url: string;
+  unlocked: boolean;
+  initialized: boolean;
+  agent_pub_key: string | null;
+  display_name: string | null;
+  profile_picture: string | null;
+}
 import { setBackupTriggersEnabled } from "~/lib/backup";
 
 
@@ -139,12 +150,12 @@ export default component$(() => {
 
       // Primary: compare the linked identity against whoever is actually
       // unlocked right now.
+      // The same probe the Rust identity gate uses: three ports, another
+      // OS user's Vault ignored, the unlocked one preferred - the page can
+      // never judge against a different Vault than the gate does.
       let vaultLive: { unlocked?: boolean; agent_pub_key?: string | null } | null = null;
       try {
-        const resp = await fetch("http://127.0.0.1:27777/status", {
-          signal: AbortSignal.timeout(2000),
-        });
-        if (resp.ok) vaultLive = await resp.json();
+        vaultLive = await invoke<VaultProbe | null>("probe_vault");
       } catch {
         // Vault not reachable
       }
@@ -248,11 +259,8 @@ export default component$(() => {
             }
             if (linkState.value === "linked") {
               try {
-                const resp = await fetch("http://127.0.0.1:27777/status", {
-                  signal: AbortSignal.timeout(2000),
-                });
-                if (resp.ok) {
-                  const vault = await resp.json();
+                const vault = await invoke<VaultProbe | null>("probe_vault");
+                if (vault) {
                   if (vault.display_name) {
                     displayName.value = vault.display_name;
                     if (vault.profile_picture)
@@ -337,11 +345,8 @@ export default component$(() => {
           } catch {}
           if (nowLinked && !displayName.value) {
             try {
-              const resp = await fetch("http://127.0.0.1:27777/status", {
-                signal: AbortSignal.timeout(2000),
-              });
-              if (resp.ok) {
-                const vault = await resp.json();
+              const vault = await invoke<VaultProbe | null>("probe_vault");
+              if (vault) {
                 if (vault.display_name) {
                   displayName.value = vault.display_name;
                   if (vault.profile_picture)
@@ -405,6 +410,12 @@ export default component$(() => {
   const handleReconnect = $(() => {
     setSignInIntent({ autoLink: true });
     nav("/identity/");
+  });
+  // A switch mid-session: relaunch, and ProofPoll opens on the profile of
+  // the identity the Vault holds now (picked at launch) instead of staying
+  // read-only under the old name.
+  const handleRestartIntoIdentity = $(async () => {
+    await invoke("restart_app").catch(() => {});
   });
 
   const isActive = (path: string) => loc.url.pathname === path;
@@ -617,11 +628,19 @@ export default component$(() => {
                       Your Vault is signed in as someone else
                     </p>
                     <p class="mt-1 text-xs text-amber-300/90">
-                      This device was set up with a different Flowsta
-                      identity. Everything here is safe. Connect this
-                      identity to keep going, or switch your Vault back.
+                      ProofPoll opened as a different Flowsta identity.
+                      Everything here is safe. Open ProofPoll as the identity
+                      your Vault holds now (its own polls and votes), or
+                      switch your Vault back.
                     </p>
                     <div class="mt-3 flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        onClick$={handleRestartIntoIdentity}
+                        class="inline-flex items-center rounded-md bg-amber-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-amber-500"
+                      >
+                        Open as this identity
+                      </button>
                       <button
                         type="button"
                         onClick$={handleReconnect}
