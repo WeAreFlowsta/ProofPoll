@@ -121,7 +121,7 @@ export async function castVote(
 
 export async function getPollVotes(
   pollActionHash: string,
-  dnaVersion: "1.0" | "1.1" | "1.2",
+  dnaVersion: "1.0" | "1.1" | "1.2" | "1.3",
 ): Promise<VoteData[]> {
   return invoke<VoteData[]>("get_poll_votes", {
     pollActionHash,
