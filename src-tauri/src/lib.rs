@@ -25,6 +25,7 @@ mod commands;
 mod conductor;
 mod crypto;
 mod dna;
+mod instance_guard;
 mod device_seed;
 mod lair;
 pub mod migration;
@@ -74,6 +75,15 @@ pub fn run() {
             // used; a pre-profiles install is moved into a profile first.
             // Must run BEFORE AppState::new, whose key-store check wipes a
             // partially present lair.
+            // Sidecars a dead earlier launch left behind (macOS kills a
+            // running app whose bundle was replaced; crashes; forced quits)
+            // would still hold the conductor port. Stop them before anything
+            // of ours spawns. A second live ProofPoll keeps its own.
+            let reaped = instance_guard::reap_orphaned_sidecars();
+            if reaped > 0 {
+                log::warn!("[instance] {} orphaned sidecar(s) from an earlier launch stopped", reaped);
+            }
+
             let live_identity = tauri::async_runtime::block_on(commands::vault_live_identity())
                 .and_then(|(unlocked, key)| if unlocked { key } else { None });
             let profile_root = profiles::select_profile_root(&data_dir, live_identity.as_deref());
@@ -81,6 +91,37 @@ pub fn run() {
 
             let app_state = Arc::new(AppState::new_with_device_root(profile_root, data_dir.clone()));
             app.manage(app_state.clone());
+
+            // SIGTERM / SIGINT (Ctrl+C, shutdown, `kill <pid>`, a package
+            // upgrade) route through app.exit() so RunEvent::Exit below
+            // stops the conductor and key store with the app.
+            let signal_app_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                #[cfg(unix)]
+                {
+                    use tokio::signal::unix::{signal, SignalKind};
+                    let mut sigterm = match signal(SignalKind::terminate()) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            log::error!("Failed to register SIGTERM handler: {}", e);
+                            return;
+                        }
+                    };
+                    tokio::select! {
+                        _ = sigterm.recv() => log::info!("SIGTERM received, exiting"),
+                        _ = tokio::signal::ctrl_c() => log::info!("SIGINT received, exiting"),
+                    }
+                }
+                #[cfg(not(unix))]
+                {
+                    if tokio::signal::ctrl_c().await.is_err() {
+                        log::error!("Failed to register Ctrl+C handler");
+                        return;
+                    }
+                    log::info!("Ctrl+C received, exiting");
+                }
+                signal_app_handle.exit(0);
+            });
 
             // Resolve the resource directory where the .happ bundle lives.
             // In dev mode, Tauri doesn't copy resources to target/debug/,
@@ -262,8 +303,23 @@ pub fn run() {
             commands::publish_draft,
             commands::delete_draft,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            // Every way out (window close, Quit, app.restart() for "Open as
+            // this identity", the signal route above) ends here: stop the
+            // conductor and key store so they never outlive the app. Linux
+            // also has PR_SET_PDEATHSIG; macOS and Windows have only this
+            // plus the sweep at the next launch.
+            if let tauri::RunEvent::Exit = event {
+                let handle = app_handle
+                    .try_state::<Arc<AppState>>()
+                    .and_then(|s| s.conductor_handle.lock().ok().and_then(|mut h| h.take()));
+                if let Some(h) = handle {
+                    h.shutdown();
+                }
+            }
+        });
 }
 
 /// Where the bundled resources (.happ) live. `resource_dir()` can fail

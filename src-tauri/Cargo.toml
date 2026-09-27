@@ -69,6 +69,7 @@ percent-encoding = "2"
 # `spawn_health_monitor`. Windows uses a stubbed check (see conductor.rs).
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+sysinfo = "0.33"
 
 # Windows-only: EnumWindows + ShowWindow(SW_HIDE) to hide spawned console
 # windows, plus a kill-on-close Job Object (Win32_System_JobObjects) so the
