@@ -159,12 +159,16 @@ export default component$(() => {
       } catch {
         // Vault not reachable
       }
-      if (
-        vaultLive?.unlocked &&
-        vaultLive.agent_pub_key &&
-        localLink &&
-        vaultLive.agent_pub_key !== localLink.vault_agent_pub_key
-      ) {
+      if (vaultLive?.unlocked && vaultLive.agent_pub_key && localLink) {
+        // The Vault's identity against the one this profile is linked to
+        // is the whole question. Equal = linked, whatever the Vault's own
+        // linked-apps list says: that list is erased by Reset Vault and
+        // rebuilt lazily, so a restored Vault "forgets" this app while
+        // holding exactly the identity it belongs to (seen 2026-09-28:
+        // the "someone else" banner on the matching identity).
+        if (vaultLive.agent_pub_key === localLink.vault_agent_pub_key) {
+          return "linked";
+        }
         return "mismatch";
       }
       if (!vaultLive) return "offline";
