@@ -28,6 +28,15 @@ export default component$(() => {
   const flagThreshold = useSignal(3);
   const showFlagged = useSignal(false);
   const flagsLoaded = useSignal(false);
+  // First sync: a fresh conductor has nobody to ask yet and the first list
+  // call can wait out a long timeout, so an empty list in the first minutes
+  // after opening is "still syncing", not "no polls". The 30 s refresh
+  // moves `tick`; after ten minutes the empty state is taken at its word.
+  const openedAt = useSignal(0);
+  const tick = useSignal(0);
+  const inFirstSyncWindow = useComputed$(
+    () => openedAt.value > 0 && tick.value - openedAt.value < 10 * 60_000,
+  );
 
   const loadPolls = $(async () => {
     loading.value = true;
@@ -135,6 +144,8 @@ export default component$(() => {
   });
 
   useVisibleTask$(async ({ cleanup }) => {
+    openedAt.value = Date.now();
+    tick.value = openedAt.value;
     const timer = setTimeout(() => {
       loadingSlow.value = true;
     }, 3000);
@@ -148,6 +159,7 @@ export default component$(() => {
     // update polls.value directly instead of calling loadPolls() so the
     // loading skeleton doesn't flash on each tick.
     const refresh = setInterval(async () => {
+      tick.value = Date.now();
       try {
         polls.value = await getAllPolls();
       } catch {
@@ -291,12 +303,27 @@ export default component$(() => {
             </div>
           </div>
         </div>
+      ) : polls.value.length === 0 && inFirstSyncWindow.value ? (
+        <div class="flex flex-col items-center justify-center py-16 gap-4 text-center">
+          <div class="w-8 h-8 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin" />
+          <p class="text-gray-400 text-lg">Syncing polls from the network</p>
+          <p class="text-gray-500 text-sm max-w-md">
+            A first sync usually takes about five minutes. Polls appear here by
+            themselves, so there is nothing to press.
+          </p>
+          {linked.value && (
+            <Link href="/create/" class="text-indigo-400/80 hover:text-indigo-300 text-sm">
+              Or create a poll now
+            </Link>
+          )}
+        </div>
       ) : polls.value.length === 0 ? (
         <div class="text-center py-16">
           <p class="text-gray-400 text-lg mb-2">No polls yet</p>
           <p class="text-gray-500 text-sm mb-4">
-            If you just opened ProofPoll, polls may still be syncing from the
-            network — they'll appear here automatically within a minute or two.
+            Still nothing from the network after several minutes. ProofPoll
+            keeps looking every 30 seconds; if this stays empty, check that
+            this computer is online.
           </p>
           {linked.value ? (
             <Link
