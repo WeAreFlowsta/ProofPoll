@@ -407,10 +407,6 @@ export default component$(() => {
     }
   });
 
-  const handleReconnect = $(() => {
-    setSignInIntent({ autoLink: true });
-    nav("/identity/");
-  });
   // A switch mid-session: relaunch, and ProofPoll opens on the profile of
   // the identity the Vault holds now (picked at launch) instead of staying
   // read-only under the old name.
@@ -603,9 +599,13 @@ export default component$(() => {
             )}
 
             {/* Account-changed banner — shown when Vault is running but
-                doesn't recognize this app's agent. The user can reconnect
-                with their current Vault account or deliberately disconnect.
-                We never auto-revoke; the user's polls + votes stay theirs. */}
+                doesn't recognize this app's agent. Two ways out: open
+                ProofPoll as the identity the Vault holds now (its own
+                profile), or deliberately disconnect. Re-binding THIS
+                profile's history to the new identity is a two-step on the
+                Identity page (disconnect, then connect), never a banner
+                button: pressed by mistake it re-labels one identity's polls
+                and votes as another's. We never auto-revoke. */}
             {linkState.value === "mismatch" && (
               <div class="bg-amber-900/30 border border-amber-800/50 rounded-lg px-4 py-3 mb-4">
                 <div class="flex items-start gap-3">
@@ -631,7 +631,9 @@ export default component$(() => {
                       ProofPoll opened as a different Flowsta identity.
                       Everything here is safe. Open ProofPoll as the identity
                       your Vault holds now (its own polls and votes), or
-                      switch your Vault back.
+                      switch your Vault back. To move this ProofPoll's polls
+                      and votes to the identity your Vault holds now,
+                      disconnect first, then connect from the Identity page.
                     </p>
                     <div class="mt-3 flex flex-wrap gap-2">
                       <button
@@ -640,13 +642,6 @@ export default component$(() => {
                         class="inline-flex items-center rounded-md bg-amber-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-amber-500"
                       >
                         Open as this identity
-                      </button>
-                      <button
-                        type="button"
-                        onClick$={handleReconnect}
-                        class="inline-flex items-center rounded-md bg-amber-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-amber-500"
-                      >
-                        Connect this identity
                       </button>
                       <button
                         type="button"
