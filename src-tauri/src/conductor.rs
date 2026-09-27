@@ -438,6 +438,26 @@ async fn start_holochain_attempt(
         },
     );
 
+    // 0. The conductor port must be free. Anything answering on it now is
+    //    a conductor that is not ours (a second running ProofPoll, or one an
+    //    earlier launch left behind that the startup sweep could not stop).
+    //    Attaching to it would run this profile on another profile's data
+    //    (seen 2026-09-27: after "Open as this identity" the relaunch
+    //    picked the new profile but reused the old conductor). Refuse
+    //    instead; the pre-spawn check is the only moment this is certain.
+    if let Ok(Ok(_)) = tokio::time::timeout(
+        std::time::Duration::from_millis(400),
+        tokio::net::TcpStream::connect(("127.0.0.1", ADMIN_WS_PORT)),
+    )
+    .await
+    {
+        return Err(format!(
+            "Another ProofPoll is already running on this computer (port {} is in use). \
+             Quit it and open ProofPoll again.",
+            ADMIN_WS_PORT
+        ));
+    }
+
     // 1. Start lair-keystore.
     let lair_dir = data_dir.join("lair");
     let (mut lair_child, connection_url) = lair::start_lair_process(&lair_dir, &passphrase)?;
