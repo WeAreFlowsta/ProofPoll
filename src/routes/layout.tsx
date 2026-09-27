@@ -168,6 +168,14 @@ export default component$(() => {
         return "mismatch";
       }
       if (!vaultLive) return "offline";
+      // A Vault that is locked, or holds no identity at all (just reset,
+      // mid-setup), cannot vouch for or against anyone. Asking it whether
+      // this app is linked would come back "no" and read as "someone else"
+      // (seen 2026-09-28: a reset Vault raised the mismatch banner while
+      // the Rust gate, correctly, still allowed writes). No banner.
+      if (!vaultLive.unlocked || vaultLive.initialized === false || !vaultLive.agent_pub_key) {
+        return "offline";
+      }
 
       const vaultStatus = await getFlowstaLinkStatus({
         clientId: import.meta.env.VITE_FLOWSTA_CLIENT_ID,
