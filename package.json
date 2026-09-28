@@ -9,7 +9,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "vite build && vite build -c adapters/static/vite.config.ts",
+    "build": "tsc --noEmit && vite build && vite build -c adapters/static/vite.config.ts",
     "build.client": "vite build",
     "dev": "vite --mode ssr",
     "fmt": "prettier --write .",

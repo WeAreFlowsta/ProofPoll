@@ -158,7 +158,7 @@ export default component$(() => {
       // The same probe the Rust identity gate uses: three ports, another
       // OS user's Vault ignored, the unlocked one preferred - the page can
       // never judge against a different Vault than the gate does.
-      let vaultLive: { unlocked?: boolean; agent_pub_key?: string | null } | null = null;
+      let vaultLive: VaultProbe | null = null;
       try {
         vaultLive = await invoke<VaultProbe | null>("probe_vault");
       } catch {
@@ -440,6 +440,12 @@ export default component$(() => {
     }
   });
 
+  // Step 2 of the seed-escrow upgrade / restore: the key changed and the
+  // new one must be linked to the identity again - the ordinary sign-in.
+  const handleRelinkSignIn = $(() => {
+    setSignInIntent({ autoLink: true });
+    nav("/identity/");
+  });
   // A switch mid-session: relaunch, and ProofPoll opens on the profile of
   // the identity the Vault holds now (picked at launch) instead of staying
   // read-only under the old name.
@@ -709,7 +715,7 @@ export default component$(() => {
                   <div class="mt-3">
                     <button
                       type="button"
-                      onClick$={handleReconnect}
+                      onClick$={handleRelinkSignIn}
                       class="inline-flex items-center rounded-md bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-500"
                     >
                       Sign in with Flowsta
