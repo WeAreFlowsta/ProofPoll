@@ -343,7 +343,10 @@ export default component$(() => {
           )}
         </div>
       ) : votedLoading.value ? (
-        <div class="text-gray-400">Loading your votes...</div>
+        <div class="flex flex-col items-center justify-center py-16 gap-4">
+          <div class="w-8 h-8 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin" />
+          <p class="text-gray-400">Loading your votes...</p>
+        </div>
       ) : filteredPolls.value.length === 0 ? (
         <div class="text-center py-16">
           <p class="text-gray-400 text-lg mb-4">
