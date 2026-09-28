@@ -127,9 +127,31 @@ pub async fn probe_vault() -> Option<VaultProbe> {
 /// this is how ProofPoll moves onto the new identity's own profile instead
 /// of staying read-only under the old name.
 #[tauri::command]
-pub fn restart_app(app: tauri::AppHandle) {
+pub fn restart_app(app: tauri::AppHandle, state: tauri::State<'_, std::sync::Arc<crate::commands::AppState>>) {
     log::info!("Restarting into the Vault's current identity");
+    // The relaunch reads this once: bring the window back to the front
+    // (the OS hands focus to whatever was behind us, usually the Vault)
+    // and, if the profile it opens is not signed in yet, start the sign-in.
+    if let Err(e) = std::fs::write(relaunch_marker_path(&state.device_root), b"1") {
+        log::warn!("relaunch marker not written: {}", e);
+    }
     app.restart();
+}
+
+pub(crate) fn relaunch_marker_path(device_root: &std::path::Path) -> std::path::PathBuf {
+    device_root.join("relaunch-into-identity")
+}
+
+/// True once per relaunch that "Open as this identity" asked for: the
+/// marker is consumed here so a later normal launch reads false.
+pub(crate) fn take_relaunch_marker(device_root: &std::path::Path) -> bool {
+    let p = relaunch_marker_path(device_root);
+    if p.exists() {
+        let _ = std::fs::remove_file(&p);
+        true
+    } else {
+        false
+    }
 }
 
 // ── Whose Vault is it? ────────────────────────────────────────────

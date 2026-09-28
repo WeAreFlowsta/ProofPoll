@@ -90,7 +90,20 @@ pub fn run() {
             log::info!("Profile root: {:?}", profile_root);
 
             let app_state = Arc::new(AppState::new_with_device_root(profile_root, data_dir.clone()));
+            let relaunched = vault_probe::take_relaunch_marker(&data_dir);
+            app_state
+                .relaunched_into_identity
+                .store(relaunched, std::sync::atomic::Ordering::Relaxed);
             app.manage(app_state.clone());
+            if relaunched {
+                // app.restart() leaves focus with whatever was behind the
+                // old window (the Vault, mostly). Come back to the front now
+                // and again once the conductor is ready (below).
+                if let Some(win) = app.get_webview_window("main") {
+                    let _ = win.show();
+                    let _ = win.set_focus();
+                }
+            }
 
             // SIGTERM / SIGINT (Ctrl+C, shutdown, `kill <pid>`, a package
             // upgrade) route through app.exit() so RunEvent::Exit below
@@ -167,10 +180,16 @@ pub fn run() {
                         // (their 3 s budget runs in parallel with conductor
                         // init — by the time we reach this point they're done).
                         // No-op on non-Windows platforms.
-                        #[cfg(target_os = "windows")]
+                        // Also after "Open as this identity" on every
+                        // platform: the relaunch must end up in front.
+                        if cfg!(target_os = "windows")
+                            || startup_state
+                                .relaunched_into_identity
+                                .load(std::sync::atomic::Ordering::Relaxed)
                         {
                             use tauri::Manager;
                             if let Some(win) = monitor_handle.get_webview_window("main") {
+                                let _ = win.show();
                                 let _ = win.set_focus();
                             }
                         }

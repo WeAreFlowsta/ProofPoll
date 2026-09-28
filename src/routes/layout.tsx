@@ -39,6 +39,7 @@ interface AppStatus {
     | { status: "starting"; message: string }
     | { status: "ready"; admin_port: number; app_port: number }
     | { status: "error"; message: string };
+  relaunched_into_identity?: boolean;
 }
 
 export default component$(() => {
@@ -51,6 +52,10 @@ export default component$(() => {
   // (further down) keys off `linkState.value === 'mismatch'` so individual
   // pages don't need to know about the account-changed flow.
   const linkState = useSignal<LinkState>("unlinked");
+  // "Open as this identity" relaunched us into a profile that may not be
+  // signed in yet. Start the sign-in once, so the person is left with only
+  // the approval in the Vault (Eric, Windows drive 2026-09-28).
+  const autoSignInDone = useSignal(false);
   useContextProvider(linkedContext, linked);
   useContextProvider(linkStateContext, linkState);
   useContextProvider(displayNameContext, displayName);
@@ -215,6 +220,22 @@ export default component$(() => {
               // `mismatch` and `unlinked` stay read-only (the Rust gates
               // enforce this regardless; the UI just tells the truth).
               linked.value = state === "linked" || state === "offline";
+              if (
+                s.relaunched_into_identity &&
+                state === "unlinked" &&
+                !autoSignInDone.value
+              ) {
+                autoSignInDone.value = true;
+                try {
+                  const live = await invoke<VaultProbe | null>("probe_vault");
+                  if (live?.unlocked && live.agent_pub_key) {
+                    setSignInIntent({ autoLink: true });
+                    nav("/identity/");
+                  }
+                } catch {
+                  // Vault not reachable: the Identity page still offers it.
+                }
+              }
 
               // Migration race: Vault confirms the link but the new DNA's
               // DHT doesn't have an entry yet. Recreate it in the

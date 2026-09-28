@@ -153,6 +153,9 @@ pub struct AppState {
     pub data_dir: PathBuf,
     /// The app data dir: holds profiles.json and the profiles/ folder.
     pub device_root: PathBuf,
+    /// This launch came from "Open as this identity" (the page starts the
+    /// sign-in for a profile that is not linked yet; the window refocuses).
+    pub relaunched_into_identity: std::sync::atomic::AtomicBool,
     pub conductor_handle: Mutex<Option<ConductorHandle>>,
     pub conductor_status: Mutex<ConductorStatus>,
     pub agent_pub_key: Mutex<Option<String>>,
@@ -229,6 +232,7 @@ impl AppState {
         Self {
             data_dir,
             device_root,
+            relaunched_into_identity: std::sync::atomic::AtomicBool::new(false),
             conductor_handle: Mutex::new(None),
             conductor_status: Mutex::new(ConductorStatus::Stopped),
             agent_pub_key: Mutex::new(None),
@@ -460,6 +464,8 @@ pub struct AppStatus {
     pub ready: bool,
     pub agent_pub_key: Option<String>,
     pub conductor_status: ConductorStatus,
+    /// This launch was asked for by "Open as this identity".
+    pub relaunched_into_identity: bool,
 }
 
 #[tauri::command]
@@ -474,6 +480,9 @@ pub fn get_app_status(state: tauri::State<'_, std::sync::Arc<AppState>>) -> AppS
         ready,
         agent_pub_key: agent_key,
         conductor_status: status,
+        relaunched_into_identity: state
+            .relaunched_into_identity
+            .load(std::sync::atomic::Ordering::Relaxed),
     }
 }
 
