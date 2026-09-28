@@ -17,6 +17,14 @@ ProofPoll is built on **[Flowsta Vault](https://flowsta.com/vault/)**, which kee
 
 ## What's New
 
+### v0.4.0 — 2026-09-28
+- **One ProofPoll per Flowsta identity on the same computer.** Each identity now gets its own profile (key store, conductor, polls, votes, drafts). Existing installs move into a profile on first launch, nothing to do. When your Vault holds a different identity, the banner offers **Open as this identity**: ProofPoll restarts into that identity's own profile, comes back to the front, and starts the sign-in for you - only the approval in the Vault is left. Moving an install's history to another identity is a deliberate two-step on the Identity page (disconnect, then connect), never a banner button.
+- **Finds the right Vault.** ProofPoll probes all three Vault ports at once, ignores a Vault run by another user of the same computer, and prefers the unlocked one. The Vault banner appears only when the Vault is unlocked as a different identity - never for a locked, reset or freshly restored Vault.
+- **Nothing outlives the app.** Quitting or restarting stops the conductor and key store; a launch stops any left behind by an earlier crash or an install over a running copy, and refuses to start if another conductor already holds the port instead of quietly using it.
+- **macOS: profiles work for every username.** The key store socket moves to a short runtime path when the profile path would exceed the system limit.
+- **Honest loading states.** A fresh install shows "Syncing polls from the network - a first sync usually takes about five minutes" instead of "No polls yet"; poll, drafts and votes loading show the spinner.
+- **SDK `@flowsta/holochain` 3.4.0** (ranked Vault resolution, `expected_identity` on signing calls, `reconnectIdentity`). The build type-checks before it bundles.
+
 ### v0.3.1 — 2026-08-05
 - **SDK 3.0.0 under the hood.** The backup-status check on the Identity page now tells "no backup yet" apart from "couldn't reach your Vault", and backup writes carry the SDK's identity binding and guards alongside the app's own gates.
 
