@@ -15,10 +15,9 @@
 //!     where your app-specific hApp bundle names are configured
 
 use crate::lair;
-use crate::process_ext::CommandExt as _;
+use crate::process_ext::{SidecarChild, SidecarCommand};
 use crate::sidecar::sidecar_path;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Stdio};
 use tauri::Emitter;
 
 /// Admin WebSocket port for the local Holochain conductor.
@@ -101,8 +100,8 @@ fn auth_material() -> Option<&'static str> {
 
 /// Handle to a running conductor + lair-keystore pair.
 pub struct ConductorHandle {
-    pub lair_child: Child,
-    pub conductor_child: Child,
+    pub lair_child: SidecarChild,
+    pub conductor_child: SidecarChild,
     pub admin_port: u16,
     pub app_port: u16,
     pub conductor_pid: u32,
@@ -209,7 +208,7 @@ fn start_conductor_process(
     config_path: &Path,
     conductor_dir: &Path,
     passphrase: &str,
-) -> Result<Child, String> {
+) -> Result<SidecarChild, String> {
     log::info!("Starting holochain conductor...");
 
     let stdout_path = conductor_dir.join("holochain-stdout.log");
@@ -220,15 +219,13 @@ fn start_conductor_process(
     let stderr_file = std::fs::File::create(&stderr_path)
         .map_err(|e| format!("Failed to create conductor stderr log: {}", e))?;
 
-    let mut child = std::process::Command::new(sidecar_path("proofpoll-holochain"))
+    let mut child = SidecarCommand::new(sidecar_path("proofpoll-holochain"))
         .arg("-c")
         .arg(config_path)
         .arg("--piped")
-        .stdin(Stdio::piped())
         .stdout(stdout_file)
         .stderr(stderr_file)
-        .tie_to_parent()
-        .spawn_hidden()
+        .spawn()
         .map_err(|e| format!("Failed to spawn holochain conductor: {}", e))?;
 
     if let Some(mut stdin) = child.stdin.take() {
@@ -274,7 +271,7 @@ fn read_conductor_logs(conductor_dir: &Path) -> String {
 async fn wait_for_admin_ws(
     port: u16,
     timeout_secs: u64,
-    conductor_child: &mut Child,
+    conductor_child: &mut SidecarChild,
     conductor_dir: &Path,
 ) -> Result<(), String> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
@@ -705,7 +702,7 @@ mod tests {
 
         let (mut lair_child, url) =
             crate::lair::start_lair_process(&lair_dir, passphrase).expect("lair start");
-        let mut conductor_child: Option<Child> = None;
+        let mut conductor_child: Option<SidecarChild> = None;
 
         let result = async {
             crate::lair::wait_for_lair_socket(&url, 15).await?;
@@ -820,7 +817,7 @@ mod tests {
 
         let (mut lair_child, url) =
             crate::lair::start_lair_process(&lair_dir, passphrase).expect("lair start");
-        let mut conductor_child: Option<Child> = None;
+        let mut conductor_child: Option<SidecarChild> = None;
 
         let result = async {
             crate::lair::wait_for_lair_socket(&url, 15).await?;
