@@ -17,6 +17,9 @@ ProofPoll is built on **[Flowsta Vault](https://flowsta.com/vault/)**, which kee
 
 ## What's New
 
+### v0.4.2 — 2026-09-30
+- **Windows: the bundled key store and conductor are found by their full file names**, so the app starts as before, with no terminal window.
+
 ### v0.4.1 — 2026-09-30
 - **Windows: no terminal windows.** The key store and the conductor start with their console window already hidden, so nothing flashes on launch or when ProofPoll restarts into another identity.
 - **Works with Flowsta Vault 1.5.0's identities.** SDK `@flowsta/holochain` 3.5.0: when a computer holds more than one Vault, ProofPoll picks the one holding your identity, and link checks name the identity they are for.
