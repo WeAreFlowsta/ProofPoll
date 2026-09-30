@@ -35,6 +35,10 @@ pub(crate) enum Parent {
     OtherProofPoll,
     /// The parent is some live process that is not ProofPoll.
     Foreign,
+    /// The parent is itself one of our sidecars: a thread of a running
+    /// sidecar (Linux lists every thread as a process) or its own child.
+    /// Part of something alive - never stopped.
+    Sidecar,
 }
 
 /// The process name without a Windows extension, lower-case.
@@ -99,10 +103,16 @@ pub fn reap_orphaned_sidecars() -> u32 {
         if !is_sidecar_name(&name) {
             continue;
         }
+        // Linux lists each thread as a process; stopping a thread's id stops
+        // its whole process, which may be a live sidecar of another app copy.
+        if proc_.thread_kind().is_some() {
+            continue;
+        }
         let parent = match proc_.parent() {
             None => Parent::Gone,
             Some(pp) if pp == me => Parent::Us,
             Some(pp) if !procs.contains_key(&pp) => Parent::Gone,
+            Some(pp) if procs.get(&pp).map(|q| is_sidecar_name(&full_name(q))).unwrap_or(false) => Parent::Sidecar,
             Some(pp) if is_proofpoll(&pp) => Parent::OtherProofPoll,
             Some(_) => Parent::Foreign,
         };
@@ -153,6 +163,7 @@ mod tests {
         assert!(should_reap("proofpoll-holochain", Parent::Gone));
         assert!(should_reap("proofpoll-lair-keystore", Parent::Foreign), "adopted by a subreaper = its app is gone");
         assert!(!should_reap("proofpoll-holochain", Parent::Us));
+        assert!(!should_reap("proofpoll-holochain", Parent::Sidecar), "a thread of a live sidecar is part of it");
         assert!(!should_reap("proofpoll-holochain", Parent::OtherProofPoll), "a second running copy keeps its children");
         assert!(!should_reap("holochain", Parent::Gone), "never anything but our own sidecars");
     }
