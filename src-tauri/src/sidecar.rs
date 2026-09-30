@@ -12,7 +12,7 @@ use std::path::PathBuf;
 /// - **Dev (`cargo tauri dev`)**: looks for `<manifest>/binaries/<name>-<triple>`.
 ///   This mirrors how Tauri resolves externalBin in dev mode but uses a
 ///   prefix match so we don't have to hard-code the target triple.
-/// - **Release**: returns `<exe_dir>/<name>` — Tauri's debian/macOS
+/// - **Release**: returns `<exe_dir>/<name>` (`<name>.exe` on Windows) — Tauri's bundlers
 ///   bundlers install externalBin contents next to the main executable.
 ///   Falls back to a bare name (PATH lookup) if not found there.
 pub fn sidecar_path(name: &str) -> PathBuf {
@@ -37,7 +37,11 @@ pub fn sidecar_path(name: &str) -> PathBuf {
     {
         if let Ok(exe) = std::env::current_exe() {
             if let Some(parent) = exe.parent() {
-                let candidate = parent.join(name);
+                let candidate = if cfg!(target_os = "windows") {
+                    parent.join(format!("{}.exe", name))
+                } else {
+                    parent.join(name)
+                };
                 if candidate.exists() {
                     return candidate;
                 }

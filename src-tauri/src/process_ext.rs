@@ -198,6 +198,33 @@ pub fn quote_windows_arg(arg: &str) -> String {
     out
 }
 
+/// The file `CreateProcessW` should start: it takes the program name
+/// literally (no search, no `.exe` added), where `std::process::Command`
+/// forgave a bare name. A name without an extension gets `.exe`; a relative
+/// one is looked up next to the app's own executable first.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub fn windows_program_path(
+    program: &std::path::Path,
+    exe_dir: Option<&std::path::Path>,
+    exists: impl Fn(&std::path::Path) -> bool,
+) -> PathBuf {
+    let mut p = program.to_path_buf();
+    if p.extension().is_none() {
+        let mut name = p.into_os_string();
+        name.push(".exe");
+        p = PathBuf::from(name);
+    }
+    if p.is_relative() {
+        if let Some(dir) = exe_dir {
+            let beside = dir.join(&p);
+            if exists(&beside) {
+                return beside;
+            }
+        }
+    }
+    p
+}
+
 /// Terminate a process by PID, platform-correct. `kill` does not exist on
 /// Windows - calling it there is a silent no-op that left conductor + lair
 /// running (and their databases locked) straight through resets and key
@@ -400,13 +427,15 @@ mod win_spawn {
         };
 
         // Command line: quoted program + quoted args.
-        let mut line = super::quote_windows_arg(&cmd.program.to_string_lossy());
+        let exe_dir = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.to_path_buf()));
+        let program = super::windows_program_path(&cmd.program, exe_dir.as_deref(), |p| p.exists());
+        let mut line = super::quote_windows_arg(&program.to_string_lossy());
         for a in &cmd.args {
             line.push(' ');
             line.push_str(&super::quote_windows_arg(&a.to_string_lossy()));
         }
         let mut line_w = wide(std::ffi::OsStr::new(&line));
-        let program_w = wide(cmd.program.as_os_str());
+        let program_w = wide(program.as_os_str());
         let cwd_w = cmd.cwd.as_ref().map(|d| wide(d.as_os_str()));
 
         let mut si: STARTUPINFOW = unsafe { std::mem::zeroed() };
@@ -977,6 +1006,34 @@ mod tests {
 
     /// The rules a Windows child's argv parser applies, so a config path
     /// under "C:\Users\Chris Smith\ProofPoll\..." arrives intact.
+    #[test]
+    fn windows_program_path_adds_exe_and_looks_beside_the_app() {
+        use super::windows_program_path;
+        use std::path::{Path, PathBuf};
+        let dir = Path::new("/app");
+        let there = |p: &Path| p == Path::new("/app/proofpoll-lair-keystore.exe");
+        // A bare sidecar name: .exe added, found beside the app.
+        assert_eq!(
+            windows_program_path(Path::new("proofpoll-lair-keystore"), Some(dir), there),
+            PathBuf::from("/app/proofpoll-lair-keystore.exe")
+        );
+        // A full path with .exe is used as is.
+        assert_eq!(
+            windows_program_path(Path::new("/x/proofpoll-holochain.exe"), Some(dir), there),
+            PathBuf::from("/x/proofpoll-holochain.exe")
+        );
+        // A full path without it gets .exe.
+        assert_eq!(
+            windows_program_path(Path::new("/x/proofpoll-holochain"), Some(dir), |_| false),
+            PathBuf::from("/x/proofpoll-holochain.exe")
+        );
+        // Not beside the app: the name with .exe, for the caller's error.
+        assert_eq!(
+            windows_program_path(Path::new("proofpoll-holochain"), Some(dir), |_| false),
+            PathBuf::from("proofpoll-holochain.exe")
+        );
+    }
+
     #[test]
     fn windows_quoting_rules() {
         assert_eq!(quote_windows_arg("--piped"), "--piped");
