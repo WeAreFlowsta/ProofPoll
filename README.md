@@ -17,6 +17,11 @@ ProofPoll is built on **[Flowsta Vault](https://flowsta.com/vault/)**, which kee
 
 ## What's New
 
+### v0.4.1 — 2026-09-30
+- **Windows: no terminal windows.** The key store and the conductor start with their console window already hidden, so nothing flashes on launch or when ProofPoll restarts into another identity.
+- **Works with Flowsta Vault 1.5.0's identities.** SDK `@flowsta/holochain` 3.5.0: when a computer holds more than one Vault, ProofPoll picks the one holding your identity, and link checks name the identity they are for.
+- **The startup cleanup leaves other running copies alone.** Leftover key stores and conductors from a crash are still stopped at launch; those belonging to another running copy are not.
+
 ### v0.4.0 — 2026-09-28
 - **One ProofPoll per Flowsta identity on the same computer.** Each identity now gets its own profile (key store, conductor, polls, votes, drafts). Existing installs move into a profile on first launch, nothing to do. When your Vault holds a different identity, the banner offers **Open as this identity**: ProofPoll restarts into that identity's own profile, comes back to the front, and starts the sign-in for you - only the approval in the Vault is left. Moving an install's history to another identity is a deliberate two-step on the Identity page (disconnect, then connect), never a banner button.
 - **Finds the right Vault.** ProofPoll probes all three Vault ports at once, ignores a Vault run by another user of the same computer, and prefers the unlocked one. The Vault banner appears only when the Vault is unlocked as a different identity - never for a locked, reset or freshly restored Vault.
