@@ -1,8 +1,8 @@
 //! Identity profiles: one ProofPoll agent, key store, conductor and set of
 //! link files per Flowsta identity that has connected to this install.
 //!
-//! Layout (Phase 2 of the identity switcher, build-docs
-//! current/VAULT_1_4_0_PHASE2_BUILD.md step 8):
+//! Layout (Phase 2 of the identity switcher, the 1.4.0 phase 2 build
+//! notes, step 8):
 //!
 //!   <app data dir>/profiles.json                 device-level index
 //!   <app data dir>/profiles/<folder>/             one profile:

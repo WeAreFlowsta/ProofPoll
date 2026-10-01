@@ -797,7 +797,7 @@ mod tests {
     }
 
     /// Upgrade-path variant: a v1.2 app exists first (conductor-born agent,
-    /// the pre-escrow world), v1.3 inherits that agent - Eric's runtime if
+    /// the pre-escrow world), v1.3 inherits that agent - the first runtime if
     /// the beta went over a 0.2.x install. Local-only; run with --ignored.
     #[tokio::test(flavor = "multi_thread")]
     #[ignore = "spins the full local Holochain stack"]

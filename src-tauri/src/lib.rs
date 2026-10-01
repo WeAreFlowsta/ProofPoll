@@ -306,7 +306,7 @@ pub fn run() {
             commands::get_migration_status,
             commands::abandon_pending_votes,
             // ── CAL-compliant backup + reinstall recovery ──────────
-            // See build-docs/reference/LAIR_RECOVERY_AND_CAL_COMPLIANCE.md
+            // See the lair recovery notes
             commands::decode_record_for_export,
             commands::build_canonical_backup,
             // ── Agent-seed escrow: adopt / re-key (authorship survives

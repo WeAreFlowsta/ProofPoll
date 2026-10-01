@@ -2,7 +2,7 @@
 // passed through sessionStorage rather than URL query params because the
 // Qwik static adapter strips ?foo=bar in our Tauri setup. Hash works for
 // the poll route but can't nest (you can't put a hash inside a hash), so
-// it's not usable here. See feedback_qwik_static_query_params memory.
+// it's not usable here.
 //
 // Callers set the intent then nav("/identity/"); the identity page reads
 // + clears the intent in its useVisibleTask$.

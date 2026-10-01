@@ -54,7 +54,7 @@ export default component$(() => {
   const linkState = useSignal<LinkState>("unlinked");
   // "Open as this identity" relaunched us into a profile that may not be
   // signed in yet. Start the sign-in once, so the person is left with only
-  // the approval in the Vault (Eric, Windows drive 2026-09-28).
+  // the approval in the Vault (a Windows drive, 2026-09-28).
   const autoSignInDone = useSignal(false);
   useContextProvider(linkedContext, linked);
   useContextProvider(linkStateContext, linkState);
@@ -99,7 +99,7 @@ export default component$(() => {
       try {
         const { startAutoBackup } = await import("@flowsta/holochain");
         // Use the canonical-shape payload (v0.2.0+ — see
-        // build-docs/archive/2026-06/GENERIC_BACKUP_PLAN.md). The Rust side queries
+        // the backup plan notes). The Rust side queries
         // the user's polls and votes, builds the canonical payload, returns
         // it as JSON. Vault recognises the shape and renders per-entry-type
         // counts in the UI plus inlines human_readable views in CAL §4.2.1
