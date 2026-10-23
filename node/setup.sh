@@ -18,7 +18,7 @@
 #      sudo bash setup.sh
 #
 #   3. Copy the hApp file to the server:
-#      gcloud compute scp ../src-tauri/resources/proofpoll_v1_3_happ.happ \
+#      gcloud compute scp --tunnel-through-iap ../src-tauri/resources/proofpoll_v1_3_happ.happ \
 #        proofpoll-node:~/node/ --zone=us-central1-a
 #
 #   4. Install the hApp:
