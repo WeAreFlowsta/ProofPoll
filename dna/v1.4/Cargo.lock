@@ -685,18 +685,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13bee6c73da26345c729282832b60b0363cf3dd9f4bfd81d8551b7a1c889a113"
 
 [[package]]
-name = "polls_coordinator_v1_3"
-version = "0.3.0"
+name = "polls_coordinator_v1_4"
+version = "0.4.0"
 dependencies = [
  "hdk",
  "holochain_serialized_bytes",
- "polls_integrity_v1_3",
+ "polls_integrity_v1_4",
  "serde",
 ]
 
 [[package]]
-name = "polls_integrity_v1_3"
-version = "0.3.0"
+name = "polls_integrity_v1_4"
+version = "0.4.0"
 dependencies = [
  "hdi",
  "holochain_serialized_bytes",

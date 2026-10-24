@@ -1,6 +1,6 @@
 [package]
-name = "polls_coordinator_v1_3"
-version = "0.3.0"
+name = "polls_coordinator_v1_4"
+version = "0.4.0"
 edition = "2021"
 
 [lib]
@@ -11,4 +11,4 @@ name = "polls_coordinator"
 hdk = { workspace = true }
 serde = { workspace = true }
 holochain_serialized_bytes = { workspace = true }
-polls_integrity = { path = "../integrity", package = "polls_integrity_v1_3" }
+polls_integrity = { path = "../integrity", package = "polls_integrity_v1_4" }
