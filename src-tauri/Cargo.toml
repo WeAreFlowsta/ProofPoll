@@ -46,6 +46,10 @@ holochain_integrity_types = "=0.6.1"
 holochain_client_07 = { package = "holochain_client", version = "=0.9.1", default-features = false }
 holochain_types_07 = { package = "holochain_types", version = "=0.7.1" }
 holochain_integrity_types_07 = { package = "holochain_integrity_types", version = "=0.7.1" }
+holochain_state_types_07 = { package = "holochain_state_types", version = "=0.7.1" }
+# The 0.7 line's lair client: a conductor accepts only a lair of its own version,
+# so the transition release runs two lairs and talks to each with its own client.
+lair_keystore_api_07 = { package = "lair_keystore_api", version = "=0.7.1" }
 
 # Error handling
 thiserror = "1.0"

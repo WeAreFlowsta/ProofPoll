@@ -278,8 +278,7 @@ impl AdoptSeams for AppSeams {
             .map_err(|e| format!("stored link hash unparseable: {:?}", e))?;
         let client = self.state.app_client.lock().await;
         let client = client.as_ref().ok_or("conductor not ready")?;
-        let payload =
-            holochain_types::prelude::ExternIO::encode(hash).map_err(|e| e.to_string())?;
+        let payload = crate::hc::encode(&hash)?;
         crate::commands::call_zome(client, crate::commands::AGENT_LINKING_ZOME, "revoke_link", payload)
             .await?;
         Ok(())

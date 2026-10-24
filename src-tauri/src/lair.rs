@@ -26,6 +26,18 @@ pub fn start_lair_process(
     lair_dir: &Path,
     passphrase: &str,
 ) -> Result<(SidecarChild, String), String> {
+    start_lair_process_with(lair_dir, passphrase, "proofpoll-lair-keystore")
+}
+
+/// Start a lair-keystore process from a named sidecar binary. The transition
+/// release runs two: `proofpoll-lair-keystore` (0.6.3, for the 0.6.1
+/// conductor) and `proofpoll-lair-keystore-07` (0.7.1, for the 0.7.1
+/// conductor), because a conductor accepts only a lair of its own version.
+pub fn start_lair_process_with(
+    lair_dir: &Path,
+    passphrase: &str,
+    binary: &str,
+) -> Result<(SidecarChild, String), String> {
     std::fs::create_dir_all(lair_dir)
         .map_err(|e| format!("Failed to create lair directory: {}", e))?;
 
@@ -63,7 +75,7 @@ pub fn start_lair_process(
         // Piped handles that nothing ever drains are functionally /dev/null.
         let init_stdout = open_log_file(lair_dir, "lair-init-stdout.log")?;
         let init_stderr = open_log_file(lair_dir, "lair-init-stderr.log")?;
-        let mut child = SidecarCommand::new(sidecar_path("proofpoll-lair-keystore"))
+        let mut child = SidecarCommand::new(sidecar_path(binary))
             .arg("init")
             .arg("--piped")
             .current_dir(lair_dir)
@@ -128,7 +140,7 @@ pub fn start_lair_process(
     log::info!("Starting lair-keystore server...");
     let server_stdout = open_log_file(lair_dir, "lair-server-stdout.log")?;
     let server_stderr = open_log_file(lair_dir, "lair-server-stderr.log")?;
-    let mut child = SidecarCommand::new(sidecar_path("proofpoll-lair-keystore"))
+    let mut child = SidecarCommand::new(sidecar_path(binary))
         .arg("server")
         .arg("--piped")
         .current_dir(lair_dir)
@@ -657,4 +669,78 @@ mod socket_tests {
         assert!(!crate::profiles::in_root_socket_fits(&root));
         assert!(crate::profiles::lair_socket_path_fits(&root), "the short socket carries it");
     }
+}
+
+
+// ── The 0.7 lair (lair_keystore_api 0.7.1) ────────────────────────────
+
+/// Connect to a lair 0.7.1 server with the 0.7.1 client.
+pub async fn connect_to_lair_07(
+    connection_url: &str,
+    passphrase: &str,
+) -> Result<lair_keystore_api_07::prelude::LairClient, String> {
+    let url = lair_keystore_api_07::dependencies::url::Url::parse(connection_url)
+        .map_err(|e| format!("Invalid lair connection URL: {}", e))?;
+    let passphrase_array: lair_keystore_api_07::prelude::SharedLockedArray = Arc::new(std::sync::Mutex::new(
+        lair_keystore_api_07::dependencies::sodoken::LockedArray::from(
+            passphrase.as_bytes().to_vec(),
+        ),
+    ));
+    lair_keystore_api_07::ipc_keystore_connect(url, passphrase_array)
+        .await
+        .map_err(|e| format!("Failed to connect to lair (0.7): {}", e))
+}
+
+/// Import the same seed into the 0.7 lair under the same tag (so the agent
+/// key is identical on both lines). Returns the Ed25519 public key.
+pub async fn import_seed_to_lair_07(
+    client: &lair_keystore_api_07::prelude::LairClient,
+    seed_bytes: &[u8; 32],
+    tag: &str,
+) -> Result<[u8; 32], String> {
+    use lair_keystore_api_07::dependencies::sodoken;
+    use lair_keystore_api_07::prelude::{BinDataSized, LairEntryInfo};
+    if let Ok(LairEntryInfo::Seed { seed_info, .. }) = client.get_entry(tag.into()).await {
+        log::info!("Seed '{}' already exists in lair (0.7), reusing", tag);
+        return Ok(*seed_info.ed25519_pub_key.0);
+    }
+    let helper = match client.new_seed("_import_helper".into(), None, false).await {
+        Ok(h) => h,
+        Err(_) => match client.get_entry("_import_helper".into()).await {
+            Ok(LairEntryInfo::Seed { seed_info, .. }) => seed_info,
+            _ => return Err("Failed to create or fetch _import_helper seed (0.7)".into()),
+        },
+    };
+    let mut sender_pub = [0u8; sodoken::crypto_box::XSALSA_PUBLICKEYBYTES];
+    let mut sender_sec =
+        sodoken::SizedLockedArray::<{ sodoken::crypto_box::XSALSA_SECRETKEYBYTES }>::new()
+            .map_err(|e| e.to_string())?;
+    sodoken::crypto_box::xsalsa_keypair(&mut sender_pub, &mut *sender_sec.lock())
+        .map_err(|e| e.to_string())?;
+    let mut nonce = [0u8; sodoken::crypto_box::XSALSA_NONCEBYTES];
+    sodoken::random::randombytes_buf(&mut nonce).map_err(|e| e.to_string())?;
+    let recipient_pub_bytes: &[u8; 32] = &*helper.x25519_pub_key.0;
+    let mut cipher = vec![0u8; seed_bytes.len() + sodoken::crypto_box::XSALSA_MACBYTES];
+    sodoken::crypto_box::xsalsa_easy(
+        &mut cipher,
+        seed_bytes,
+        &nonce,
+        recipient_pub_bytes,
+        &*sender_sec.lock(),
+    )
+    .map_err(|e| e.to_string())?;
+    let sender_pub_key = BinDataSized(Arc::new(sender_pub));
+    let info = client
+        .import_seed(
+            sender_pub_key,
+            helper.x25519_pub_key,
+            None,
+            nonce,
+            cipher.into(),
+            tag.into(),
+            false,
+        )
+        .await
+        .map_err(|e| format!("seed import into lair (0.7) failed: {}", e))?;
+    Ok(*info.ed25519_pub_key.0)
 }

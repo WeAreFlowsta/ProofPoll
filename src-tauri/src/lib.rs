@@ -195,15 +195,17 @@ pub fn run() {
                             }
                         }
 
-                        let admin_port = result.handle.admin_port;
-                        let app_port = result.handle.app_port;
+                        let admin_port = result.handle.admin_port_07;
+                        let app_port = result.handle.app_port_07;
                         let conductor_pid = result.handle.conductor_pid;
+                        let conductor_pid_07 = result.handle.conductor_pid_07;
                         let needs_migration = result.needs_migration;
-                        let v1_2_available = result.app_client_v1_2.is_some();
+                        let v1_3_available = result.app_client_v1_3.is_some();
 
                         *startup_state.conductor_handle.lock().unwrap() = Some(result.handle);
                         *startup_state.agent_pub_key.lock().unwrap() = Some(result.agent_key);
                         *startup_state.app_client.lock().await = Some(result.app_client);
+                        *startup_state.app_client_v1_3.lock().await = result.app_client_v1_3;
                         *startup_state.app_client_v1_2.lock().await = result.app_client_v1_2;
                         *startup_state.app_client_v1_1.lock().await = result.app_client_v1_1;
                         *startup_state.app_client_v1_0.lock().await = result.app_client_v1_0;
@@ -215,6 +217,11 @@ pub fn run() {
                         conductor::spawn_health_monitor(
                             conductor_pid,
                             startup_state.clone(),
+                            monitor_handle.clone(),
+                        );
+                        conductor::spawn_health_monitor(
+                            conductor_pid_07,
+                            startup_state.clone(),
                             monitor_handle,
                         );
 
@@ -222,7 +229,7 @@ pub fn run() {
                         // migration hasn't completed yet.
                         let should_migrate = needs_migration || {
                             let ms = startup_state.migration_state.lock().await;
-                            v1_2_available
+                            v1_3_available
                                 && ms.status != migration::MigrationStatus::Complete
                         };
                         if should_migrate {

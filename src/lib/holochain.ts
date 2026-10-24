@@ -39,14 +39,14 @@ export interface PollListItem {
   poll: Poll;
   author: string;
   /** Which DHT this poll lives on. Pass back to castVote and getPollVotes. */
-  dna_version: "1.0" | "1.1" | "1.2" | "1.3";
+  dna_version: "1.0" | "1.1" | "1.2" | "1.3" | "1.4";
 }
 
 export interface PollDetail {
   poll: Poll;
   author: string;
   /** Which DHT this poll lives on. Pass back to castVote and getPollVotes. */
-  dna_version: "1.0" | "1.1" | "1.2" | "1.3";
+  dna_version: "1.0" | "1.1" | "1.2" | "1.3" | "1.4";
 }
 
 export interface VoteData {
@@ -106,7 +106,7 @@ export async function deletePoll(actionHash: string): Promise<string> {
 export async function castVote(
   pollActionHash: string,
   optionIndex: number,
-  dnaVersion: "1.0" | "1.1" | "1.2" | "1.3",
+  dnaVersion: "1.0" | "1.1" | "1.2" | "1.3" | "1.4",
   pollType?: PollType,
 ): Promise<string> {
   return backedUp(
@@ -121,7 +121,7 @@ export async function castVote(
 
 export async function getPollVotes(
   pollActionHash: string,
-  dnaVersion: "1.0" | "1.1" | "1.2" | "1.3",
+  dnaVersion: "1.0" | "1.1" | "1.2" | "1.3" | "1.4",
 ): Promise<VoteData[]> {
   return invoke<VoteData[]>("get_poll_votes", {
     pollActionHash,
