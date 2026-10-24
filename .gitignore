@@ -49,3 +49,6 @@ server/
 .vercel/
 .netlify/
 dna/v1.3/target/
+
+# DNA build trees (the packed bundles under dna/*/workdir are committed)
+dna/*/target/

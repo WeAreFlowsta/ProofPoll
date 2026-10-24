@@ -67,7 +67,7 @@ This README focuses on the *fork mechanics* — what to rename, what to keep, wh
 
 - **Frontend**: Qwik, TypeScript, Tailwind CSS
 - **Backend**: Tauri v2 (Rust), Holochain 0.6.1
-- **DNA**: Rust (hdi 0.7.0, hdk 0.6.0 — non-breaking on the 0.6.1 conductor)
+- **DNA**: Rust (v1.0 to v1.3: hdi 0.7.0 / hdk 0.6.0 on the 0.6.1 conductor; v1.4: hdi 0.8.1 / hdk 0.7.1 on 0.7.1, Rust 1.94+)
 - **Identity**: Flowsta agent linking via `flowsta-agent-linking` crate
 - **Encryption**: lair xsalsa20poly1305 via `crypto_box_xsalsa_by_sign_pub_key`
 
@@ -107,8 +107,16 @@ cargo tauri dev
 | v1.1 | `proofpoll-network-v1.1` | + Community flagging, migration support |
 | v1.2 | `proofpoll-network-v1.2` | + Public/anonymous poll types, voter profiles |
 | v1.3 | `proofpoll-network-v1.3` | + Encrypted private data (vote rationale, draft polls) |
+| v1.4 | `proofpoll-network-v1.4` | Holochain 0.7.1 generation of v1.3 (same types; validation on the 0.7 action model; `MigratedPoll` carries the original author, time and signed action). Ships with ProofPoll 0.5.0 |
 
-All versions are installed side-by-side during migration. All new reads and writes go to v1.3.
+All versions are installed side-by-side during migration. All new reads and writes go to the newest version (v1.4 from ProofPoll 0.5.0; v1.0 to v1.3 run on a Holochain 0.6.1 conductor, v1.4 on 0.7.1, both inside the app during the transition).
+
+Bundle checksums (sha256 of the committed `.happ`; a rebuilt bundle is a different network):
+
+| Version | DNA hash | sha256 |
+|---|---|---|
+| v1.3 | | `7cac687ab376a5dbdad453a8b77768edec30c5bd656adb57f7dad5ad69eeb197` |
+| v1.4 | `uhC0kKG2EJXoFSMi9q1VqXcZXSZgD1F2iXf9jeA9XkbEKBXIEFSLT` | `043b84285dbb695804dc57b4e40198f4014bd1a5f67b71888fbe8e0bb1237e3a` |
 
 ## Encrypted Private Data (v1.3)
 
@@ -208,7 +216,7 @@ Then update these Rust constants:
 
 Update build scripts (`dna/*/build.sh`, `build-all.sh`) — change hApp filenames.
 
-**Committed build artifacts**: the `.wasm`/`.dna`/`.happ` files under `dna/v1.3/workdir/` and `src-tauri/resources/` are ProofPoll's canonical builds, committed on purpose - rebuilding a DNA changes its hash, and a changed hash is a different network, so ProofPoll itself must never rebuild them casually. As a forker the opposite applies: **delete them and build your own** (`build-all.sh`) so your app gets its own DNA hash and network.
+**Committed build artifacts**: the `.wasm`/`.dna`/`.happ` files under `dna/v1.*/workdir/` (copied into `src-tauri/resources/` at build time) are ProofPoll's canonical builds, committed on purpose - rebuilding a DNA changes its hash, and a changed hash is a different network, so ProofPoll itself must never rebuild them casually. As a forker the opposite applies: **delete them and build your own** (`build-all.sh`) so your app gets its own DNA hash and network.
 
 **Critical**: The `network_seed` in `dna.yaml` determines which DHT your app joins. Two apps with the same network seed share a DHT. Always use a unique seed.
 
