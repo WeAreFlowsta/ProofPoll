@@ -25,6 +25,7 @@ mod commands;
 mod conductor;
 mod crypto;
 mod dna;
+mod hc;
 mod instance_guard;
 mod device_seed;
 mod lair;
