@@ -39,6 +39,14 @@ holochain_types = "=0.6.1"
 holochain_state_types = "=0.6.1"
 holochain_integrity_types = "=0.6.1"
 
+# The Holochain 0.7 line, beside the 0.6 line, for the transition release:
+# the 0.6 crates read v1.0-v1.3 cells on the 0.6.1 conductor, the 0.7 crates
+# read v1.4 on the 0.7.1 conductor. A Record from one line does not decode
+# with the other; our own entry structs are msgpack and cross freely.
+holochain_client_07 = { package = "holochain_client", version = "=0.9.1", default-features = false }
+holochain_types_07 = { package = "holochain_types", version = "=0.7.1" }
+holochain_integrity_types_07 = { package = "holochain_integrity_types", version = "=0.7.1" }
+
 # Error handling
 thiserror = "1.0"
 
