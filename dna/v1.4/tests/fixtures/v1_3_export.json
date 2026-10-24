@@ -1,0 +1,34 @@
+{
+  "dna": "proofpoll_v1_3",
+  "network_seed": "proofpoll-network-v1.3",
+  "exported_at": 1761302400,
+  "polls": [
+    {
+      "old_action_hash": "uhCkkoNIul3ExxPstetvdmLMTC0HM0uZgrab_h1suU4Fnsw02Idxa",
+      "title": "Where should the next meetup be?",
+      "description": "Pick the city for the autumn meetup.",
+      "options": ["Lisbon", "Berlin", "Online"],
+      "created_at": 1748700000,
+      "closes_at": null,
+      "poll_type": "Anonymous"
+    },
+    {
+      "old_action_hash": "uhCkkkckoI4PxJtWMHBZlxfea-dufrNFS1AKUKqN4D2NN6ExR0vni",
+      "title": "Release day",
+      "description": "Which weekday works for releases?",
+      "options": ["Tuesday", "Thursday"],
+      "created_at": 1752000000,
+      "closes_at": 1900000000,
+      "poll_type": "Public"
+    },
+    {
+      "old_action_hash": "uhCkk6KQaLRG5t7LKwnMKvWOv7WiSLq4T_eXgAWSQRRdBBxFkB4dm",
+      "title": "Logo colour",
+      "description": "",
+      "options": ["Teal", "Amber", "Slate", "Plum"],
+      "created_at": 1756000000,
+      "closes_at": null,
+      "poll_type": "Anonymous"
+    }
+  ]
+}
