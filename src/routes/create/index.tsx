@@ -353,7 +353,7 @@ export default component$(() => {
                   : "bg-gray-900 border-gray-700 text-gray-400 hover:border-gray-500"
               }`}
             >
-              Anonymous
+              Names hidden
             </button>
             <button
               type="button"
@@ -369,8 +369,8 @@ export default component$(() => {
           </div>
           <p class="text-xs text-gray-500 mt-1.5">
             {pollType.value === "Anonymous"
-              ? "Votes are counted but voter identities are not shown."
-              : "Voters' display names are shown alongside their vote."}
+              ? "Votes are counted; names are not shown."
+              : "Voters' names are shown alongside their vote."}
           </p>
         </div>
 
