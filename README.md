@@ -17,6 +17,17 @@ ProofPoll is built on **[Flowsta Vault](https://flowsta.com/vault/)**, which kee
 
 ## What's New
 
+### v0.5.0 — 2026-10-25
+- **Holochain 0.7.1.** ProofPoll runs on Holochain 0.7.1, and keeps the 0.6.1 line running beside it for a while: polls and votes from before this update stay readable and votable, new polls go on the new network, and your own polls and votes carry over with their original author and time. People still on 0.4.2 keep seeing the polls from before the update and see new ones once they update.
+- **Your other devices count as you, on every device.** Polls and votes cast by your other installs read as yours on a new device too, including installs from before the update.
+- **Identity page.** Your picture and name come from the Vault that holds your identity, also when several Vaults run on one computer. The app version is shown. The backup line says what happened (saved, nothing to back up yet, or why it was skipped), and the reason goes to the log.
+- **macOS: a fresh install starts.** The two key stores no longer share a socket on long profile paths.
+- **Only this ProofPoll can talk to its conductors.** Each run makes a private origin for its conductor connections instead of accepting any local page.
+- **Disconnecting checks the Vault.** A disconnect is refused when the Vault holds a different identity than the one being disconnected.
+- **"Names hidden" polls** (was "Anonymous"): votes are counted; names are not shown.
+- **Logs keep their start.** The log rotates at 2 MB and keeps two files, so the startup lines survive a long session.
+- **The two flowsta.com links open in your browser.** Tauri 2.12, Vite 7.3. Linux betas ship as `.deb` only; releases ship `.deb` and `.rpm`.
+
 ### v0.4.2 — 2026-09-30
 - **Windows: the bundled key store and conductor are found by their full file names**, so the app starts as before, with no terminal window.
 
