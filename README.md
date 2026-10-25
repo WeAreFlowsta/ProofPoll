@@ -355,10 +355,9 @@ cleaner point to fork from).
 upgrade your own app will face at the next breaking Holochain release -
 migrating records across two conductors with the original author, time and
 signed action carried, one app-held seed imported into two key stores so
-both lines run as the same agent, the identity's agent set read from both
-networks while they overlap, and the two lines of copy that tell people on
-each side what they can and cannot see. `git log` between the `0.4.2` and
-`0.5.0` tags is that story in commits.
+both lines run as the same agent, and the identity's agent set read from
+both networks while they overlap (hubs collected on each, expanded on each).
+`git log` between the `0.4.2` and `0.5.0` tags is that story in commits.
 
 The `node/` directory is the plain always-on node recipe (one conductor, 0.6
 line); ProofPoll's own node runs both lines through the Flowsta node agent.
@@ -423,6 +422,17 @@ The Flowsta Vault is a separate desktop app that manages the user's identity. Yo
 3. If Vault is running: refreshes profile and updates cache
 4. If Vault is closed/locked: cached data is used — everything works normally
 5. DHT entry is re-created in the background when Vault is available (for peer verification)
+
+**Links are per network.** An `IsSamePersonEntry` lives on the DNA it was
+committed to. The app asserts the link on the ACTIVE network at every launch
+(step 5 above), and the person's agent set (`get_my_agent_set`) is the union
+over every network the app still carries: the identity key is the same hub on
+each, so the walk collects hubs from all of them and expands each hub on all
+of them. Without that, a device that joined after a DNA upgrade never sees
+the person's older installs, which linked only on the previous network. When
+you add a DNA version, keep the previous client running until your users have
+moved, and keep the walk covering both (today the previous network is the one
+`app_client_v1_3`; a third network means turning that pair into a list).
 
 **Key files for this flow**:
 - `src/routes/layout.tsx` — Startup link detection, profile cache loading, Vault polling
