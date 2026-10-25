@@ -332,6 +332,11 @@ jobs:
             EXTRA=" --bundles nsis"
             echo "Pre-release detected ($VERSION) — skipping MSI bundle on Windows"
           fi
+          # rpm versions cannot carry a hyphen either; the bundler refuses them.
+          if [[ "$RUNNER_OS" == "Linux" ]] && [[ "$VERSION" == *-* ]]; then
+            EXTRA=" --bundles deb"
+            echo "Pre-release detected ($VERSION) — skipping rpm bundle on Linux"
+          fi
           echo "extra=$EXTRA" >> "$GITHUB_OUTPUT"
 
       # Build + sign. The Apple and ESIGNER secrets below are read by
