@@ -173,6 +173,31 @@ The encryption pattern is generic — `EncryptedEntry` stores any encrypted blob
 
 The `entry_type_hint` field is always `"private"` — no metadata is leaked. Routing is done by link type, not by the hint.
 
+### Which private-data shape to fork
+
+ProofPoll's `EncryptedEntry` is the simplest of three shapes. Pick by who must
+be able to read the data:
+
+| Shape | Who can read | Where it lives | Use it for |
+|---|---|---|---|
+| **Self-encrypted entries on the shared DHT** (this repo: notes, drafts) | the install that wrote it - the key is the agent's own; a second device reads it only after restoring the seed from the Vault backup (the adopt flow) | gossiped to every peer as ciphertext | small per-install secrets that are fine to lose with the install |
+| **One private network per person** (what Your Own AI and the Vault's own records use) | every device the person signs in on, with the same identity | a DNA installed with a per-user `network_seed` the SDK derives for your app, so only that person's devices ever join; entries can still be encrypted inside it | the person's own data that must follow them across devices - the usual choice for a new app |
+| **The Vault backup as the store** (every ProofPoll record already goes here) | the person, on any of their devices, through the Vault | encrypted under the identity key inside the Vault, synced between devices | restore and portability; not a live data store for the app |
+
+The per-person network is documented in the SDK reference under
+[One identity, several devices](https://docs.flowsta.com/sdk/holochain#one-identity-several-devices)
+(`getAppNetworkSecret`, 3.9.0, Vault 1.6.1+); the metadata rules for
+ciphertext on a DHT - one opaque entry type, one link type, relationships
+inside the payload, a size cap in `validate` - are under *What peers see* and
+*Metadata caveat* in the same reference. Holochain's own private-visibility
+entries are a fourth shape (never gossiped, only on the author's chain,
+carried by the backup); ProofPoll does not use them.
+
+Two things the self-encrypted shape does NOT give you: readability on a
+sibling install (a different agent key cannot open the ciphertext) and
+sharing with chosen people. A fork that needs either starts from the
+per-person network.
+
 ## Community Flagging (v1.1)
 
 Polls can be flagged by signed-in users for: Spam, Misleading, Off Topic, or Inappropriate.
