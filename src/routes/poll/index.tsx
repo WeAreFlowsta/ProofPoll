@@ -43,7 +43,7 @@ export default component$(() => {
   const pollHashSig = useSignal<string>("");
   const poll = useSignal<Poll | null>(null);
   const pollAuthor = useSignal<string | null>(null);
-  const pollDnaVersion = useSignal<"1.0" | "1.1" | "1.2" | "1.3">("1.3");
+  const pollDnaVersion = useSignal<"1.0" | "1.1" | "1.2" | "1.3" | "1.4">("1.4");
   const votes = useSignal<VoteData[]>([]);
   const myAgent = useSignal<string | null>(null);
   // All agent keys belonging to this user (recognition only). See loadMyAgentSet.

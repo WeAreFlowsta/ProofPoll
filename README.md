@@ -17,6 +17,17 @@ ProofPoll is built on **[Flowsta Vault](https://flowsta.com/vault/)**, which kee
 
 ## What's New
 
+### v0.5.0 — 2026-10-25
+- **Holochain 0.7.1.** ProofPoll runs on Holochain 0.7.1, and keeps the 0.6.1 line running beside it for a while: polls and votes from before this update stay readable and votable, new polls go on the new network, and your own polls and votes carry over with their original author and time. People still on 0.4.2 keep seeing the polls from before the update and see new ones once they update.
+- **Your other devices count as you, on every device.** Polls and votes cast by your other installs read as yours on a new device too, including installs from before the update.
+- **Identity page.** Your picture and name come from the Vault that holds your identity, also when several Vaults run on one computer. The app version is shown. The backup line says what happened (saved, nothing to back up yet, or why it was skipped), and the reason goes to the log.
+- **macOS: a fresh install starts.** The two key stores no longer share a socket on long profile paths.
+- **Only this ProofPoll can talk to its conductors.** Each run makes a private origin for its conductor connections instead of accepting any local page.
+- **Disconnecting checks the Vault.** A disconnect is refused when the Vault holds a different identity than the one being disconnected.
+- **"Names hidden" polls** (was "Anonymous"): votes are counted; names are not shown.
+- **Logs keep their start.** The log rotates at 2 MB and keeps two files, so the startup lines survive a long session.
+- **The two flowsta.com links open in your browser.** Tauri 2.12, Vite 7.3. Linux betas ship as `.deb` only; releases ship `.deb` and `.rpm`.
+
 ### v0.4.2 — 2026-09-30
 - **Windows: the bundled key store and conductor are found by their full file names**, so the app starts as before, with no terminal window.
 
@@ -66,8 +77,8 @@ This README focuses on the *fork mechanics* — what to rename, what to keep, wh
 ## Stack
 
 - **Frontend**: Qwik, TypeScript, Tailwind CSS
-- **Backend**: Tauri v2 (Rust), Holochain 0.6.1
-- **DNA**: Rust (hdi 0.7.0, hdk 0.6.0 — non-breaking on the 0.6.1 conductor)
+- **Backend**: Tauri v2 (Rust), Holochain 0.7.1 (DNA v1.4), with a 0.6.1 conductor beside it during the transition so v1.0 to v1.3 stay readable
+- **DNA**: Rust (v1.0 to v1.3: hdi 0.7.0 / hdk 0.6.0 on the 0.6.1 conductor; v1.4: hdi 0.8.1 / hdk 0.7.1 on 0.7.1, Rust 1.94+)
 - **Identity**: Flowsta agent linking via `flowsta-agent-linking` crate
 - **Encryption**: lair xsalsa20poly1305 via `crypto_box_xsalsa_by_sign_pub_key`
 
@@ -76,13 +87,19 @@ This README focuses on the *fork mechanics* — what to rename, what to keep, wh
 ```bash
 # Prerequisites
 # - Rust + wasm32-unknown-unknown target
-# - holochain + lair-keystore binaries (v0.6.1) — drop into src-tauri/binaries/
-#     named `holochain-<target-triple>` and `lair-keystore-<target-triple>`.
-#     CI does this automatically from the official Holochain GitHub release;
-#     for local dev, either fetch them yourself or rebuild from source.
-# - hc CLI: cargo install holochain_cli --version 0.6.0
-#     (0.6.0 hc CLI produces bundles the 0.6.1 conductor reads — no recompile
-#     needed for the 0.6.0 → 0.6.1 non-breaking upgrade.)
+# - holochain + lair-keystore binaries for BOTH lines during the transition
+#     (ProofPoll 0.5.x): 0.7.1 conductor + 0.7.1 lair as
+#     `proofpoll-holochain-<triple>` / `proofpoll-lair-keystore-07-<triple>`,
+#     and 0.6.1 conductor + 0.6.3 lair as `proofpoll-holochain-06-<triple>` /
+#     `proofpoll-lair-keystore-<triple>`, all in src-tauri/binaries/.
+#     CI fetches them from the official Holochain GitHub releases
+#     (.github/workflows/build-release.yml); for local dev fetch them yourself.
+#     A fork that starts on the 0.7 line only needs the first pair - see
+#     "Forking during the Holochain 0.6 → 0.7 transition" below.
+# - hc CLI: 0.7.1 for the v1.4 DNA (cargo install holochain_cli --version 0.7.1,
+#     kept as `hc-0.7` beside a 0.6.0 `hc` for the older versions).
+# - Rust 1.94+ for the v1.4 zomes (dna/v1.4/rust-toolchain.toml); 1.99+ only
+#     for the sweettest crate in dna/v1.4/tests.
 # - Node.js 18+
 # - flowsta-agent-linking repo cloned as a SIBLING directory
 #     (../flowsta-agent-linking/ next to this repo, not inside it):
@@ -107,8 +124,16 @@ cargo tauri dev
 | v1.1 | `proofpoll-network-v1.1` | + Community flagging, migration support |
 | v1.2 | `proofpoll-network-v1.2` | + Public/anonymous poll types, voter profiles |
 | v1.3 | `proofpoll-network-v1.3` | + Encrypted private data (vote rationale, draft polls) |
+| v1.4 | `proofpoll-network-v1.4` | Holochain 0.7.1 generation of v1.3 (same types; validation on the 0.7 action model; `MigratedPoll` carries the original author, time and signed action). Ships with ProofPoll 0.5.0 |
 
-All versions are installed side-by-side during migration. All new reads and writes go to v1.3.
+All versions are installed side-by-side during migration. All new reads and writes go to the newest version (v1.4 from ProofPoll 0.5.0; v1.0 to v1.3 run on a Holochain 0.6.1 conductor, v1.4 on 0.7.1, both inside the app during the transition).
+
+Bundle checksums (sha256 of the committed `.happ`; a rebuilt bundle is a different network):
+
+| Version | DNA hash | sha256 |
+|---|---|---|
+| v1.3 | | `7cac687ab376a5dbdad453a8b77768edec30c5bd656adb57f7dad5ad69eeb197` |
+| v1.4 | `uhC0kOv01Xt3g5hkRz7dq8SEaw8qD2WzwW8Z6HMJPdL-o0v9ZU52W` | `160f768b90a5e5ae27252af472ea95166782c0949f9df137ad3fd96507928dac` |
 
 ## Encrypted Private Data (v1.3)
 
@@ -159,6 +184,31 @@ The encryption pattern is generic — `EncryptedEntry` stores any encrypted blob
 
 The `entry_type_hint` field is always `"private"` — no metadata is leaked. Routing is done by link type, not by the hint.
 
+### Which private-data shape to fork
+
+ProofPoll's `EncryptedEntry` is the simplest of three shapes. Pick by who must
+be able to read the data:
+
+| Shape | Who can read | Where it lives | Use it for |
+|---|---|---|---|
+| **Self-encrypted entries on the shared DHT** (this repo: notes, drafts) | the install that wrote it - the key is the agent's own; a second device reads it only after restoring the seed from the Vault backup (the adopt flow) | gossiped to every peer as ciphertext | small per-install secrets that are fine to lose with the install |
+| **One private network per person** (what Your Own AI and the Vault's own records use) | every device the person signs in on, with the same identity | a DNA installed with a per-user `network_seed` the SDK derives for your app, so only that person's devices ever join; entries can still be encrypted inside it | the person's own data that must follow them across devices - the usual choice for a new app |
+| **The Vault backup as the store** (every ProofPoll record already goes here) | the person, on any of their devices, through the Vault | encrypted under the identity key inside the Vault, synced between devices | restore and portability; not a live data store for the app |
+
+The per-person network is documented in the SDK reference under
+[One identity, several devices](https://docs.flowsta.com/sdk/holochain#one-identity-several-devices)
+(`getAppNetworkSecret`, 3.9.0, Vault 1.6.1+); the metadata rules for
+ciphertext on a DHT - one opaque entry type, one link type, relationships
+inside the payload, a size cap in `validate` - are under *What peers see* and
+*Metadata caveat* in the same reference. Holochain's own private-visibility
+entries are a fourth shape (never gossiped, only on the author's chain,
+carried by the backup); ProofPoll does not use them.
+
+Two things the self-encrypted shape does NOT give you: readability on a
+sibling install (a different agent key cannot open the ciphertext) and
+sharing with chosen people. A fork that needs either starts from the
+per-person network.
+
 ## Community Flagging (v1.1)
 
 Polls can be flagged by signed-in users for: Spam, Misleading, Off Topic, or Inappropriate.
@@ -184,10 +234,13 @@ These identifiers **must** change or your app will conflict with ProofPoll:
 | Product name | `src-tauri/tauri.conf.json` | `ProofPoll` | `YourApp` |
 | Rust crate name | `src-tauri/Cargo.toml` | `proofpoll` | `yourapp` |
 | npm package name | `package.json` | `proofpoll` | `yourapp` |
-| Bundled sidecars | `src-tauri/tauri.conf.json` (`externalBin`) | `binaries/proofpoll-holochain`, `binaries/proofpoll-lair-keystore` | `binaries/yourapp-holochain`, `binaries/yourapp-lair-keystore` |
+| Bundled sidecars | `src-tauri/tauri.conf.json` (`externalBin`) | `binaries/proofpoll-holochain`, `binaries/proofpoll-lair-keystore-07` (0.7 line); `binaries/proofpoll-holochain-06`, `binaries/proofpoll-lair-keystore` (0.6 line, transition only) | `binaries/yourapp-…` (a 0.7-only fork keeps the first pair) |
 | Sidecar resolver calls | `src-tauri/src/conductor.rs` + `src-tauri/src/lair.rs` | `sidecar_path("proofpoll-…")` | `sidecar_path("yourapp-…")` |
 | Windows console markers | `src-tauri/src/process_ext.rs` (`SIDECAR_TITLE_MARKERS`) | `proofpoll-holochain`, `proofpoll-lair-keystore` | your sidecar names (or console windows stay visible on Windows) |
-| Bundled hApp resource | `src-tauri/tauri.conf.json` (`resources`) | `resources/proofpoll_v1_3_happ.happ` | your hApp filename (in step with `HAPP_FILE_*` in `dna.rs`) |
+| Bundled hApp resources | `src-tauri/tauri.conf.json` (`resources`) | `resources/proofpoll_v1_4_happ.happ` (+ `proofpoll_v1_3_happ.happ` during the transition) | your hApp filename(s) (in step with `HAPP_FILE_*` in `dna.rs`) |
+| App data directory | derived from the bundle ID | `com.proofpoll.app` (profiles, conductors, lairs, logs live under it) | follows your bundle ID; nothing to edit, but know where your users' data goes |
+| Flowsta client id | `.env` (`VITE_FLOWSTA_CLIENT_ID`; `.env` is not committed) | ProofPoll's | yours from dev.flowsta.com (see Flowsta Integration Points) |
+| CI secrets | repository settings | `PROOFPOLL_BOOTSTRAP_URL`, `PROOFPOLL_RELAY_URL`, `PROOFPOLL_SIGNAL_URL`, `PROOFPOLL_AUTH_MATERIAL` (0.6 line), `PROOFPOLL_BOOTSTRAP_URL_07`, `PROOFPOLL_RELAY_URL_07` (0.7 line), `VITE_FLOWSTA_CLIENT_ID`, signing secrets | your own names and values (rename in the workflow too) |
 | App icons | `src-tauri/icons/` | ProofPoll artwork | your artwork (paths stay the same; regenerate from your `source.svg`) |
 | CI binary download | `.github/workflows/build-release.yml` | downloads to `binaries/proofpoll-{holochain,lair-keystore}-<triple>` | `binaries/yourapp-{holochain,lair-keystore}-<triple>` |
 | DNA names | `dna/*/workdir/dna.yaml` | `proofpoll_v1_*` | `yourapp_v1_*` |
@@ -202,13 +255,14 @@ Then update these Rust constants:
 | `src-tauri/src/dna.rs` | `APP_ID_V1_*` and `HAPP_FILE_V1_*` constants |
 | `src-tauri/src/commands.rs` | `APP_NAME` constant (user-facing name in Vault dialogs, backups, exports) and `ROLE_NAME` constant |
 | `src-tauri/src/migration.rs` | `ROLE_NAME` constant |
-| `src-tauri/src/dna.rs` + `src-tauri/src/commands.rs` | `"proofpoll"` origin string in WebSocket connects (cosmetic, but keep it yours) |
+| `src-tauri/src/conductor.rs` | nothing for the conductor origin: since 0.5.0 a private origin is made per run (`node_origin()`), written into the conductor config and presented by every connection |
+| `src-tauri/src/vault_probe.rs` | `WEBVIEW_ORIGIN` stays as Tauri defines it; the Vault records this origin at link time |
 | `src-tauri/src/lib.rs` | log `file_name` (`proofpoll` → your app's log name; cosmetic) |
 | `src/lib/signin.ts` | `proofpoll.signin.*` storage keys |
 
 Update build scripts (`dna/*/build.sh`, `build-all.sh`) — change hApp filenames.
 
-**Committed build artifacts**: the `.wasm`/`.dna`/`.happ` files under `dna/v1.3/workdir/` and `src-tauri/resources/` are ProofPoll's canonical builds, committed on purpose - rebuilding a DNA changes its hash, and a changed hash is a different network, so ProofPoll itself must never rebuild them casually. As a forker the opposite applies: **delete them and build your own** (`build-all.sh`) so your app gets its own DNA hash and network.
+**Committed build artifacts**: the `.wasm`/`.dna`/`.happ` files under `dna/v1.*/workdir/` (copied into `src-tauri/resources/` at build time) are ProofPoll's canonical builds, committed on purpose - rebuilding a DNA changes its hash, and a changed hash is a different network, so ProofPoll itself must never rebuild them casually. As a forker the opposite applies: **delete them and build your own** (`build-all.sh`) so your app gets its own DNA hash and network.
 
 **Critical**: The `network_seed` in `dna.yaml` determines which DHT your app joins. Two apps with the same network seed share a DHT. Always use a unique seed.
 
@@ -284,6 +338,42 @@ The state file name is auto-generated from `ACTIVE_APP_ID` — no hardcoded stri
 
 ---
 
+### Forking during the Holochain 0.6 → 0.7 transition
+
+ProofPoll 0.5.x runs two Holochain lines inside one app: a 0.7.1 conductor with
+DNA v1.4 (where every read and write goes) and a 0.6.1 conductor with v1.0 to
+v1.3 (so nothing already published disappears while people update). That is
+the shape of an app crossing a breaking Holochain release without losing data,
+and it is deliberately more than a new app needs.
+
+**A new fork needs the 0.7 line only.** Fork the latest tag and prune the 0.6
+side; nothing else depends on it:
+
+| Remove | Where |
+|---|---|
+| The 0.6 conductor and its lair | `conductor.rs` (`Line::V06` branches, the second conductor start, the 0.6.3 lair in `lair.rs`), the `proofpoll-holochain-06` and `proofpoll-lair-keystore` sidecars in `tauri.conf.json`, `HC_RELEASE_06` in the workflow |
+| The older DNA versions | `dna/v1.0`-`dna/v1.3` (and `dna/workdir`, `dna/zomes` - v1.0's build), `resources/proofpoll_v1_3_happ.happ`, `APP_ID_V1_0..3` / `HAPP_FILE_V1_0..3` in `dna.rs`, the `app_client_v1_*` fields in `AppState` |
+| Migration and the dual-line record view | `migration.rs`, the `V06` arms in `hc.rs` (keep `AppClient` and `RecordView` for the 0.7 line), the legacy branches in `commands.rs` (search `v1_3`, `V06`), `linked_agent_keys_previous` |
+| The 0.6 bootstrap settings | `PROOFPOLL_BOOTSTRAP_URL`, `PROOFPOLL_RELAY_URL`, `PROOFPOLL_SIGNAL_URL`, `PROOFPOLL_AUTH_MATERIAL`; keep the `_07` pair under your own names |
+
+What is left is a single-conductor Tauri + Holochain 0.7.1 app with identity
+linking, encrypted private entries, the canonical Vault backup and the adopt
+flow - the same shape ProofPoll will return to when its own transition window
+closes (the 0.6 line is removed in the release after 0.5.x, which is then the
+cleaner point to fork from).
+
+**Why keep the two-line release tagged:** it is the worked example for the
+upgrade your own app will face at the next breaking Holochain release -
+migrating records across two conductors with the original author, time and
+signed action carried, one app-held seed imported into two key stores so
+both lines run as the same agent, and the identity's agent set read from
+both networks while they overlap (hubs collected on each, expanded on each).
+`git log` between the `0.4.2` and `0.5.0` tags is that story in commits.
+
+The `node/` directory is the plain always-on node recipe (one conductor, 0.6
+line); ProofPoll's own node runs both lines through the Flowsta node agent.
+A fork on the 0.7 line uses the 0.7.1 edge-node image in the same recipe.
+
 ## Flowsta Integration Points
 
 ProofPoll uses [Flowsta](https://flowsta.com) for decentralized identity verification. If you want to use Flowsta in your fork, keep these as-is and just change the client_id. If you want a different identity system (or none), remove them.
@@ -343,6 +433,17 @@ The Flowsta Vault is a separate desktop app that manages the user's identity. Yo
 3. If Vault is running: refreshes profile and updates cache
 4. If Vault is closed/locked: cached data is used — everything works normally
 5. DHT entry is re-created in the background when Vault is available (for peer verification)
+
+**Links are per network.** An `IsSamePersonEntry` lives on the DNA it was
+committed to. The app asserts the link on the ACTIVE network at every launch
+(step 5 above), and the person's agent set (`get_my_agent_set`) is the union
+over every network the app still carries: the identity key is the same hub on
+each, so the walk collects hubs from all of them and expands each hub on all
+of them. Without that, a device that joined after a DNA upgrade never sees
+the person's older installs, which linked only on the previous network. When
+you add a DNA version, keep the previous client running until your users have
+moved, and keep the walk covering both (today the previous network is the one
+`app_client_v1_3`; a third network means turning that pair into a list).
 
 **Key files for this flow**:
 - `src/routes/layout.tsx` — Startup link detection, profile cache loading, Vault polling

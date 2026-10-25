@@ -1,6 +1,6 @@
 [package]
 name = "proofpoll"
-version = "0.4.2"
+version = "0.5.0"
 description = "ProofPoll - Verified polls with Flowsta identity linking"
 authors = ["ProofPoll"]
 license = "MIT"
@@ -18,7 +18,7 @@ tauri-build = { version = "2.5.4", features = [] }
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
-tauri = { version = "2.10.0", features = ["devtools"] }
+tauri = { version = "~2.12.5", features = ["devtools"] }
 tauri-plugin-log = "2"
 tauri-plugin-shell = "2"
 tokio = { version = "1", features = ["full"] }
@@ -38,6 +38,18 @@ holochain_types = "=0.6.1"
 # pulled in transitively by holochain_types 0.6.1; pinned to move in lockstep.
 holochain_state_types = "=0.6.1"
 holochain_integrity_types = "=0.6.1"
+
+# The Holochain 0.7 line, beside the 0.6 line, for the transition release:
+# the 0.6 crates read v1.0-v1.3 cells on the 0.6.1 conductor, the 0.7 crates
+# read v1.4 on the 0.7.1 conductor. A Record from one line does not decode
+# with the other; our own entry structs are msgpack and cross freely.
+holochain_client_07 = { package = "holochain_client", version = "=0.9.1", default-features = false }
+holochain_types_07 = { package = "holochain_types", version = "=0.7.1" }
+holochain_integrity_types_07 = { package = "holochain_integrity_types", version = "=0.7.1" }
+holochain_state_types_07 = { package = "holochain_state_types", version = "=0.7.1" }
+# The 0.7 line's lair client: a conductor accepts only a lair of its own version,
+# so the transition release runs two lairs and talks to each with its own client.
+lair_keystore_api_07 = { package = "lair_keystore_api", version = "=0.7.1" }
 
 # Error handling
 thiserror = "1.0"

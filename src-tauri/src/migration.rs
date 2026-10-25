@@ -21,7 +21,7 @@
 
 use crate::commands::AppState;
 use crate::dna::ACTIVE_APP_ID;
-use holochain_types::prelude::{ActionHash, ExternIO, Record};
+use holochain_types::prelude::ActionHash;
 use std::path::Path;
 use std::sync::Arc;
 use tauri::Emitter;
@@ -133,6 +133,21 @@ pub struct MigratedPollEntry {
     pub old_action_hash: ActionHash,
     pub new_action_hash: ActionHash,
     pub migrated_at: i64,
+    /// v1.4+ carries the original record's origin; absent on v1.3 entries.
+    #[serde(default)]
+    pub carried_from: Option<CarriedFrom>,
+}
+
+/// Where a carried record came from (the DNA v1.4 `CarriedFrom`): who wrote
+/// it, when, the original signed action when the migrating agent still held
+/// it, who re-published it here, and a slot for a device certificate chain.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+pub struct CarriedFrom {
+    pub original_author: holochain_types::prelude::AgentPubKey,
+    pub original_timestamp: i64,
+    pub original_signed_action: Option<Vec<u8>>,
+    pub witness: holochain_types::prelude::AgentPubKey,
+    pub certificate: Option<Vec<u8>>,
 }
 
 // ── Zome input types ──────────────────────────────────────────────────
@@ -160,40 +175,30 @@ struct CastVoteInput {
 struct RegisterMigratedPollInput {
     old_action_hash: ActionHash,
     new_action_hash: ActionHash,
+    /// v1.4+: where the poll came from, so a reader can check it without
+    /// the network it came from.
+    original_author: Option<holochain_types::prelude::AgentPubKey>,
+    original_timestamp: Option<i64>,
+    /// MessagePack of the original signed action, when the record carried it.
+    original_signed_action: Option<Vec<u8>>,
 }
 
 // ── Helper: decode entry from Record ──────────────────────────────────
 
-fn decode_entry<T: serde::de::DeserializeOwned>(record: &Record) -> Result<T, String> {
-    let entry = record
-        .entry()
-        .as_option()
-        .ok_or("Record has no entry")?;
-    let app_bytes = entry
-        .as_app_entry()
-        .ok_or("Not an app entry")?;
-    let sb = app_bytes.as_ref();
-    rmp_serde::from_slice(sb.bytes()).map_err(|e| format!("Failed to decode entry: {}", e))
+fn decode_entry<T: serde::de::DeserializeOwned>(record: &crate::hc::RecordView) -> Result<T, String> {
+    record.entry_as()
 }
 
 // ── Helper: call zome on a specific client ────────────────────────────
 
 async fn call_zome_on(
-    client: &holochain_client::AppWebsocket,
+    client: &crate::hc::AppClient,
     zome: &str,
     fn_name: &str,
-    payload: ExternIO,
-) -> Result<ExternIO, String> {
-    use holochain_client::ZomeCallTarget;
-    use holochain_types::prelude::{FunctionName, RoleName, ZomeName};
-
+    payload: Vec<u8>,
+) -> Result<Vec<u8>, String> {
     client
-        .call_zome(
-            ZomeCallTarget::RoleName(RoleName::from(ROLE_NAME)),
-            ZomeName::from(zome),
-            FunctionName::from(fn_name),
-            payload,
-        )
+        .call_zome(ROLE_NAME, zome, fn_name, payload)
         .await
         .map_err(|e| format!("Zome call {}/{} failed: {}", zome, fn_name, e))
 }
@@ -255,7 +260,7 @@ pub async fn run_migration(
     //
     // e.g. for v1.4, change `app_client_v1_2` to `app_client_v1_3`
     //
-    let source_guard = state.app_client_v1_2.lock().await;
+    let source_guard = state.app_client_v1_3.lock().await;
     let source = match source_guard.as_ref() {
         Some(c) => c,
         None => {
@@ -289,9 +294,9 @@ pub async fn run_migration(
 
     // ── Phase 1: Export from source DHT ──────────────────────────────
 
-    let payload = ExternIO::encode(()).map_err(|e| e.to_string())?;
+    let payload = crate::hc::encode(&())?;
     let result = call_zome_on(source, "polls", "get_all_polls", payload).await?;
-    let all_polls: Vec<Record> = result.decode().map_err(|e| e.to_string())?;
+    let all_polls = crate::hc::records(source.line(), &result)?;
 
     // Filter to my polls and collect my votes
     let mut my_polls: Vec<(ActionHash, Poll)> = Vec::new();
@@ -299,20 +304,20 @@ pub async fn run_migration(
 
     for record in &all_polls {
         let poll: Poll = decode_entry(record)?;
-        let hash = record.action_address().clone();
-        let author = record.action().author().to_string();
+        let hash = crate::hc::action_hash(&record.action_hash)?;
+        let author = record.author.clone();
 
         if author == my_agent {
             my_polls.push((hash.clone(), poll.clone()));
         }
 
         // Check if I voted on this poll
-        let vote_payload = ExternIO::encode(hash.clone()).map_err(|e| e.to_string())?;
+        let vote_payload = crate::hc::encode(&hash.clone())?;
         match call_zome_on(source, "polls", "get_poll_votes", vote_payload).await {
             Ok(vote_result) => {
-                let vote_records: Vec<Record> = vote_result.decode().unwrap_or_default();
+                let vote_records = crate::hc::records(source.line(), &vote_result).unwrap_or_default();
                 for vr in &vote_records {
-                    if vr.action().author().to_string() == my_agent {
+                    if vr.author.clone() == my_agent {
                         let vote: Vote = decode_entry(vr)?;
                         my_votes.push((hash.clone(), vote.option_index, poll.title.clone()));
                     }
@@ -347,10 +352,10 @@ pub async fn run_migration(
         }
 
         // Also check DHT for existing mapping (in case we crashed mid-migration)
-        let mapping_payload = ExternIO::encode(old_hash.clone()).map_err(|e| e.to_string())?;
+        let mapping_payload = crate::hc::encode(&old_hash.clone())?;
         let mapping_result = call_zome_on(dest, "polls", "get_migration_mapping", mapping_payload).await;
         if let Ok(result) = mapping_result {
-            let existing: Option<ActionHash> = result.decode().unwrap_or(None);
+            let existing: Option<ActionHash> = crate::hc::decode(&result).unwrap_or(None);
             if existing.is_some() {
                 log::info!("Poll '{}' already has DHT mapping, skipping", poll.title);
                 let mut ms = state.migration_state.lock().await;
@@ -372,16 +377,19 @@ pub async fn run_migration(
             closes_at: poll.closes_at,
             poll_type: "Anonymous".to_string(),
         };
-        let create_payload = ExternIO::encode(create_input).map_err(|e| e.to_string())?;
+        let create_payload = crate::hc::encode(&create_input)?;
         let create_result = call_zome_on(dest, "polls", "create_poll", create_payload).await?;
-        let new_hash: ActionHash = create_result.decode().map_err(|e| e.to_string())?;
+        let new_hash: ActionHash = crate::hc::decode(&create_result)?;
 
         // Register the mapping on destination
         let register_input = RegisterMigratedPollInput {
             old_action_hash: old_hash.clone(),
             new_action_hash: new_hash.clone(),
+            original_author: crate::commands::parse_agent_pub_key_string(&my_agent).ok(),
+            original_timestamp: Some(poll.created_at),
+            original_signed_action: None,
         };
-        let register_payload = ExternIO::encode(register_input).map_err(|e| e.to_string())?;
+        let register_payload = crate::hc::encode(&register_input)?;
         call_zome_on(dest, "polls", "register_migrated_poll", register_payload).await?;
 
         // Save progress
@@ -434,11 +442,11 @@ pub async fn run_migration(
         }
 
         // Look up the new hash for this poll on destination
-        let mapping_payload = ExternIO::encode(old_poll_hash.clone()).map_err(|e| e.to_string())?;
+        let mapping_payload = crate::hc::encode(&old_poll_hash.clone())?;
         let mapping_result = call_zome_on(dest, "polls", "get_migration_mapping", mapping_payload).await;
 
         let new_poll_hash: Option<ActionHash> = match mapping_result {
-            Ok(r) => r.decode().unwrap_or(None),
+            Ok(r) => crate::hc::decode(&r).unwrap_or(None),
             Err(_) => None,
         };
 
@@ -450,7 +458,7 @@ pub async fn run_migration(
                 display_name: None,
                 profile_picture: None,
             };
-            let vote_payload = ExternIO::encode(vote_input).map_err(|e| e.to_string())?;
+            let vote_payload = crate::hc::encode(&vote_input)?;
 
             match call_zome_on(dest, "polls", "cast_vote", vote_payload).await {
                 Ok(_) => {
@@ -563,7 +571,7 @@ pub fn spawn_migration_retry_loop(
                     Err(_) => continue,
                 };
 
-                let mapping_payload = match ExternIO::encode(old_hash) {
+                let mapping_payload = match crate::hc::encode(&old_hash) {
                     Ok(p) => p,
                     Err(_) => continue,
                 };
@@ -572,7 +580,7 @@ pub fn spawn_migration_retry_loop(
                     call_zome_on(dest, "polls", "get_migration_mapping", mapping_payload).await;
 
                 let new_hash: Option<ActionHash> = match mapping_result {
-                    Ok(r) => r.decode().unwrap_or(None),
+                    Ok(r) => crate::hc::decode(&r).unwrap_or(None),
                     Err(_) => None,
                 };
 
@@ -583,7 +591,7 @@ pub fn spawn_migration_retry_loop(
                         display_name: None,
                         profile_picture: None,
                     };
-                    let vote_payload = match ExternIO::encode(vote_input) {
+                    let vote_payload = match crate::hc::encode(&vote_input) {
                         Ok(p) => p,
                         Err(_) => continue,
                     };

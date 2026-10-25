@@ -10,8 +10,9 @@
 //!   - `setup_app_interface()` — Creates WebSocket connections for zome calls
 //!
 //! Change the version constants at the top to match your app/hApp names.
-//! The `"proofpoll"` string passed to `AdminWebsocket::connect()` and
-//! `AppWebsocket::connect()` is an origin identifier — change it to your app name.
+//! Every `AdminWebsocket::connect()` and `AppWebsocket::connect()` presents
+//! `conductor::node_origin()`, the private origin made once per run that the
+//! conductor config allows; nothing here is named after the app.
 //! The installation and WebSocket logic is otherwise app-agnostic.
 
 use holochain_client::{
@@ -35,14 +36,20 @@ pub const APP_ID_V1_0: &str = "proofpoll_v1_0";
 pub const APP_ID_V1_1: &str = "proofpoll_v1_1";
 pub const APP_ID_V1_2: &str = "proofpoll_v1_2";
 pub const APP_ID_V1_3: &str = "proofpoll_v1_3";
+/// v1.4: the Holochain 0.7 generation of v1.3, on the 0.7.1 conductor.
+pub const APP_ID_V1_4: &str = "proofpoll_v1_4";
 
 const HAPP_FILE_V1_0: &str = "proofpoll_v1_0_happ.happ";
 const HAPP_FILE_V1_1: &str = "proofpoll_v1_1_happ.happ";
 const HAPP_FILE_V1_2: &str = "proofpoll_v1_2_happ.happ";
 const HAPP_FILE_V1_3: &str = "proofpoll_v1_3_happ.happ";
+const HAPP_FILE_V1_4: &str = "proofpoll_v1_4_happ.happ";
 
-/// The active version for all new reads and writes.
-pub const ACTIVE_APP_ID: &str = APP_ID_V1_3;
+/// The active version for all new reads and writes (on the 0.7.1 conductor).
+pub const ACTIVE_APP_ID: &str = APP_ID_V1_4;
+/// The newest version on the 0.6.1 conductor: the migration source, and the
+/// home of polls whose authors have not upgraded yet.
+pub const ACTIVE_APP_ID_06: &str = APP_ID_V1_3;
 
 /// Result of the DNA installation phase.
 pub struct InstallResult {
@@ -70,7 +77,7 @@ pub async fn install_dnas(
 ) -> Result<InstallResult, String> {
     let admin_ws = AdminWebsocket::connect(
         format!("localhost:{}", admin_port),
-        Some("proofpoll".to_string()),
+        Some(crate::conductor::node_origin()),
     )
     .await
     .map_err(|e| format!("Failed to connect to admin WebSocket: {}", e))?;
@@ -259,16 +266,17 @@ pub async fn setup_app_interface(
     v1_0_available: bool,
     v1_1_available: bool,
     v1_2_available: bool,
-) -> Result<(u16, AppWebsocket, Option<AppWebsocket>, Option<AppWebsocket>, Option<AppWebsocket>), String> {
+) -> Result<(u16, Option<crate::hc::AppClient>, Option<crate::hc::AppClient>, Option<crate::hc::AppClient>, Option<crate::hc::AppClient>), String> {
+    use crate::hc::AppClient;
     let admin_ws = AdminWebsocket::connect(
         format!("localhost:{}", admin_port),
-        Some("proofpoll".to_string()),
+        Some(crate::conductor::node_origin()),
     )
     .await
     .map_err(|e| format!("Failed to connect to admin WebSocket: {}", e))?;
 
     let app_port = admin_ws
-        .attach_app_interface(0, None, AllowedOrigins::Any, None)
+        .attach_app_interface(0, None, AllowedOrigins::Origins(std::collections::HashSet::from([crate::conductor::node_origin()])), None)
         .await
         .map_err(|e| format!("Failed to attach app interface: {}", e))?;
 
@@ -370,7 +378,7 @@ pub async fn setup_app_interface(
     // Connect the active (v1.3) AppWebsocket.
     let token_v1_3 = admin_ws
         .issue_app_auth_token(
-            IssueAppAuthenticationTokenPayload::for_installed_app_id(ACTIVE_APP_ID.into())
+            IssueAppAuthenticationTokenPayload::for_installed_app_id(ACTIVE_APP_ID_06.into())
                 .expiry_seconds(0)
                 .single_use(false),
         )
@@ -381,9 +389,10 @@ pub async fn setup_app_interface(
         format!("localhost:{}", app_port),
         token_v1_3.token,
         signer_arc.clone(),
-        Some("proofpoll".to_string()),
+        Some(crate::conductor::node_origin()),
     )
     .await
+    .map(AppClient::V06)
     .map_err(|e| format!("Failed to connect v1.3 app WebSocket: {}", e))?;
 
     log::info!("v1.3 App WebSocket connected on port {}", app_port);
@@ -403,13 +412,13 @@ pub async fn setup_app_interface(
                     format!("localhost:{}", app_port),
                     token_v1_2.token,
                     signer_arc.clone(),
-                    Some("proofpoll".to_string()),
+                    Some(crate::conductor::node_origin()),
                 )
                 .await
                 {
                     Ok(ws) => {
                         log::info!("v1.2 App WebSocket connected for migration reads");
-                        Some(ws)
+                        Some(AppClient::V06(ws))
                     }
                     Err(e) => {
                         log::warn!("Could not connect v1.2 WebSocket: {}. Migration reads will be skipped.", e);
@@ -441,13 +450,13 @@ pub async fn setup_app_interface(
                     format!("localhost:{}", app_port),
                     token_v1_1.token,
                     signer_arc.clone(),
-                    Some("proofpoll".to_string()),
+                    Some(crate::conductor::node_origin()),
                 )
                 .await
                 {
                     Ok(ws) => {
                         log::info!("v1.1 App WebSocket connected for migration reads");
-                        Some(ws)
+                        Some(AppClient::V06(ws))
                     }
                     Err(e) => {
                         log::warn!("Could not connect v1.1 WebSocket: {}. Migration reads will be skipped.", e);
@@ -479,13 +488,13 @@ pub async fn setup_app_interface(
                     format!("localhost:{}", app_port),
                     token_v1_0.token,
                     signer_arc,
-                    Some("proofpoll".to_string()),
+                    Some(crate::conductor::node_origin()),
                 )
                 .await
                 {
                     Ok(ws) => {
                         log::info!("v1.0 App WebSocket connected for legacy reads");
-                        Some(ws)
+                        Some(AppClient::V06(ws))
                     }
                     Err(e) => {
                         log::warn!("Could not connect v1.0 WebSocket: {}. Legacy reads will be skipped.", e);
@@ -502,7 +511,7 @@ pub async fn setup_app_interface(
         None
     };
 
-    Ok((app_port, app_ws_v1_3, app_ws_v1_2, app_ws_v1_1, app_ws_v1_0))
+    Ok((app_port, Some(app_ws_v1_3), app_ws_v1_2, app_ws_v1_1, app_ws_v1_0))
 }
 
 /// Re-enable any disabled apps + verify cells are actually ready before
@@ -540,7 +549,7 @@ pub async fn ensure_apps_enabled(admin_ws: &AdminWebsocket) {
     // will return CellDisabled until cells are truly ready.
     let probe_cell = apps
         .iter()
-        .find(|a| a.installed_app_id == ACTIVE_APP_ID)
+        .find(|a| a.installed_app_id == ACTIVE_APP_ID_06)
         .and_then(|app| {
             app.cell_info.values().flat_map(|cells| cells.iter()).find_map(|c| {
                 if let CellInfo::Provisioned(p) = c {
@@ -594,4 +603,150 @@ pub async fn ensure_apps_enabled(admin_ws: &AdminWebsocket) {
             }
         }
     }
+}
+
+
+// ── The Holochain 0.7 line (DNA v1.4) ──────────────────────────────────
+
+/// Install v1.4 on the 0.7.1 conductor under the same agent key the 0.6
+/// conductor uses (the key lives in the shared lair; the DNA hashes differ,
+/// so one key on two conductors is allowed). Re-enables an installed v1.4.
+pub async fn install_dnas_07(
+    admin_port: u16,
+    resource_dir: &Path,
+    agent_key_raw39: &[u8],
+) -> Result<(), String> {
+    use holochain_client_07::{AdminWebsocket, InstallAppPayload};
+    use holochain_types_07::app::AppBundleSource;
+    use holochain_types_07::prelude::AgentPubKey;
+
+    let admin_ws = AdminWebsocket::connect(
+        format!("localhost:{}", admin_port),
+        Some(crate::conductor::node_origin()),
+    )
+    .await
+    .map_err(|e| format!("Failed to connect to the 0.7 admin WebSocket: {}", e))?;
+    let existing = admin_ws
+        .list_apps(None)
+        .await
+        .map_err(|e| format!("Failed to list apps (0.7): {}", e))?;
+    if existing.iter().any(|a| a.installed_app_id == APP_ID_V1_4) {
+        admin_ws
+            .enable_app(APP_ID_V1_4.to_string())
+            .await
+            .map_err(|e| format!("Failed to re-enable v1.4: {}", e))?;
+        log::info!("ProofPoll v1.4 DNA present and enabled (0.7)");
+        return Ok(());
+    }
+    let happ_path = resource_dir.join(HAPP_FILE_V1_4);
+    if !happ_path.exists() {
+        return Err(format!("ProofPoll v1.4 hApp bundle not found at {:?}", happ_path));
+    }
+    log::info!("Installing ProofPoll v1.4 DNA from {:?} (0.7)...", happ_path);
+    let payload = InstallAppPayload {
+        source: AppBundleSource::Path(happ_path),
+        agent_key: Some(AgentPubKey::from_raw_39(agent_key_raw39.to_vec())),
+        installed_app_id: Some(APP_ID_V1_4.to_string()),
+        network_seed: None,
+        roles_settings: None,
+        ignore_genesis_failure: false,
+        restore_from_dht: false,
+    };
+    admin_ws
+        .install_app(payload)
+        .await
+        .map_err(|e| format!("Failed to install v1.4 DNA: {}", e))?;
+    admin_ws
+        .enable_app(APP_ID_V1_4.to_string())
+        .await
+        .map_err(|e| format!("Failed to enable v1.4 DNA: {}", e))?;
+    log::info!("ProofPoll v1.4 DNA installed and enabled (0.7)");
+    Ok(())
+}
+
+/// Attach the 0.7 conductor's app interface, authorize signing for the v1.4
+/// cell and connect the v1.4 app websocket.
+pub async fn setup_app_interface_07(admin_port: u16) -> Result<(u16, crate::hc::AppClient), String> {
+    use holochain_client_07::{
+        AdminWebsocket, AllowedOrigins, AppStatusFilter, AppWebsocket,
+        AuthorizeSigningCredentialsPayload, CellInfo, ClientAgentSigner,
+        IssueAppAuthenticationTokenPayload,
+    };
+
+    let admin_ws = AdminWebsocket::connect(
+        format!("localhost:{}", admin_port),
+        Some(crate::conductor::node_origin()),
+    )
+    .await
+    .map_err(|e| format!("Failed to connect to the 0.7 admin WebSocket: {}", e))?;
+    let app_port = admin_ws
+        .attach_app_interface(0, None, AllowedOrigins::Origins(std::collections::HashSet::from([crate::conductor::node_origin()])), None)
+        .await
+        .map_err(|e| format!("Failed to attach the 0.7 app interface: {}", e))?;
+    log::info!("0.7 app interface attached on port {}", app_port);
+
+    let signer = ClientAgentSigner::default();
+    let apps = admin_ws
+        .list_apps(Some(AppStatusFilter::Enabled))
+        .await
+        .map_err(|e| format!("Failed to list apps (0.7): {}", e))?;
+    for app in &apps {
+        for cells in app.cell_info.values() {
+            for cell in cells {
+                if let CellInfo::Provisioned(provisioned) = cell {
+                    let cell_id = provisioned.cell_id.clone();
+                    // Cells can take a few seconds after install; CellNotRunning
+                    // is 0.7's "not yet".
+                    let mut authorized = false;
+                    for attempt in 1..=6 {
+                        match admin_ws
+                            .authorize_signing_credentials(AuthorizeSigningCredentialsPayload {
+                                cell_id: cell_id.clone(),
+                                functions: None,
+                            })
+                            .await
+                        {
+                            Ok(creds) => {
+                                signer.add_credentials(cell_id.clone(), creds);
+                                authorized = true;
+                                break;
+                            }
+                            Err(e) => {
+                                let s = e.to_string();
+                                if (s.contains("CellNotRunning") || s.contains("CellDisabled")) && attempt < 6 {
+                                    let _ = admin_ws.enable_app(app.installed_app_id.clone()).await;
+                                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                                } else {
+                                    log::warn!("Could not authorize signing for a cell in {} (0.7): {}", app.installed_app_id, s);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if authorized {
+                        log::info!("Signing credentials authorized for cell in {} (0.7)", app.installed_app_id);
+                    }
+                }
+            }
+        }
+    }
+    let signer_arc: std::sync::Arc<dyn holochain_client_07::AgentSigner + Send + Sync> = signer.into();
+    let token = admin_ws
+        .issue_app_auth_token(
+            IssueAppAuthenticationTokenPayload::for_installed_app_id(APP_ID_V1_4.into())
+                .expiry_seconds(0)
+                .single_use(false),
+        )
+        .await
+        .map_err(|e| format!("Failed to issue the v1.4 auth token: {}", e))?;
+    let ws = AppWebsocket::connect(
+        format!("localhost:{}", app_port),
+        token.token,
+        signer_arc,
+        Some(crate::conductor::node_origin()),
+    )
+    .await
+    .map_err(|e| format!("Failed to connect the v1.4 app WebSocket: {}", e))?;
+    log::info!("v1.4 App WebSocket connected on port {} (0.7)", app_port);
+    Ok((app_port, crate::hc::AppClient::V07(ws)))
 }

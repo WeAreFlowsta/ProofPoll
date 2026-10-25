@@ -248,6 +248,31 @@ mod tests {
 /// agent key - the fresh-install path. The key is built from LAIR's derived
 /// public key and cross-checked against the app-side derivation, so the
 /// conductor can always sign for the agent we install with.
+/// The same device agent on the 0.7 lair: the app-held seed imported there
+/// too, so both conductors sign as one agent. An install whose agent was
+/// conductor-born (before the app-held seed) has no seed file; it gets a new
+/// one here, so its 0.7 line is a new agent (its carried records name the
+/// old author).
+pub async fn ensure_device_agent_07(
+    client: &lair_keystore_api_07::prelude::LairClient,
+    data_dir: &Path,
+) -> Result<holochain_types::prelude::AgentPubKey, String> {
+    let seed = match load(data_dir)? {
+        Some(s) => s,
+        None => {
+            log::info!("[seed] generating device agent seed for the 0.7 line (no app-held seed yet)");
+            generate_and_store(data_dir)?
+        }
+    };
+    let lair_pk = crate::lair::import_seed_to_lair_07(client, &seed.seed_bytes()?, SEED_TAG).await?;
+    let lair_key = holochain_types::prelude::AgentPubKey::from_raw_32(lair_pk.to_vec());
+    let derived = agent_pub_key(&seed)?;
+    if derived != lair_key {
+        return Err("lair (0.7)-derived agent key differs from the recovery file's derivation".into());
+    }
+    Ok(lair_key)
+}
+
 pub async fn ensure_device_agent(
     client: &lair_keystore_api::prelude::LairClient,
     data_dir: &Path,

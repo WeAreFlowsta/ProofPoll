@@ -1,7 +1,7 @@
 {
   "name": "proofpoll",
   "description": "ProofPoll - Verified polls with Flowsta identity linking",
-  "version": "0.2.2",
+  "version": "0.5.0",
   "license": "MIT",
   "engines": {
     "node": "^18.17.0 || ^20.3.0 || >=21.0.0"
@@ -22,15 +22,15 @@
     "@builder.io/qwik": "^1.19.0",
     "@builder.io/qwik-city": "^1.19.0",
     "@tailwindcss/vite": "^4.2.0",
-    "@tauri-apps/api": "~2.10.1",
-    "@tauri-apps/cli": "~2.10.0",
+    "@tauri-apps/api": "~2.12.4",
+    "@tauri-apps/cli": "~2.12.4",
     "@types/node": "20.19.0",
     "prettier": "3.6.2",
     "tailwindcss": "^4.2.0",
     "typescript": "5.4.5",
     "typescript-plugin-css-modules": "latest",
     "undici": "*",
-    "vite": "7.3.1",
+    "vite": "7.3.2",
     "vite-tsconfig-paths": "^4.2.1"
   },
   "dependencies": {

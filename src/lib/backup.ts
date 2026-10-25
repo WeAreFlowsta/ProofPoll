@@ -16,6 +16,37 @@ import { invoke } from "@tauri-apps/api/core";
 
 const DEBOUNCE_MS = 30_000;
 
+/**
+ * Tell the Rust side what a backup attempt did. It writes proofpoll.log and
+ * keeps the last outcome for the Identity page - the console alone left a
+ * stale backup date unexplained (Windows, 2026-10-25). Fire and forget.
+ */
+export function reportBackupOutcome(
+  ok: boolean,
+  message: string,
+  bytes?: number,
+): void {
+  void invoke("report_backup_outcome", { ok, message, bytes: bytes ?? null }).catch(
+    () => {},
+  );
+}
+
+/** What the last attempt did, as the Rust side remembers it. */
+export interface BackupOutcome {
+  ok: boolean;
+  message: string;
+  bytes: number | null;
+  at: number;
+}
+
+export async function getLastBackupOutcome(): Promise<BackupOutcome | null> {
+  try {
+    return await invoke<BackupOutcome | null>("get_last_backup_outcome");
+  } catch {
+    return null;
+  }
+}
+
 let enabled = false;
 let timer: ReturnType<typeof setTimeout> | null = null;
 let inFlight = false;
@@ -63,6 +94,10 @@ async function runBackup() {
     // directly with backupToVault means running it ourselves.
     if (await wouldOverwriteNonEmptyBackup({ clientId }, payload)) {
       console.warn("[ProofPoll] write-triggered backup skipped: empty payload");
+      reportBackupOutcome(
+        false,
+        "Nothing of yours to back up yet - your Vault keeps the backup it has.",
+      );
       return;
     }
     const result = await backupToVault(
@@ -70,13 +105,13 @@ async function runBackup() {
       payload,
     );
     console.log(`[ProofPoll] Vault backup after write: ${result.dataSize} bytes`);
+    reportBackupOutcome(true, "saved", result.dataSize);
   } catch (e: any) {
     // Held or failed backups are a skip, not a failure - the hourly
     // auto-backup and the next write both retry.
-    console.warn(
-      "[ProofPoll] write-triggered backup skipped:",
-      e?.message ?? String(e),
-    );
+    const message = e?.message ?? String(e);
+    console.warn("[ProofPoll] write-triggered backup skipped:", message);
+    reportBackupOutcome(false, message);
   } finally {
     inFlight = false;
     if (queued) {

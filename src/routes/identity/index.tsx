@@ -1,10 +1,12 @@
 import { component$, useContext, useSignal, useVisibleTask$, $ } from "@builder.io/qwik";
 import { useNavigate } from "@builder.io/qwik-city";
 import { invoke } from "@tauri-apps/api/core";
+import { getVersion } from "@tauri-apps/api/app";
 import { linkedContext, linkStateContext, displayNameContext, profilePictureContext } from "~/lib/context";
 import { sanitizeImageSrc } from "~/lib/sanitize";
 import { readAndClearSignInIntent } from "~/lib/signin";
 import { focusSelf } from "~/lib/window";
+import { getLastBackupOutcome, type BackupOutcome } from "~/lib/backup";
 import {
   getLinkedAgents,
   getIdentityLink,
@@ -16,6 +18,34 @@ import {
   rekeyDeviceAgent,
   type SeedEscrowReport,
 } from "~/lib/holochain";
+
+/** What `probe_vault` (Rust) found: this account's Vault, unlocked first. */
+interface VaultProbeLite {
+  url: string;
+  unlocked: boolean;
+  agent_pub_key: string | null;
+  display_name: string | null;
+  profile_picture: string | null;
+}
+
+/** Open a web page in the person's browser, never inside this window. */
+async function openExternal(url: string): Promise<void> {
+  try {
+    const { open } = await import("@tauri-apps/plugin-shell");
+    await open(url);
+  } catch {
+    // The browser could not be opened; the address is shown in the text.
+  }
+}
+
+/** "at 12:31" today, otherwise the date and time, in the person's locale. */
+function formatWhen(unixSeconds: number): string {
+  const d = new Date(unixSeconds * 1000);
+  const sameDay = d.toDateString() === new Date().toDateString();
+  return sameDay
+    ? `at ${d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`
+    : `on ${d.toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}`;
+}
 
 export default component$(() => {
   const nav = useNavigate();
@@ -47,6 +77,8 @@ export default component$(() => {
   const seedBusy = useSignal(false);
   const seedError = useSignal<string | null>(null);
   const seedDismissed = useSignal(false);
+  const backupOutcome = useSignal<BackupOutcome | null>(null);
+  const appVersion = useSignal<string | null>(null);
 
   // Fetch the escrowed seed from the Vault backup (from the WEBVIEW - the
   // Vault authorizes backup reads by Origin) and compare against this
@@ -110,11 +142,13 @@ export default component$(() => {
   // fresh link without waiting for an app restart.
   const fetchVaultProfile = $(async () => {
     try {
-      const resp = await fetch("http://127.0.0.1:27777/status", {
-        signal: AbortSignal.timeout(2000),
-      });
-      if (resp.ok) {
-        const vault = await resp.json();
+      // The Rust probe asks every Vault port, keeps only this OS account's
+      // Vault, prefers the unlocked one, and presents this app's Origin - so
+      // the name and picture come back (the Vault scopes them per origin).
+      // A fetch hardcoded to 27777 read a different Vault whenever two were
+      // running (2026-10-25, Windows: the avatar fell back to "F").
+      const vault = await invoke<VaultProbeLite | null>("probe_vault");
+      if (vault) {
         if (vault.display_name) displayName.value = vault.display_name;
         if (vault.profile_picture) profilePicture.value = vault.profile_picture;
         if (vault.display_name || vault.profile_picture) {
@@ -255,11 +289,16 @@ export default component$(() => {
         "a different account, disconnect the current one below first.";
     }
 
-    // No local polling needed — the layout's linkPoll watches link state
-    // every 3 seconds and updates `linkStateContext` accordingly. When the
-    // user takes action (link / unlink / disconnect via the banner) the
-    // layout state flows down to this page reactively.
-    cleanup(() => {});
+    // The last backup outcome is kept by the Rust side; re-read it every
+    // 15 s so a backup that lands while this page is open shows up.
+    backupOutcome.value = await getLastBackupOutcome();
+    appVersion.value = await getVersion().catch(() => null);
+    const outcomeTimer = setInterval(() => {
+      void getLastBackupOutcome().then((o) => (backupOutcome.value = o));
+    }, 15_000);
+    // The layout's linkPoll watches link state every 3 seconds and updates
+    // `linkStateContext`; this page reacts to it, no local link polling.
+    cleanup(() => clearInterval(outcomeTimer));
   });
 
   const linkIdentity = $(async () => {
@@ -330,15 +369,33 @@ export default component$(() => {
       // Vault attributes and authorizes the revocation by it. Best-effort:
       // the local revocation above is what ends authority.
       try {
-        await fetch("http://127.0.0.1:27777/revoke-identity", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            app_name: "ProofPoll",
-            app_agent_pub_key: agentKey.value,
-          }),
-          signal: AbortSignal.timeout(3000),
-        });
+        const vault = await invoke<VaultProbeLite | null>("probe_vault").catch(
+          () => null,
+        );
+        // Name the identity this link belongs to. A Vault holds several
+        // identities and answers an unnamed request as whichever is open;
+        // if another one is open right now, leave the Vault's entry alone
+        // rather than touch the wrong identity (P3).
+        const wrongIdentity =
+          !!vault?.agent_pub_key &&
+          !!linkedVaultKey.value &&
+          vault.agent_pub_key !== linkedVaultKey.value;
+        if (vault && !wrongIdentity) {
+          await fetch(`${vault.url}/revoke-identity`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              app_name: "ProofPoll",
+              app_agent_pub_key: agentKey.value,
+              expected_identity: linkedVaultKey.value,
+            }),
+            signal: AbortSignal.timeout(3000),
+          });
+        } else if (wrongIdentity) {
+          console.info(
+            "[ProofPoll] Vault has a different identity open; its ProofPoll entry stays until that identity is opened and ProofPoll disconnected there.",
+          );
+        }
       } catch {
         // Vault not running - its stale entry is cosmetic
       }
@@ -431,6 +488,22 @@ export default component$(() => {
               automatically, together with what a new machine needs to
               continue as you.
             </p>
+            {backupOutcome.value && (
+              <p
+                class={[
+                  "text-xs mb-3",
+                  backupOutcome.value.ok ? "text-emerald-400" : "text-amber-300",
+                ].join(" ")}
+              >
+                {backupOutcome.value.ok
+                  ? `Last backup saved ${formatWhen(backupOutcome.value.at)}${
+                      backupOutcome.value.bytes
+                        ? ` (${Math.round(backupOutcome.value.bytes / 1024)} KB)`
+                        : ""
+                    }.`
+                  : `Last backup attempt ${formatWhen(backupOutcome.value.at)}: ${backupOutcome.value.message}`}
+              </p>
+            )}
 
             {seedError.value && (
               <div class="bg-red-900/50 border border-red-700 text-red-300 px-4 py-2 rounded-lg text-sm mb-3">
@@ -675,14 +748,13 @@ export default component$(() => {
                 {error.value.includes("not running") && (
                   <p class="mt-2 text-gray-400">
                     Don't have Flowsta Vault?{" "}
-                    <a
-                      href="https://flowsta.com/vault"
-                      target="_blank"
-                      rel="noopener noreferrer"
+                    <button
+                      type="button"
+                      onClick$={() => openExternal("https://flowsta.com/vault")}
                       class="text-indigo-400 hover:text-indigo-300 underline"
-                    >
+                      >
                       Download it at flowsta.com
-                    </a>
+                    </button>
                   </p>
                 )}
               </div>
@@ -722,14 +794,13 @@ export default component$(() => {
 
             <p class="text-xs text-gray-600 mt-4">
               Flowsta Vault must be running and unlocked on this computer.{" "}
-              <a
-                href="https://flowsta.com/vault"
-                target="_blank"
-                rel="noopener noreferrer"
+              <button
+                type="button"
+                onClick$={() => openExternal("https://flowsta.com/vault")}
                 class="text-indigo-400 hover:text-indigo-300 underline"
-              >
+                >
                 Get Flowsta Vault
-              </a>
+              </button>
             </p>
           </div>
 
@@ -754,6 +825,11 @@ export default component$(() => {
               </div>
             )}
           </div>
+          {/* Which build this is - a tester on a beta and a tester on the
+              release otherwise look identical (asked for 2026-10-25). */}
+          <p class="mt-6 text-xs text-gray-600">
+            ProofPoll {appVersion.value ?? ""}
+          </p>
         </div>
       )}
     </div>

@@ -22,6 +22,9 @@ name: Build Release
 #   PROOFPOLL_BOOTSTRAP_URL   e.g. https://bootstrap.flowsta.com
 #   PROOFPOLL_SIGNAL_URL      e.g. wss://bootstrap.flowsta.com
 #   PROOFPOLL_RELAY_URL       e.g. https://bootstrap.flowsta.com./
+#   PROOFPOLL_BOOTSTRAP_URL_07 / PROOFPOLL_RELAY_URL_07
+#                             the Holochain 0.7 line's bootstrap host (kitsune2 0.5.x;
+#                             e.g. https://bootstrap-7.flowsta.com / https://bootstrap-7.flowsta.com./)
 #   PROOFPOLL_AUTH_MATERIAL   base64url of opaque auth bytes (only if your
 #                             bootstrap requires --authentication-hook-server)
 #   VITE_FLOWSTA_CLIENT_ID    your dev.flowsta.com client_id (only if you
@@ -103,7 +106,7 @@ jobs:
               '',
               '### Downloads',
               'Pick your platform from the assets below:',
-              '- **Linux** — `.deb` or `.rpm` (AppImage is not provided: its sandboxing breaks the embedded Holochain conductor)',
+              '- **Linux** — `.deb` or `.rpm`; betas ship `.deb` only (AppImage is not provided: its sandboxing breaks the embedded Holochain conductor)',
               macLine,
               windowsLine,
               '',
@@ -153,6 +156,9 @@ jobs:
       PROOFPOLL_SIGNAL_URL: ${{ secrets.PROOFPOLL_SIGNAL_URL }}
       PROOFPOLL_RELAY_URL: ${{ secrets.PROOFPOLL_RELAY_URL }}
       PROOFPOLL_AUTH_MATERIAL: ${{ secrets.PROOFPOLL_AUTH_MATERIAL }}
+      # The 0.7 line's bootstrap (a kitsune2 0.5.x host; the relay is the same host)
+      PROOFPOLL_BOOTSTRAP_URL_07: ${{ secrets.PROOFPOLL_BOOTSTRAP_URL_07 }}
+      PROOFPOLL_RELAY_URL_07: ${{ secrets.PROOFPOLL_RELAY_URL_07 }}
       VITE_FLOWSTA_CLIENT_ID: ${{ secrets.VITE_FLOWSTA_CLIENT_ID }}
       APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
       APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -199,45 +205,54 @@ jobs:
           workspaces: src-tauri -> target
           cache-on-failure: true
 
-      # Bundled conductor + keystore: download the official Holochain 0.6.1
-      # release binaries instead of `cargo install` from source. These are
-      # the exact artifacts the production conductors run; skipping the
-      # from-source compile cuts the build by roughly an hour. Holochain
-      # publishes binaries for all four target triples; lair-keystore ships
-      # in the same release (the 0.6.3 lair that 0.6.1 pins).
+      # Bundled conductors + keystore, from the official Holochain releases
+      # (the exact artifacts the production conductors run; no from-source
+      # compile). The transition release ships TWO conductors: 0.7.1 as
+      # proofpoll-holochain (DNA v1.4) and 0.6.1 as proofpoll-holochain-06
+      # (DNA v1.0-v1.3), each with the lair-keystore of its own release: a
+      # conductor accepts only a lair of its own version, so two lairs run.
       #
-      # We rename the binaries to a `proofpoll-` prefix on download so
-      # the resulting .deb / .msi etc. ship them as
-      # /usr/bin/proofpoll-{holochain,lair-keystore} — avoiding the
-      # collision with other Tauri/Holochain apps (e.g. Flowsta Vault)
-      # that also ship binaries with the bare names.
-      - name: Fetch Holochain 0.6.1 binaries (Unix)
+      # The `proofpoll-` prefix keeps the installed binaries from colliding
+      # with other Tauri/Holochain apps (e.g. Flowsta Vault).
+      - name: Fetch Holochain binaries (Unix)
         if: runner.os != 'Windows'
         env:
-          HC_RELEASE: holochain-0.6.1
+          HC_RELEASE_07: holochain-0.7.1
+          HC_RELEASE_06: holochain-0.6.1
         run: |
           mkdir -p src-tauri/binaries
-          base="https://github.com/holochain/holochain/releases/download/${HC_RELEASE}"
-          for bin in holochain lair-keystore; do
-            dest="src-tauri/binaries/proofpoll-${bin}-${{ matrix.target }}"
-            curl -fsSL "${base}/${bin}-${{ matrix.target }}" -o "$dest"
+          base="https://github.com/holochain/holochain/releases/download"
+          fetch() { # release, upstream name, our name
+            dest="src-tauri/binaries/$3-${{ matrix.target }}"
+            curl -fsSL "${base}/$1/$2-${{ matrix.target }}" -o "$dest"
             chmod +x "$dest"
-            test "$(wc -c < "$dest")" -gt 1000000 || { echo "$bin download too small"; exit 1; }
-          done
+            test "$(wc -c < "$dest")" -gt 1000000 || { echo "$2 ($1) download too small"; exit 1; }
+          }
+          fetch "$HC_RELEASE_07" holochain proofpoll-holochain
+          fetch "$HC_RELEASE_06" holochain proofpoll-holochain-06
+          fetch "$HC_RELEASE_06" lair-keystore proofpoll-lair-keystore
+          fetch "$HC_RELEASE_07" lair-keystore proofpoll-lair-keystore-07
 
-      - name: Fetch Holochain 0.6.1 binaries (Windows)
+      - name: Fetch Holochain binaries (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         env:
-          HC_RELEASE: holochain-0.6.1
+          HC_RELEASE_07: holochain-0.7.1
+          HC_RELEASE_06: holochain-0.6.1
         run: |
           New-Item -ItemType Directory -Force -Path src-tauri/binaries
-          $base = "https://github.com/holochain/holochain/releases/download/$env:HC_RELEASE"
+          $base = "https://github.com/holochain/holochain/releases/download"
           $t = "${{ matrix.target }}"
-          foreach ($bin in "holochain","lair-keystore") {
-            $dest = "src-tauri/binaries/proofpoll-$bin-$t.exe"
-            Invoke-WebRequest "$base/$bin-$t.exe" -OutFile $dest
-            if ((Get-Item $dest).Length -lt 1000000) { throw "$bin download too small" }
+          $wanted = @(
+            @{ rel = $env:HC_RELEASE_07; up = "holochain"; ours = "proofpoll-holochain" },
+            @{ rel = $env:HC_RELEASE_06; up = "holochain"; ours = "proofpoll-holochain-06" },
+            @{ rel = $env:HC_RELEASE_06; up = "lair-keystore"; ours = "proofpoll-lair-keystore" },
+            @{ rel = $env:HC_RELEASE_07; up = "lair-keystore"; ours = "proofpoll-lair-keystore-07" }
+          )
+          foreach ($w in $wanted) {
+            $dest = "src-tauri/binaries/$($w.ours)-$t.exe"
+            Invoke-WebRequest "$base/$($w.rel)/$($w.up)-$t.exe" -OutFile $dest
+            if ((Get-Item $dest).Length -lt 1000000) { throw "$($w.up) ($($w.rel)) download too small" }
           }
 
       - name: Install frontend dependencies
@@ -316,6 +331,11 @@ jobs:
           if [[ "$RUNNER_OS" == "Windows" ]] && [[ "$VERSION" == *-* ]]; then
             EXTRA=" --bundles nsis"
             echo "Pre-release detected ($VERSION) — skipping MSI bundle on Windows"
+          fi
+          # rpm versions cannot carry a hyphen either; the bundler refuses them.
+          if [[ "$RUNNER_OS" == "Linux" ]] && [[ "$VERSION" == *-* ]]; then
+            EXTRA=" --bundles deb"
+            echo "Pre-release detected ($VERSION) — skipping rpm bundle on Linux"
           fi
           echo "extra=$EXTRA" >> "$GITHUB_OUTPUT"
 

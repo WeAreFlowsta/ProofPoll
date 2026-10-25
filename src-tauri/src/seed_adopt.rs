@@ -219,16 +219,7 @@ pub(crate) fn classify_escrow_payload(data: &serde_json::Value) -> Result<Escrow
 
 // ── Production implementations ─────────────────────────────────────────
 
-/// The Origin header the Vault's bridge maps to this app's client_id. The
-/// linked-apps registry records the origin the WEBVIEW presented during the
-/// link ceremony, so a Rust-side request must present the same one (a bare
-/// reqwest carries none and is refused - the /revoke-identity lesson).
-#[cfg(debug_assertions)]
-const WEBVIEW_ORIGIN: &str = "http://localhost:5174"; // devUrl in tauri.conf.json
-#[cfg(all(not(debug_assertions), target_os = "windows"))]
-const WEBVIEW_ORIGIN: &str = "http://tauri.localhost";
-#[cfg(all(not(debug_assertions), not(target_os = "windows")))]
-const WEBVIEW_ORIGIN: &str = "tauri://localhost";
+use crate::vault_probe::WEBVIEW_ORIGIN;
 
 pub(crate) struct VaultEscrowProbe {
     pub client_id: String,
@@ -278,8 +269,7 @@ impl AdoptSeams for AppSeams {
             .map_err(|e| format!("stored link hash unparseable: {:?}", e))?;
         let client = self.state.app_client.lock().await;
         let client = client.as_ref().ok_or("conductor not ready")?;
-        let payload =
-            holochain_types::prelude::ExternIO::encode(hash).map_err(|e| e.to_string())?;
+        let payload = crate::hc::encode(&hash)?;
         crate::commands::call_zome(client, crate::commands::AGENT_LINKING_ZOME, "revoke_link", payload)
             .await?;
         Ok(())
