@@ -176,6 +176,58 @@ pub enum ConductorStatus {
     Error { message: String },
 }
 
+/// The one origin the conductors' admin and app interfaces accept: a random
+/// value made once per app run. It is written into each conductor's config
+/// file, which only this OS account can read, and presented by every
+/// connection this app opens. A web page always presents its own address as
+/// its origin, and another account on the device cannot read the file, so
+/// neither can open these interfaces (P2, the Vault's b9e43a3 pattern; before
+/// this, `allowed_origins: '*'` let any local page drive the conductor).
+static NODE_ORIGIN: std::sync::RwLock<String> = std::sync::RwLock::new(String::new());
+
+/// The origin this app's connections to its conductors present. Made on
+/// first use and kept for the whole run, so both conductor lines and every
+/// later reconnect agree.
+pub fn node_origin() -> String {
+    {
+        let current = NODE_ORIGIN.read().unwrap();
+        if !current.is_empty() {
+            return current.clone();
+        }
+    }
+    let mut w = NODE_ORIGIN.write().unwrap();
+    if w.is_empty() {
+        use rand::RngCore;
+        let mut bytes = [0u8; 16];
+        rand::rngs::OsRng.fill_bytes(&mut bytes);
+        *w = format!("pp-{}", hex::encode(bytes));
+    }
+    w.clone()
+}
+
+/// Write a file only this OS account can read.
+fn write_private(path: &std::path::Path, contents: &str) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        // A file left by an earlier version may be readable by others, and
+        // the mode below applies only when the file is created.
+        let _ = std::fs::remove_file(path);
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)?;
+        file.write_all(contents.as_bytes())
+    }
+    #[cfg(not(unix))]
+    {
+        // The app's data folder is private to the account on Windows.
+        std::fs::write(path, contents)
+    }
+}
+
 /// Generate conductor-config.yaml for ProofPoll.
 fn generate_conductor_config(
     conductor_dir: &Path,
@@ -221,7 +273,7 @@ admin_interfaces:
 - driver:
     type: websocket
     port: {admin_port}
-    allowed_origins: '*'
+    allowed_origins: '{origin}'
 network:
   bootstrap_url: {bootstrap}
   signal_url: {signal}
@@ -230,6 +282,7 @@ network:
 "#,
             data_root = data_root,
             admin_port = admin_port,
+            origin = node_origin(),
             lair_url = lair_url,
             bootstrap = bootstrap_url(),
             signal = signal_url(),
@@ -245,7 +298,7 @@ admin_interfaces:
 - driver:
     type: websocket
     port: {admin_port}
-    allowed_origins: '*'
+    allowed_origins: '{origin}'
 network:
   bootstrap_url: {bootstrap}
   relay_url: {relay}
@@ -254,6 +307,7 @@ network:
 "#,
             data_root = data_root,
             admin_port = admin_port,
+            origin = node_origin(),
             lair_url = lair_url,
             bootstrap = bootstrap_url_07(),
             relay = relay_url_07(),
@@ -262,7 +316,7 @@ network:
     };
 
     let config_path = conductor_dir.join("conductor-config.yaml");
-    std::fs::write(&config_path, &config)
+    write_private(&config_path, &config)
         .map_err(|e| format!("Failed to write conductor config: {}", e))?;
 
     log::info!("Conductor config written to {:?}", config_path);
@@ -1043,7 +1097,7 @@ mod tests {
             // installs have), so install_dnas takes the inherit branch.
             let admin_ws = AdminWebsocket::connect(
                 format!("localhost:{}", ADMIN_WS_PORT),
-                Some("proofpoll".to_string()),
+                Some(crate::conductor::node_origin()),
             )
             .await
             .map_err(|e| format!("admin connect: {}", e))?;

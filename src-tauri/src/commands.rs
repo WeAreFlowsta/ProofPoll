@@ -382,7 +382,7 @@ async fn try_reenable_app(line: crate::hc::Line) -> Result<(), String> {
             use holochain_client::AdminWebsocket;
             let admin_ws = AdminWebsocket::connect(
                 format!("localhost:{}", crate::conductor::ADMIN_WS_PORT),
-                Some("proofpoll".to_string()),
+                Some(crate::conductor::node_origin()),
             )
             .await
             .map_err(|e| format!("Failed to connect to admin WS for recovery: {}", e))?;
@@ -395,7 +395,7 @@ async fn try_reenable_app(line: crate::hc::Line) -> Result<(), String> {
             use holochain_client_07::AdminWebsocket;
             let admin_ws = AdminWebsocket::connect(
                 format!("localhost:{}", crate::conductor::ADMIN_WS_PORT_07),
-                Some("proofpoll".to_string()),
+                Some(crate::conductor::node_origin()),
             )
             .await
             .map_err(|e| format!("Failed to connect to the 0.7 admin WS for recovery: {}", e))?;
@@ -2356,7 +2356,7 @@ pub async fn build_canonical_backup(
     // 1. Connect to the admin websocket (same pattern as try_reenable_app).
     let admin_ws = AdminWebsocket::connect(
         format!("localhost:{}", crate::conductor::ADMIN_WS_PORT_07),
-        Some("proofpoll".to_string()),
+        Some(crate::conductor::node_origin()),
     )
     .await
     .map_err(|e| format!("Failed to connect to admin WS for backup: {}", e))?;

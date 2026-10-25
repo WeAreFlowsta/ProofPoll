@@ -76,7 +76,7 @@ pub async fn install_dnas(
 ) -> Result<InstallResult, String> {
     let admin_ws = AdminWebsocket::connect(
         format!("localhost:{}", admin_port),
-        Some("proofpoll".to_string()),
+        Some(crate::conductor::node_origin()),
     )
     .await
     .map_err(|e| format!("Failed to connect to admin WebSocket: {}", e))?;
@@ -269,13 +269,13 @@ pub async fn setup_app_interface(
     use crate::hc::AppClient;
     let admin_ws = AdminWebsocket::connect(
         format!("localhost:{}", admin_port),
-        Some("proofpoll".to_string()),
+        Some(crate::conductor::node_origin()),
     )
     .await
     .map_err(|e| format!("Failed to connect to admin WebSocket: {}", e))?;
 
     let app_port = admin_ws
-        .attach_app_interface(0, None, AllowedOrigins::Any, None)
+        .attach_app_interface(0, None, AllowedOrigins::Origins(std::collections::HashSet::from([crate::conductor::node_origin()])), None)
         .await
         .map_err(|e| format!("Failed to attach app interface: {}", e))?;
 
@@ -388,7 +388,7 @@ pub async fn setup_app_interface(
         format!("localhost:{}", app_port),
         token_v1_3.token,
         signer_arc.clone(),
-        Some("proofpoll".to_string()),
+        Some(crate::conductor::node_origin()),
     )
     .await
     .map(AppClient::V06)
@@ -411,7 +411,7 @@ pub async fn setup_app_interface(
                     format!("localhost:{}", app_port),
                     token_v1_2.token,
                     signer_arc.clone(),
-                    Some("proofpoll".to_string()),
+                    Some(crate::conductor::node_origin()),
                 )
                 .await
                 {
@@ -449,7 +449,7 @@ pub async fn setup_app_interface(
                     format!("localhost:{}", app_port),
                     token_v1_1.token,
                     signer_arc.clone(),
-                    Some("proofpoll".to_string()),
+                    Some(crate::conductor::node_origin()),
                 )
                 .await
                 {
@@ -487,7 +487,7 @@ pub async fn setup_app_interface(
                     format!("localhost:{}", app_port),
                     token_v1_0.token,
                     signer_arc,
-                    Some("proofpoll".to_string()),
+                    Some(crate::conductor::node_origin()),
                 )
                 .await
                 {
@@ -621,7 +621,7 @@ pub async fn install_dnas_07(
 
     let admin_ws = AdminWebsocket::connect(
         format!("localhost:{}", admin_port),
-        Some("proofpoll".to_string()),
+        Some(crate::conductor::node_origin()),
     )
     .await
     .map_err(|e| format!("Failed to connect to the 0.7 admin WebSocket: {}", e))?;
@@ -674,12 +674,12 @@ pub async fn setup_app_interface_07(admin_port: u16) -> Result<(u16, crate::hc::
 
     let admin_ws = AdminWebsocket::connect(
         format!("localhost:{}", admin_port),
-        Some("proofpoll".to_string()),
+        Some(crate::conductor::node_origin()),
     )
     .await
     .map_err(|e| format!("Failed to connect to the 0.7 admin WebSocket: {}", e))?;
     let app_port = admin_ws
-        .attach_app_interface(0, None, AllowedOrigins::Any, None)
+        .attach_app_interface(0, None, AllowedOrigins::Origins(std::collections::HashSet::from([crate::conductor::node_origin()])), None)
         .await
         .map_err(|e| format!("Failed to attach the 0.7 app interface: {}", e))?;
     log::info!("0.7 app interface attached on port {}", app_port);
@@ -742,7 +742,7 @@ pub async fn setup_app_interface_07(admin_port: u16) -> Result<(u16, crate::hc::
         format!("localhost:{}", app_port),
         token.token,
         signer_arc,
-        Some("proofpoll".to_string()),
+        Some(crate::conductor::node_origin()),
     )
     .await
     .map_err(|e| format!("Failed to connect the v1.4 app WebSocket: {}", e))?;
