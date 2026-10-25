@@ -5,6 +5,7 @@ import { linkedContext, linkStateContext, displayNameContext, profilePictureCont
 import { sanitizeImageSrc } from "~/lib/sanitize";
 import { readAndClearSignInIntent } from "~/lib/signin";
 import { focusSelf } from "~/lib/window";
+import { getLastBackupOutcome, type BackupOutcome } from "~/lib/backup";
 import {
   getLinkedAgents,
   getIdentityLink,
@@ -23,6 +24,15 @@ interface VaultProbeLite {
   unlocked: boolean;
   display_name: string | null;
   profile_picture: string | null;
+}
+
+/** "at 12:31" today, otherwise the date and time, in the person's locale. */
+function formatWhen(unixSeconds: number): string {
+  const d = new Date(unixSeconds * 1000);
+  const sameDay = d.toDateString() === new Date().toDateString();
+  return sameDay
+    ? `at ${d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`
+    : `on ${d.toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}`;
 }
 
 export default component$(() => {
@@ -55,6 +65,7 @@ export default component$(() => {
   const seedBusy = useSignal(false);
   const seedError = useSignal<string | null>(null);
   const seedDismissed = useSignal(false);
+  const backupOutcome = useSignal<BackupOutcome | null>(null);
 
   // Fetch the escrowed seed from the Vault backup (from the WEBVIEW - the
   // Vault authorizes backup reads by Origin) and compare against this
@@ -265,11 +276,15 @@ export default component$(() => {
         "a different account, disconnect the current one below first.";
     }
 
-    // No local polling needed — the layout's linkPoll watches link state
-    // every 3 seconds and updates `linkStateContext` accordingly. When the
-    // user takes action (link / unlink / disconnect via the banner) the
-    // layout state flows down to this page reactively.
-    cleanup(() => {});
+    // The last backup outcome is kept by the Rust side; re-read it every
+    // 15 s so a backup that lands while this page is open shows up.
+    backupOutcome.value = await getLastBackupOutcome();
+    const outcomeTimer = setInterval(() => {
+      void getLastBackupOutcome().then((o) => (backupOutcome.value = o));
+    }, 15_000);
+    // The layout's linkPoll watches link state every 3 seconds and updates
+    // `linkStateContext`; this page reacts to it, no local link polling.
+    cleanup(() => clearInterval(outcomeTimer));
   });
 
   const linkIdentity = $(async () => {
@@ -444,6 +459,22 @@ export default component$(() => {
               automatically, together with what a new machine needs to
               continue as you.
             </p>
+            {backupOutcome.value && (
+              <p
+                class={[
+                  "text-xs mb-3",
+                  backupOutcome.value.ok ? "text-emerald-400" : "text-amber-300",
+                ].join(" ")}
+              >
+                {backupOutcome.value.ok
+                  ? `Last backup saved ${formatWhen(backupOutcome.value.at)}${
+                      backupOutcome.value.bytes
+                        ? ` (${Math.round(backupOutcome.value.bytes / 1024)} KB)`
+                        : ""
+                    }.`
+                  : `Last backup attempt ${formatWhen(backupOutcome.value.at)}: ${backupOutcome.value.message}`}
+              </p>
+            )}
 
             {seedError.value && (
               <div class="bg-red-900/50 border border-red-700 text-red-300 px-4 py-2 rounded-lg text-sm mb-3">

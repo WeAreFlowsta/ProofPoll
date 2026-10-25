@@ -171,6 +171,10 @@ pub struct AppState {
     pub lair_client: tokio::sync::Mutex<Option<LairClient>>,
     /// Current migration state (persisted to disk).
     pub migration_state: tokio::sync::Mutex<crate::migration::MigrationState>,
+    /// What the last Vault backup attempt did, for the Identity page and
+    /// proofpoll.log. The SDK and the write trigger only ever said it in the
+    /// webview console, so a stale backup date had no explanation (P6).
+    pub last_backup_outcome: Mutex<Option<BackupOutcome>>,
 }
 
 impl AppState {
@@ -244,6 +248,7 @@ impl AppState {
             passphrase: Mutex::new(passphrase),
             lair_client: tokio::sync::Mutex::new(None),
             migration_state: tokio::sync::Mutex::new(migration_state),
+            last_backup_outcome: Mutex::new(None),
         }
     }
 }
@@ -2212,6 +2217,48 @@ pub async fn decode_record_for_export(
 ///
 /// The backup carries data only - never the lair keystore or passphrase
 /// (see the note at the end of this function).
+/// One Vault backup attempt, as the Identity page and proofpoll.log see it.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+pub struct BackupOutcome {
+    pub ok: bool,
+    /// Plain words: "saved" or why it was skipped (the SDK's own reason).
+    pub message: String,
+    pub bytes: Option<u64>,
+    /// Unix seconds.
+    pub at: u64,
+}
+
+/// The webview reports every backup attempt here (the hourly one and the
+/// write-triggered one), so the reason a backup did not happen reaches
+/// proofpoll.log and the Identity page instead of only the devtools console.
+#[tauri::command]
+pub fn report_backup_outcome(
+    state: tauri::State<'_, std::sync::Arc<AppState>>,
+    ok: bool,
+    message: String,
+    bytes: Option<u64>,
+) -> BackupOutcome {
+    let at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    if ok {
+        log::info!("[backup] saved to the Vault: {} bytes", bytes.unwrap_or(0));
+    } else {
+        log::warn!("[backup] not saved: {}", message);
+    }
+    let outcome = BackupOutcome { ok, message, bytes, at };
+    *state.last_backup_outcome.lock().unwrap() = Some(outcome.clone());
+    outcome
+}
+
+#[tauri::command]
+pub fn get_last_backup_outcome(
+    state: tauri::State<'_, std::sync::Arc<AppState>>,
+) -> Option<BackupOutcome> {
+    state.last_backup_outcome.lock().unwrap().clone()
+}
+
 #[tauri::command]
 pub async fn build_canonical_backup(
     state: tauri::State<'_, std::sync::Arc<AppState>>,

@@ -28,7 +28,7 @@ interface VaultProbe {
   display_name: string | null;
   profile_picture: string | null;
 }
-import { setBackupTriggersEnabled } from "~/lib/backup";
+import { setBackupTriggersEnabled, reportBackupOutcome } from "~/lib/backup";
 
 
 interface AppStatus {
@@ -116,8 +116,14 @@ export default component$(() => {
             invoke("build_canonical_backup", {
               clientId: import.meta.env.VITE_FLOWSTA_CLIENT_ID,
             }),
-          onSuccess: (r) => console.log(`[ProofPoll] Vault backup: ${r.dataSize} bytes`),
-          onError: (e) => console.warn("[ProofPoll] Vault backup skipped:", e.message),
+          onSuccess: (r) => {
+            console.log(`[ProofPoll] Vault backup: ${r.dataSize} bytes`);
+            reportBackupOutcome(true, "saved", r.dataSize);
+          },
+          onError: (e) => {
+            console.warn("[ProofPoll] Vault backup skipped:", e.message);
+            reportBackupOutcome(false, e.message);
+          },
         });
       } catch {
         // SDK import failed — ignore

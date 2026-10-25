@@ -317,6 +317,8 @@ pub fn run() {
             // See the lair recovery notes
             commands::decode_record_for_export,
             commands::build_canonical_backup,
+            commands::report_backup_outcome,
+            commands::get_last_backup_outcome,
             // ── Agent-seed escrow: adopt / re-key (authorship survives
             //    machine death) ─────────────────────────────────────
             seed_adopt::get_seed_escrow_state,
