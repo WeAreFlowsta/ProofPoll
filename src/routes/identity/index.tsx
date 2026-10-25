@@ -1,6 +1,7 @@
 import { component$, useContext, useSignal, useVisibleTask$, $ } from "@builder.io/qwik";
 import { useNavigate } from "@builder.io/qwik-city";
 import { invoke } from "@tauri-apps/api/core";
+import { getVersion } from "@tauri-apps/api/app";
 import { linkedContext, linkStateContext, displayNameContext, profilePictureContext } from "~/lib/context";
 import { sanitizeImageSrc } from "~/lib/sanitize";
 import { readAndClearSignInIntent } from "~/lib/signin";
@@ -66,6 +67,7 @@ export default component$(() => {
   const seedError = useSignal<string | null>(null);
   const seedDismissed = useSignal(false);
   const backupOutcome = useSignal<BackupOutcome | null>(null);
+  const appVersion = useSignal<string | null>(null);
 
   // Fetch the escrowed seed from the Vault backup (from the WEBVIEW - the
   // Vault authorizes backup reads by Origin) and compare against this
@@ -279,6 +281,7 @@ export default component$(() => {
     // The last backup outcome is kept by the Rust side; re-read it every
     // 15 s so a backup that lands while this page is open shows up.
     backupOutcome.value = await getLastBackupOutcome();
+    appVersion.value = await getVersion().catch(() => null);
     const outcomeTimer = setInterval(() => {
       void getLastBackupOutcome().then((o) => (backupOutcome.value = o));
     }, 15_000);
@@ -798,6 +801,11 @@ export default component$(() => {
               </div>
             )}
           </div>
+          {/* Which build this is - a tester on a beta and a tester on the
+              release otherwise look identical (asked for 2026-10-25). */}
+          <p class="mt-6 text-xs text-gray-600">
+            ProofPoll {appVersion.value ?? ""}
+          </p>
         </div>
       )}
     </div>

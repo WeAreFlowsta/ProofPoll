@@ -59,6 +59,14 @@ pub fn run() {
             app.handle().plugin(
                 tauri_plugin_log::Builder::default()
                     .level(log::LevelFilter::Info)
+                    // The plugin's defaults are a 40 KB file that is DELETED
+                    // when full. With the status line every 30 s that erased
+                    // the startup block (both conductors ready, migration)
+                    // within half an hour - the lines every gate's step 1
+                    // asks for (beta.1, 2026-10-25). 2 MB, and the two
+                    // previous files kept with a date in their name.
+                    .max_file_size(2_000_000)
+                    .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepSome(2))
                     .targets([
                         tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir {
                             file_name: Some("proofpoll".to_string()),

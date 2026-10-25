@@ -470,7 +470,8 @@ pub fn get_app_status(state: tauri::State<'_, std::sync::Arc<AppState>>) -> AppS
     let agent_key = state.agent_pub_key.lock().unwrap().clone();
     let ready = matches!(status, ConductorStatus::Ready { .. });
 
-    log::info!("get_app_status called: ready={}", ready);
+    // Debug: the layout asks every 30 s; at info this line was most of the log.
+    log::debug!("get_app_status called: ready={}", ready);
 
     AppStatus {
         ready,
