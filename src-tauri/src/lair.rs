@@ -275,16 +275,6 @@ pub(crate) fn socket_path_from_url(connection_url: &str) -> Result<std::path::Pa
     Ok(std::path::PathBuf::from(decoded.as_ref()))
 }
 
-/// Lair writes `connectionUrl: unix://<lair dir>/socket?k=...` at init. On
-/// macOS that path is over the Unix-socket limit for a profile under a
-/// longer username (`~/Library/Application Support/com.proofpoll.app/
-/// profiles/<key>/lair/socket` is 95 bytes with a 3-letter one, limit 104)
-/// and lair dies with "path must be shorter than SUN_LEN". When the
-/// in-directory socket does not fit, rewrite the URL's path to a short
-/// per-user runtime path; the store, pid file and the connection key
-/// (`?k=`) stay exactly as lair wrote them. Idempotent: a config already
-/// pointing at a fitting path is left alone. Ported from the Vault (1.4.0).
-#[cfg(not(windows))]
 /// The short runtime socket for the key store under `lair_dir`. The 0.6
 /// store (`lair/`) keeps the name derived from its profile root, which
 /// installs from before the 0.7 line already point at; every other store
@@ -302,6 +292,16 @@ pub(crate) fn runtime_socket_path(lair_dir: &Path) -> std::path::PathBuf {
     }
 }
 
+/// Lair writes `connectionUrl: unix://<lair dir>/socket?k=...` at init. On
+/// macOS that path is over the Unix-socket limit for a profile under a
+/// longer username (`~/Library/Application Support/com.proofpoll.app/
+/// profiles/<key>/lair/socket` is 95 bytes with a 3-letter one, limit 104)
+/// and lair dies with "path must be shorter than SUN_LEN". When the
+/// in-directory socket does not fit, rewrite the URL's path to a short
+/// per-user runtime path; the store, pid file and the connection key
+/// (`?k=`) stay exactly as lair wrote them. Idempotent: a config already
+/// pointing at a fitting path is left alone. Ported from the Vault (1.4.0).
+#[cfg(not(windows))]
 fn ensure_socket_fits(lair_dir: &Path, config_path: &Path) -> Result<(), String> {
     let url = read_connection_url(config_path)?;
     let current = socket_path_from_url(&url)?;
