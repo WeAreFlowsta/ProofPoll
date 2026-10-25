@@ -226,7 +226,7 @@ pub(crate) fn repoint_config(lair_dir: &Path) -> Result<bool, String> {
                     // THIS root (see `ensure_socket_fits`) is where it
                     // belongs; only a foreign address is pulled back here.
                     #[cfg(not(windows))]
-                    let at_runtime_path = decoded == crate::profiles::short_socket_path(lair_dir.parent().unwrap_or(lair_dir));
+                    let at_runtime_path = decoded == runtime_socket_path(lair_dir);
                     #[cfg(windows)]
                     let at_runtime_path = false;
                     if decoded != expected && !at_runtime_path {
@@ -285,14 +285,30 @@ pub(crate) fn socket_path_from_url(connection_url: &str) -> Result<std::path::Pa
 /// (`?k=`) stay exactly as lair wrote them. Idempotent: a config already
 /// pointing at a fitting path is left alone. Ported from the Vault (1.4.0).
 #[cfg(not(windows))]
+/// The short runtime socket for the key store under `lair_dir`. The 0.6
+/// store (`lair/`) keeps the name derived from its profile root, which
+/// installs from before the 0.7 line already point at; every other store
+/// (`lair-07/`) is named after its own directory. Two stores under one root
+/// must never share a socket: the second removes the first's "stale" file
+/// and binds in its place, and a conductor then shakes hands with a key
+/// store of the other version (found on the first macOS install of 0.5.0).
+#[cfg(not(windows))]
+pub(crate) fn runtime_socket_path(lair_dir: &Path) -> std::path::PathBuf {
+    let legacy = lair_dir.file_name().map(|n| n == "lair").unwrap_or(false);
+    if legacy {
+        crate::profiles::short_socket_path(lair_dir.parent().unwrap_or(lair_dir))
+    } else {
+        crate::profiles::short_socket_path(lair_dir)
+    }
+}
+
 fn ensure_socket_fits(lair_dir: &Path, config_path: &Path) -> Result<(), String> {
     let url = read_connection_url(config_path)?;
     let current = socket_path_from_url(&url)?;
     if crate::profiles::socket_fits(&current) {
         return Ok(());
     }
-    let root = lair_dir.parent().unwrap_or(lair_dir);
-    let short = crate::profiles::short_socket_path(root);
+    let short = runtime_socket_path(lair_dir);
     if !crate::profiles::socket_fits(&short) {
         return Err(format!("no socket path short enough for the key store ({:?})", short));
     }
@@ -416,6 +432,18 @@ mod tests {
             "---\nconnectionUrl: unix://{url_path}/socket?k=AbC-123_x\npidFile: {0}/pid_file\nstoreFile: {0}/store_file\nsignatureFallback: none\n",
             dir.display()
         )
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn two_key_stores_under_one_root_get_different_runtime_sockets() {
+        let root = Path::new("/Users/someone/Library/Application Support/com.proofpoll.app/profiles/0123456789abcdef");
+        let legacy = super::runtime_socket_path(&root.join("lair"));
+        let line_07 = super::runtime_socket_path(&root.join("lair-07"));
+        assert_ne!(legacy, line_07);
+        // The 0.6 store keeps the name existing installs already point at.
+        assert_eq!(legacy, crate::profiles::short_socket_path(root));
+        assert_eq!(line_07, crate::profiles::short_socket_path(&root.join("lair-07")));
     }
 
     #[test]

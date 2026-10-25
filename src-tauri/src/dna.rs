@@ -10,8 +10,9 @@
 //!   - `setup_app_interface()` — Creates WebSocket connections for zome calls
 //!
 //! Change the version constants at the top to match your app/hApp names.
-//! The `"proofpoll"` string passed to `AdminWebsocket::connect()` and
-//! `AppWebsocket::connect()` is an origin identifier — change it to your app name.
+//! Every `AdminWebsocket::connect()` and `AppWebsocket::connect()` presents
+//! `conductor::node_origin()`, the private origin made once per run that the
+//! conductor config allows; nothing here is named after the app.
 //! The installation and WebSocket logic is otherwise app-agnostic.
 
 use holochain_client::{
