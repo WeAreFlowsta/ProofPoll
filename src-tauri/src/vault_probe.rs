@@ -18,10 +18,34 @@ use std::time::{Duration, Instant};
 
 pub(crate) const VAULT_PORTS: [u16; 3] = [27777, 27778, 27779];
 
+/// The Origin header the Vault's bridge maps to this app's client_id. The
+/// linked-apps registry records the origin the WEBVIEW presented during the
+/// link ceremony, so every Rust-side request must present the same one: a
+/// bare reqwest carries none, and the Vault then answers as to a stranger -
+/// `/status` without the display name and picture (scope-gated per origin
+/// since Vault 1.2), `/revoke-identity` refused. Found twice: the
+/// /revoke-identity lesson, then the "F" avatar on Windows (2026-10-25).
+#[cfg(debug_assertions)]
+pub(crate) const WEBVIEW_ORIGIN: &str = "http://localhost:5174"; // devUrl in tauri.conf.json
+#[cfg(all(not(debug_assertions), target_os = "windows"))]
+pub(crate) const WEBVIEW_ORIGIN: &str = "http://tauri.localhost";
+#[cfg(all(not(debug_assertions), not(target_os = "windows")))]
+pub(crate) const WEBVIEW_ORIGIN: &str = "tauri://localhost";
+
 fn http() -> reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT
-        .get_or_init(|| reqwest::Client::builder().build().expect("reqwest client"))
+        .get_or_init(|| {
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert(
+                reqwest::header::ORIGIN,
+                reqwest::header::HeaderValue::from_static(WEBVIEW_ORIGIN),
+            );
+            reqwest::Client::builder()
+                .default_headers(headers)
+                .build()
+                .expect("reqwest client")
+        })
         .clone()
 }
 

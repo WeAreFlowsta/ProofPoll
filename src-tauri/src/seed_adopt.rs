@@ -219,16 +219,7 @@ pub(crate) fn classify_escrow_payload(data: &serde_json::Value) -> Result<Escrow
 
 // ── Production implementations ─────────────────────────────────────────
 
-/// The Origin header the Vault's bridge maps to this app's client_id. The
-/// linked-apps registry records the origin the WEBVIEW presented during the
-/// link ceremony, so a Rust-side request must present the same one (a bare
-/// reqwest carries none and is refused - the /revoke-identity lesson).
-#[cfg(debug_assertions)]
-const WEBVIEW_ORIGIN: &str = "http://localhost:5174"; // devUrl in tauri.conf.json
-#[cfg(all(not(debug_assertions), target_os = "windows"))]
-const WEBVIEW_ORIGIN: &str = "http://tauri.localhost";
-#[cfg(all(not(debug_assertions), not(target_os = "windows")))]
-const WEBVIEW_ORIGIN: &str = "tauri://localhost";
+use crate::vault_probe::WEBVIEW_ORIGIN;
 
 pub(crate) struct VaultEscrowProbe {
     pub client_id: String,

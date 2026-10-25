@@ -17,6 +17,14 @@ import {
   type SeedEscrowReport,
 } from "~/lib/holochain";
 
+/** What `probe_vault` (Rust) found: this account's Vault, unlocked first. */
+interface VaultProbeLite {
+  url: string;
+  unlocked: boolean;
+  display_name: string | null;
+  profile_picture: string | null;
+}
+
 export default component$(() => {
   const nav = useNavigate();
   const linkedCtx = useContext(linkedContext);
@@ -110,11 +118,13 @@ export default component$(() => {
   // fresh link without waiting for an app restart.
   const fetchVaultProfile = $(async () => {
     try {
-      const resp = await fetch("http://127.0.0.1:27777/status", {
-        signal: AbortSignal.timeout(2000),
-      });
-      if (resp.ok) {
-        const vault = await resp.json();
+      // The Rust probe asks every Vault port, keeps only this OS account's
+      // Vault, prefers the unlocked one, and presents this app's Origin - so
+      // the name and picture come back (the Vault scopes them per origin).
+      // A fetch hardcoded to 27777 read a different Vault whenever two were
+      // running (2026-10-25, Windows: the avatar fell back to "F").
+      const vault = await invoke<VaultProbeLite | null>("probe_vault");
+      if (vault) {
         if (vault.display_name) displayName.value = vault.display_name;
         if (vault.profile_picture) profilePicture.value = vault.profile_picture;
         if (vault.display_name || vault.profile_picture) {
@@ -330,7 +340,10 @@ export default component$(() => {
       // Vault attributes and authorizes the revocation by it. Best-effort:
       // the local revocation above is what ends authority.
       try {
-        await fetch("http://127.0.0.1:27777/revoke-identity", {
+        const vault = await invoke<VaultProbeLite | null>("probe_vault").catch(
+          () => null,
+        );
+        await fetch(`${vault?.url ?? "http://127.0.0.1:27777"}/revoke-identity`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
