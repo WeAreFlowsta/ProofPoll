@@ -343,7 +343,6 @@ side; nothing else depends on it:
 | The 0.6 conductor and its lair | `conductor.rs` (`Line::V06` branches, the second conductor start, the 0.6.3 lair in `lair.rs`), the `proofpoll-holochain-06` and `proofpoll-lair-keystore` sidecars in `tauri.conf.json`, `HC_RELEASE_06` in the workflow |
 | The older DNA versions | `dna/v1.0`-`dna/v1.3` (and `dna/workdir`, `dna/zomes` - v1.0's build), `resources/proofpoll_v1_3_happ.happ`, `APP_ID_V1_0..3` / `HAPP_FILE_V1_0..3` in `dna.rs`, the `app_client_v1_*` fields in `AppState` |
 | Migration and the dual-line record view | `migration.rs`, the `V06` arms in `hc.rs` (keep `AppClient` and `RecordView` for the 0.7 line), the legacy branches in `commands.rs` (search `v1_3`, `V06`), `linked_agent_keys_previous` |
-| The two-line copy | "From before the ProofPoll update" / "see this poll after they update" in `src/routes/poll/index.tsx` and the list tag in `src/routes/index.tsx` |
 | The 0.6 bootstrap settings | `PROOFPOLL_BOOTSTRAP_URL`, `PROOFPOLL_RELAY_URL`, `PROOFPOLL_SIGNAL_URL`, `PROOFPOLL_AUTH_MATERIAL`; keep the `_07` pair under your own names |
 
 What is left is a single-conductor Tauri + Holochain 0.7.1 app with identity
