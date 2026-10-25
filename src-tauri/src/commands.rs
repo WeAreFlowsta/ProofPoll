@@ -1570,50 +1570,56 @@ async fn linked_agent_keys_previous(
     }
 }
 
-/// Two hops on one network: the hubs (Vault identities) this agent is linked
-/// to, then every agent linked to those hubs. Errors are logged, not raised:
-/// a network that is not ready yet contributes nothing this tick.
-async fn agent_set_two_hops(
+/// The hubs (Vault identities) this agent is linked to on one network, or
+/// nothing when that network is not running or not ready yet (logged, not
+/// raised: the caller re-runs on its interval).
+async fn hubs_on(
     state: &std::sync::Arc<AppState>,
     local: &AgentPubKey,
+    previous: bool,
+) -> Vec<AgentPubKey> {
+    let line = if previous { "v1.3" } else { "active" };
+    let r = if previous {
+        linked_agent_keys_previous(state, local).await.map(|o| o.unwrap_or_default())
+    } else {
+        linked_agent_keys(state, local).await
+    };
+    match r {
+        Ok(h) => h,
+        Err(e) => {
+            log::warn!("[identity] get_my_agent_set ({}): local lookup failed: {}", line, e);
+            Vec::new()
+        }
+    }
+}
+
+/// Every agent linked to `hub` on one network, folded into `set`. A hub is
+/// a Vault identity key, the same on every network: a new install links on
+/// the active network only, so its hub must be expanded on the previous
+/// network too, or the identity's older installs (linked there before the
+/// upgrade) never read as the same person on the new device (Eric's Mac,
+/// beta.3, 2026-10-25).
+async fn fold_siblings_on(
+    state: &std::sync::Arc<AppState>,
+    hub: &AgentPubKey,
     previous: bool,
     set: &mut Vec<AgentPubKey>,
 ) {
     let line = if previous { "v1.3" } else { "active" };
-    let hubs = if previous {
-        match linked_agent_keys_previous(state, local).await {
-            Ok(Some(h)) => h,
-            Ok(None) => return,
-            Err(e) => {
-                log::warn!("[identity] get_my_agent_set ({}): local lookup failed: {}", line, e);
-                return;
-            }
-        }
+    let siblings = if previous {
+        linked_agent_keys_previous(state, hub).await.map(|o| o.unwrap_or_default())
     } else {
-        match linked_agent_keys(state, local).await {
-            Ok(h) => h,
-            Err(e) => {
-                log::warn!("[identity] get_my_agent_set ({}): local lookup failed: {}", line, e);
-                return;
-            }
-        }
+        linked_agent_keys(state, hub).await
     };
-    for hub in hubs {
-        let siblings = if previous {
-            linked_agent_keys_previous(state, &hub).await.map(|o| o.unwrap_or_default())
-        } else {
-            linked_agent_keys(state, &hub).await
-        };
-        match siblings {
-            Ok(siblings) => {
-                for s in siblings {
-                    if !set.contains(&s) {
-                        set.push(s);
-                    }
+    match siblings {
+        Ok(siblings) => {
+            for s in siblings {
+                if !set.contains(&s) {
+                    set.push(s);
                 }
             }
-            Err(e) => log::warn!("[identity] get_my_agent_set ({}): hub lookup failed: {}", line, e),
         }
+        Err(e) => log::warn!("[identity] get_my_agent_set ({}): hub lookup failed: {}", line, e),
     }
 }
 
@@ -1682,12 +1688,23 @@ pub async fn get_my_agent_set(
 
     // Hop 1: which identity hub(s) is this local agent linked to (the Vault).
     // Hop 2: every agent linked to that hub = all of the user's installs.
-    // Asked on the active network AND on the previous one while both run:
-    // installs that linked before the upgrade exist only on the old network.
     // A network that is not ready contributes nothing this tick; the caller
     // re-runs on its interval, so the set self-heals as the networks come up.
-    agent_set_two_hops(state.inner(), &local, false, &mut set).await;
-    agent_set_two_hops(state.inner(), &local, true, &mut set).await;
+    // The hubs are collected from BOTH networks and each is expanded on
+    // BOTH: the hub key is the identity's, identical on every network, while
+    // the links to it are per network.
+    let mut hubs: Vec<AgentPubKey> = Vec::new();
+    for previous in [false, true] {
+        for h in hubs_on(state.inner(), &local, previous).await {
+            if !hubs.contains(&h) {
+                hubs.push(h);
+            }
+        }
+    }
+    for hub in &hubs {
+        fold_siblings_on(state.inner(), hub, false, &mut set).await;
+        fold_siblings_on(state.inner(), hub, true, &mut set).await;
+    }
 
     let mut out: Vec<String> = set.iter().map(|a| a.to_string()).collect();
     out.sort(); // stable order so change-detection doesn't fire on reordering
