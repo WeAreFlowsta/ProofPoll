@@ -25,6 +25,13 @@ export default defineConfig((): UserConfig => {
         ignored: ["**/src-tauri/**"],
       },
     },
+    // Every dependency first loaded by a dynamic import() must be listed
+    // here, or the dev server re-optimises at runtime and the webview keeps
+    // the already-rendered page while the module graph changes (lesson from
+    // the Vault, 2026-10).
+    optimizeDeps: {
+      include: ["@tauri-apps/plugin-shell", "@flowsta/holochain"],
+    },
     define: {
       __APP_VERSION__: JSON.stringify(
         process.env.npm_package_version ?? "0.1.0"
