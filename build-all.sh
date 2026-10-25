@@ -22,6 +22,9 @@ echo "=== Building ProofPoll DNA v1.2 ==="
 echo ""
 echo "=== Building ProofPoll DNA v1.3 ==="
 (cd dna/v1.3 && bash build.sh)
+echo ""
+echo "=== Building ProofPoll DNA v1.4 (Holochain 0.7.1; needs hc 0.7.1 and Rust 1.94+) ==="
+(cd dna/v1.4 && bash build.sh)
 
 echo ""
 echo "=== Build complete ==="
