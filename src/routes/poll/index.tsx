@@ -312,6 +312,17 @@ export default component$(() => {
               · Closes {new Date(p.closes_at * 1000).toLocaleString()}
             </span>
           )}
+          {/* Two generations of ProofPoll run side by side for a while: say
+              which side of the update a poll is on, in one line each. */}
+          {pollDnaVersion.value === "1.3" && (
+            <span> · From before the ProofPoll update</span>
+          )}
+          {pollDnaVersion.value === "1.4" && (
+            <span>
+              {" "}
+              · People still on ProofPoll 0.4.2 see this poll after they update
+            </span>
+          )}
         </div>
 
         {/* Flag / unflag — only on v1.1 and v1.2 polls (v1.0 has no Flag entry type) */}

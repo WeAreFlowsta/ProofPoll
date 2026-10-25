@@ -23,8 +23,19 @@ import {
 interface VaultProbeLite {
   url: string;
   unlocked: boolean;
+  agent_pub_key: string | null;
   display_name: string | null;
   profile_picture: string | null;
+}
+
+/** Open a web page in the person's browser, never inside this window. */
+async function openExternal(url: string): Promise<void> {
+  try {
+    const { open } = await import("@tauri-apps/plugin-shell");
+    await open(url);
+  } catch {
+    // The browser could not be opened; the address is shown in the text.
+  }
 }
 
 /** "at 12:31" today, otherwise the date and time, in the person's locale. */
@@ -361,15 +372,30 @@ export default component$(() => {
         const vault = await invoke<VaultProbeLite | null>("probe_vault").catch(
           () => null,
         );
-        await fetch(`${vault?.url ?? "http://127.0.0.1:27777"}/revoke-identity`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            app_name: "ProofPoll",
-            app_agent_pub_key: agentKey.value,
-          }),
-          signal: AbortSignal.timeout(3000),
-        });
+        // Name the identity this link belongs to. A Vault holds several
+        // identities and answers an unnamed request as whichever is open;
+        // if another one is open right now, leave the Vault's entry alone
+        // rather than touch the wrong identity (P3).
+        const wrongIdentity =
+          !!vault?.agent_pub_key &&
+          !!linkedVaultKey.value &&
+          vault.agent_pub_key !== linkedVaultKey.value;
+        if (vault && !wrongIdentity) {
+          await fetch(`${vault.url}/revoke-identity`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              app_name: "ProofPoll",
+              app_agent_pub_key: agentKey.value,
+              expected_identity: linkedVaultKey.value,
+            }),
+            signal: AbortSignal.timeout(3000),
+          });
+        } else if (wrongIdentity) {
+          console.info(
+            "[ProofPoll] Vault has a different identity open; its ProofPoll entry stays until that identity is opened and ProofPoll disconnected there.",
+          );
+        }
       } catch {
         // Vault not running - its stale entry is cosmetic
       }
@@ -722,14 +748,13 @@ export default component$(() => {
                 {error.value.includes("not running") && (
                   <p class="mt-2 text-gray-400">
                     Don't have Flowsta Vault?{" "}
-                    <a
-                      href="https://flowsta.com/vault"
-                      target="_blank"
-                      rel="noopener noreferrer"
+                    <button
+                      type="button"
+                      onClick$={() => openExternal("https://flowsta.com/vault")}
                       class="text-indigo-400 hover:text-indigo-300 underline"
-                    >
+                      >
                       Download it at flowsta.com
-                    </a>
+                    </button>
                   </p>
                 )}
               </div>
@@ -769,14 +794,13 @@ export default component$(() => {
 
             <p class="text-xs text-gray-600 mt-4">
               Flowsta Vault must be running and unlocked on this computer.{" "}
-              <a
-                href="https://flowsta.com/vault"
-                target="_blank"
-                rel="noopener noreferrer"
+              <button
+                type="button"
+                onClick$={() => openExternal("https://flowsta.com/vault")}
                 class="text-indigo-400 hover:text-indigo-300 underline"
-              >
+                >
                 Get Flowsta Vault
-              </a>
+              </button>
             </p>
           </div>
 
