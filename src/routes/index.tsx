@@ -398,11 +398,6 @@ export default component$(() => {
                 <div class="flex items-start justify-between mb-2">
                   <h2 class="text-lg font-semibold text-white">
                     {p.poll.title}
-                    {p.dna_version === "1.3" && (
-                      <span class="ml-2 align-middle text-[10px] font-normal uppercase tracking-wide text-gray-500">
-                        before the update
-                      </span>
-                    )}
                   </h2>
                   <span
                     class={`text-xs px-2 py-0.5 rounded ${
