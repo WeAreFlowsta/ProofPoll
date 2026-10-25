@@ -1539,10 +1539,81 @@ async fn linked_agent_keys(
 ) -> Result<Vec<AgentPubKey>, String> {
     let client = state.app_client.lock().await;
     let client = client.as_ref().ok_or("Conductor not ready")?;
+    linked_agent_keys_with(client, agent).await
+}
 
+async fn linked_agent_keys_with(
+    client: &crate::hc::AppClient,
+    agent: &AgentPubKey,
+) -> Result<Vec<AgentPubKey>, String> {
     let payload = crate::hc::encode(&agent.clone())?;
     let result = call_zome(client, AGENT_LINKING_ZOME, "get_linked_agents", payload).await?;
     crate::hc::decode(&result)
+}
+
+/// The same question on the previous generation's network (v1.3). Links are
+/// per network: an install that linked on v1.3 and never upgraded exists
+/// only there, so during the two-line window the identity's agent set is the
+/// UNION of both answers. Without this, every vote cast by an older install
+/// of the same person stopped reading as theirs the moment they upgraded
+/// (beta.1 gate, Windows, 2026-10-25). `None` when the 0.6 line is not
+/// running (post-window builds, or a fresh install with nothing to carry).
+async fn linked_agent_keys_previous(
+    state: &std::sync::Arc<AppState>,
+    agent: &AgentPubKey,
+) -> Result<Option<Vec<AgentPubKey>>, String> {
+    let client = state.app_client_v1_3.lock().await;
+    match client.as_ref() {
+        None => Ok(None),
+        Some(c) => linked_agent_keys_with(c, agent).await.map(Some),
+    }
+}
+
+/// Two hops on one network: the hubs (Vault identities) this agent is linked
+/// to, then every agent linked to those hubs. Errors are logged, not raised:
+/// a network that is not ready yet contributes nothing this tick.
+async fn agent_set_two_hops(
+    state: &std::sync::Arc<AppState>,
+    local: &AgentPubKey,
+    previous: bool,
+    set: &mut Vec<AgentPubKey>,
+) {
+    let line = if previous { "v1.3" } else { "active" };
+    let hubs = if previous {
+        match linked_agent_keys_previous(state, local).await {
+            Ok(Some(h)) => h,
+            Ok(None) => return,
+            Err(e) => {
+                log::warn!("[identity] get_my_agent_set ({}): local lookup failed: {}", line, e);
+                return;
+            }
+        }
+    } else {
+        match linked_agent_keys(state, local).await {
+            Ok(h) => h,
+            Err(e) => {
+                log::warn!("[identity] get_my_agent_set ({}): local lookup failed: {}", line, e);
+                return;
+            }
+        }
+    };
+    for hub in hubs {
+        let siblings = if previous {
+            linked_agent_keys_previous(state, &hub).await.map(|o| o.unwrap_or_default())
+        } else {
+            linked_agent_keys(state, &hub).await
+        };
+        match siblings {
+            Ok(siblings) => {
+                for s in siblings {
+                    if !set.contains(&s) {
+                        set.push(s);
+                    }
+                }
+            }
+            Err(e) => log::warn!("[identity] get_my_agent_set ({}): hub lookup failed: {}", line, e),
+        }
+    }
 }
 
 #[tauri::command]
@@ -1552,11 +1623,15 @@ pub async fn get_linked_agents(
 ) -> Result<Vec<String>, String> {
     let agent = AgentPubKey::try_from(agent_pub_key.clone())
         .map_err(|e| format!("Invalid agent key: {:?}", e))?;
-    let out: Vec<String> = linked_agent_keys(state.inner(), &agent)
-        .await?
-        .iter()
-        .map(|a| a.to_string())
-        .collect();
+    let mut keys = linked_agent_keys(state.inner(), &agent).await?;
+    if let Ok(Some(prev)) = linked_agent_keys_previous(state.inner(), &agent).await {
+        for k in prev {
+            if !keys.contains(&k) {
+                keys.push(k);
+            }
+        }
+    }
+    let out: Vec<String> = keys.iter().map(|a| a.to_string()).collect();
     // Debug, not info: the layout polls this every ~15s, so info would spam
     // the log. The user-facing identity set is logged (on change) by
     // get_my_agent_set instead.
@@ -1606,25 +1681,12 @@ pub async fn get_my_agent_set(
 
     // Hop 1: which identity hub(s) is this local agent linked to (the Vault).
     // Hop 2: every agent linked to that hub = all of the user's installs.
-    match linked_agent_keys(state.inner(), &local).await {
-        Ok(hubs) => {
-            for hub in hubs {
-                match linked_agent_keys(state.inner(), &hub).await {
-                    Ok(siblings) => {
-                        for s in siblings {
-                            if !set.contains(&s) {
-                                set.push(s);
-                            }
-                        }
-                    }
-                    Err(e) => log::warn!("[identity] get_my_agent_set: hub lookup failed: {}", e),
-                }
-            }
-        }
-        // Conductor not ready — degrade to the local agent. The caller
-        // re-runs on its interval, so this self-heals as the network comes up.
-        Err(e) => log::warn!("[identity] get_my_agent_set: local lookup failed: {}", e),
-    }
+    // Asked on the active network AND on the previous one while both run:
+    // installs that linked before the upgrade exist only on the old network.
+    // A network that is not ready contributes nothing this tick; the caller
+    // re-runs on its interval, so the set self-heals as the networks come up.
+    agent_set_two_hops(state.inner(), &local, false, &mut set).await;
+    agent_set_two_hops(state.inner(), &local, true, &mut set).await;
 
     let mut out: Vec<String> = set.iter().map(|a| a.to_string()).collect();
     out.sort(); // stable order so change-detection doesn't fire on reordering
