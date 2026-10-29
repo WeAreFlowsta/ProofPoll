@@ -227,12 +227,18 @@ jobs:
           HC_RELEASE_06: holochain-0.6.1
         run: |
           mkdir -p src-tauri/binaries
+          pinned() { awk -v k="$1" '$1 !~ /^#/ && $2 == k { print $1 }' .github/holochain-sidecars.sha256; }
+          sha() { if command -v sha256sum >/dev/null; then sha256sum "$1"; else shasum -a 256 "$1"; fi | cut -d' ' -f1; }
+          check() { # file, release/asset
+            w=$(pinned "$2"); g=$(sha "$1")
+            [ -n "$w" ] && [ "$g" = "$w" ] || { echo "$2: SHA-256 $g does not match the pinned ${w:-(none)}"; exit 1; }
+          }
           base="https://github.com/holochain/holochain/releases/download"
           fetch() { # release, upstream name, our name
             dest="src-tauri/binaries/$3-${{ matrix.target }}"
             curl -fsSL "${base}/$1/$2-${{ matrix.target }}" -o "$dest"
             chmod +x "$dest"
-            test "$(wc -c < "$dest")" -gt 1000000 || { echo "$2 ($1) download too small"; exit 1; }
+            check "$dest" "$1/$2-${{ matrix.target }}"
           }
           fetch "$HC_RELEASE_07" holochain proofpoll-holochain
           fetch "$HC_RELEASE_06" holochain proofpoll-holochain-06
@@ -255,10 +261,16 @@ jobs:
             @{ rel = $env:HC_RELEASE_06; up = "lair-keystore"; ours = "proofpoll-lair-keystore" },
             @{ rel = $env:HC_RELEASE_07; up = "lair-keystore"; ours = "proofpoll-lair-keystore-07" }
           )
+          function Assert-Pinned($file, $key) {
+            $want = Get-Content .github/holochain-sidecars.sha256 | Where-Object { $_ -notmatch '^\s*#' } |
+              ForEach-Object { $p = $_ -split '\s+'; if ($p[1] -eq $key) { $p[0] } } | Select-Object -First 1
+            $got = (Get-FileHash $file -Algorithm SHA256).Hash.ToLower()
+            if (-not $want -or $got -ne $want) { throw "${key}: SHA-256 $got does not match the pinned $want" }
+          }
           foreach ($w in $wanted) {
             $dest = "src-tauri/binaries/$($w.ours)-$t.exe"
             Invoke-WebRequest "$base/$($w.rel)/$($w.up)-$t.exe" -OutFile $dest
-            if ((Get-Item $dest).Length -lt 1000000) { throw "$($w.up) ($($w.rel)) download too small" }
+            Assert-Pinned $dest "$($w.rel)/$($w.up)-$t.exe"
           }
 
       - name: Install frontend dependencies
