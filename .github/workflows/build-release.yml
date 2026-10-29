@@ -199,6 +199,12 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      # rust-toolchain.toml pins the compiler; rustup installs that toolchain
+      # with the host target only, so the matrix target is added to it here
+      # (the Vault's Intel macOS build of 1.7.0-beta2 failed without this).
+      - name: Add the build target to the pinned toolchain
+        run: rustup target add ${{ matrix.target }}
+
       - name: Rust cache
         uses: swatinem/rust-cache@v2
         with:

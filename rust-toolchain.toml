@@ -1,0 +1,6 @@
+# The Holochain 0.7.1 client crates need a newer compiler than the 0.6 ones
+# (holochain_zome_types 0.7 uses str::floor_char_boundary, stable since 1.93).
+# Without a pin, a machine whose default toolchain is older fails the build.
+# The same pin as Flowsta Vault.
+[toolchain]
+channel = "1.99.1"

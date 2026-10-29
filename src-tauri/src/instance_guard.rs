@@ -21,7 +21,15 @@
 //! Matching is by process NAME (the sidecar file names are ours alone),
 //! never by port or directory, and every kill names one pid.
 
-const SIDECAR_STEMS: &[&str] = &["proofpoll-holochain", "proofpoll-lair-keystore"];
+/// All four sidecars, both lines. With only the first two listed, an
+/// orphaned 0.6 conductor kept port 4466 and the next launch refused with
+/// "Another ProofPoll is already running".
+const SIDECAR_STEMS: &[&str] = &[
+    "proofpoll-holochain",
+    "proofpoll-holochain-06",
+    "proofpoll-lair-keystore",
+    "proofpoll-lair-keystore-07",
+];
 
 /// What we know about a candidate process's parent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -152,6 +160,8 @@ mod tests {
         assert!(is_sidecar_name("proofpoll-holochain"));
         assert!(is_sidecar_name("proofpoll-lair-keystore.exe"));
         assert!(is_sidecar_name("ProofPoll-Holochain.EXE"));
+        assert!(is_sidecar_name("proofpoll-holochain-06"));
+        assert!(is_sidecar_name("proofpoll-lair-keystore-07.exe"));
         assert!(!is_sidecar_name("holochain"));
         assert!(!is_sidecar_name("flowsta-vault-holochain"));
         assert!(!is_sidecar_name("proofpoll"));

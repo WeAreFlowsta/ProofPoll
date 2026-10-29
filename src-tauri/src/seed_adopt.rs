@@ -36,7 +36,9 @@ use std::sync::Arc;
 /// identity-link.json / profile-cache.json (they fall in the binding swap,
 /// after the wipe is verified - so an aborted adopt leaves a sign-in the
 /// layout's self-heal can repair).
-pub(crate) const WIPE_TARGETS: &[&str] = &["conductor", "lair", "lair-passphrase"];
+/// Both lines' directories are listed: the 0.7 store is encrypted under the
+/// same passphrase and holds the same outgoing key.
+pub(crate) const WIPE_TARGETS: &[&str] = &["conductor", "lair", "conductor-07", "lair-07", "lair-passphrase"];
 /// 20 attempts x 500 ms = 10 s per target for Windows to release file locks.
 pub(crate) const WIPE_ATTEMPTS: usize = 20;
 pub(crate) const SETTLE_MS: u64 = 1500;
@@ -279,9 +281,11 @@ impl AdoptSeams for AppSeams {
         let handle = self.state.conductor_handle.lock().unwrap().take();
         match handle {
             Some(h) => {
+                crate::process_ext::stop_pid(h.conductor_child_07.id());
                 crate::process_ext::stop_pid(h.conductor_child.id());
+                crate::process_ext::stop_pid(h.lair_child_07.id());
                 crate::process_ext::stop_pid(h.lair_child.id());
-                log::info!("[adopt] signalled conductor + lair to stop");
+                log::info!("[adopt] signalled both conductors + lairs to stop");
             }
             None => log::warn!("[adopt] no conductor handle held - nothing to stop"),
         }
@@ -566,6 +570,17 @@ mod tests {
                 "commit",
                 "swap",
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_07_line_is_wiped_with_the_06_line() {
+        let s = Scripted::new(&["conductor", "lair", "conductor-07", "lair-07", "lair-passphrase"]);
+        run_adopt(&s, &seed("aa"), Some(&seed("bb"))).await.unwrap();
+        let removed: Vec<String> = s.calls().into_iter().filter(|c| c.starts_with("remove:")).collect();
+        assert_eq!(
+            removed,
+            vec!["remove:conductor", "remove:lair", "remove:conductor-07", "remove:lair-07", "remove:lair-passphrase"]
         );
     }
 

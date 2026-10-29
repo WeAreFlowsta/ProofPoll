@@ -245,6 +245,36 @@ pub fn stop_pid(pid: u32) {
     }
 }
 
+/// Whether a process is still running. Windows has no `kill(pid, 0)`: open
+/// the process and read its exit code, where STILL_ACTIVE (259) means
+/// running. The health monitor used to assume "alive" on Windows, so a
+/// crashed conductor went unnoticed until the next call failed.
+pub fn pid_alive(pid: u32) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{
+            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+        // SAFETY: the handle is checked before use and closed after.
+        unsafe {
+            let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if h.is_null() {
+                return false;
+            }
+            let mut code: u32 = 0;
+            let ok = GetExitCodeProcess(h, &mut code) != 0;
+            CloseHandle(h);
+            ok && code == 259
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        // SAFETY: signal 0 only checks that the process exists.
+        unsafe { libc::kill(pid as i32, 0) == 0 }
+    }
+}
+
 #[cfg(target_os = "windows")]
 mod win_spawn {
     //! `CreateProcessW` with the console window created hidden

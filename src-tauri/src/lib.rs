@@ -252,6 +252,9 @@ pub fn run() {
                                 {
                                     Ok(()) => {
                                         log::info!("Migration completed successfully");
+                                        if let Err(e) = migration::carry_private(&migration_state).await {
+                                            log::warn!("Drafts and vote reasons not copied this run: {}", e);
+                                        }
                                         // Start retry loop for pending votes
                                         migration::spawn_migration_retry_loop(
                                             migration_state,
@@ -267,6 +270,21 @@ pub fn run() {
                                 }
                             });
                         } else {
+                            // Installs that migrated on 0.5.0 left their 0.4.x
+                            // drafts and vote reasons on v1.3: copy them once.
+                            let carry_needed = {
+                                let ms = startup_state.migration_state.lock().await;
+                                v1_3_available && !ms.private_carried
+                            };
+                            if carry_needed {
+                                let carry_state = startup_state.clone();
+                                tauri::async_runtime::spawn(async move {
+                                    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                                    if let Err(e) = migration::carry_private(&carry_state).await {
+                                        log::warn!("Drafts and vote reasons not copied this run: {}", e);
+                                    }
+                                });
+                            }
                             // Check if there are pending votes from a previous run
                             let has_pending = {
                                 let ms = startup_state.migration_state.lock().await;

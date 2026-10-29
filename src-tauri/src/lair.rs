@@ -118,6 +118,16 @@ pub fn start_lair_process_with(
 
     let connection_url = read_connection_url(&config_path)?;
 
+    // A pid_file left by a killed lair (empty after a hard power-off) makes
+    // the new server refuse: its pid check runs before it reads the
+    // passphrase, so every start fails. A second running ProofPoll never
+    // gets here - it is refused earlier, on the conductor ports.
+    let pid_file = lair_dir.join("pid_file");
+    if pid_file.exists() {
+        log::info!("Removing stale lair pid_file: {:?}", pid_file);
+        let _ = std::fs::remove_file(&pid_file);
+    }
+
     // Clean up stale socket file from a previous run, wherever the config
     // puts it. Unix only — Windows named pipes live in the kernel
     // namespace, not on disk, so there's nothing to remove.
@@ -185,7 +195,9 @@ pub fn read_lair_logs(lair_dir: &Path, stage: &str) -> String {
     if trimmed.is_empty() {
         "(no output captured)".to_string()
     } else if trimmed.len() > 500 {
-        format!("{}...", &trimmed[..500])
+        // Cut on a character boundary: slicing bytes panics inside a
+        // multibyte character.
+        format!("{}...", trimmed.chars().take(500).collect::<String>())
     } else {
         trimmed.to_string()
     }

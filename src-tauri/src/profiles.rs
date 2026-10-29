@@ -6,7 +6,8 @@
 //!
 //!   <app data dir>/profiles.json                 device-level index
 //!   <app data dir>/profiles/<folder>/             one profile:
-//!       lair-passphrase, lair/, conductor/, proofpoll-recovery.json (+ .replaced-*),
+//!       lair-passphrase, lair/, conductor/, lair-07/, conductor-07/,
+//!       proofpoll-recovery.json (+ .replaced-*),
 //!       identity-link.json, profile-cache.json, migration-*-state.json,
 //!       adopt-relink-pending
 //!
@@ -30,7 +31,7 @@ pub const PROFILES_DIR: &str = "profiles";
 pub const LOCAL_PROFILE: &str = "local";
 pub const PARTITION_KEY_LEN: usize = 16;
 
-/// Single files that belong to a profile (directories: `lair`, `conductor`).
+/// Single files that belong to a profile (directories: `conductor::LINE_DIRS`).
 pub const PROFILE_FILES: &[&str] = &[
     "lair-passphrase",
     crate::device_seed::RECOVERY_FILE,
@@ -203,7 +204,7 @@ fn profile_entries(root: &Path) -> Vec<PathBuf> {
             if (is_migration_state || is_replaced_recovery) && e.path().is_file() { out.push(e.path()); }
         }
     }
-    for dir in ["conductor", "lair"] {
+    for dir in crate::conductor::LINE_DIRS {
         let p = root.join(dir);
         if p.is_dir() { out.push(p); }
     }
@@ -241,9 +242,11 @@ pub fn relocate_legacy(device_root: &Path, folder: &str) -> Result<PathBuf, Stri
         }
         done.push((from, to));
     }
-    if let Err(e) = rewrite_lair_paths(&root.join("lair"), &device_root.join("lair")) {
-        rollback(&done);
-        return Err(format!("could not rewrite the key store paths: {}", e));
+    for lair in ["lair", crate::conductor::LAIR_DIR_07] {
+        if let Err(e) = rewrite_lair_paths(&root.join(lair), &device_root.join(lair)) {
+            rollback(&done);
+            return Err(format!("could not rewrite the key store paths: {}", e));
+        }
     }
     Ok(root)
 }
@@ -429,6 +432,23 @@ mod tests {
         assert_eq!(k, k.to_lowercase());
         assert_ne!(partition_key(KEY_B).unwrap(), k);
         assert_eq!(partition_key("not a key"), None);
+    }
+
+    #[test]
+    fn the_07_line_moves_with_the_legacy_layout() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        legacy_install(root, Some(KEY_A));
+        let lair07 = root.join("lair-07");
+        std::fs::create_dir_all(&lair07).unwrap();
+        std::fs::write(lair07.join("lair-keystore-config.yaml"), format!("connectionUrl: unix://{}/socket?k=abc\npidFile: {}/pid_file\nstoreFile: {}/store_file\n", lair07.display(), lair07.display(), lair07.display())).unwrap();
+        std::fs::create_dir_all(root.join("conductor-07/databases")).unwrap();
+        std::fs::write(root.join("conductor-07/databases/x"), b"d").unwrap();
+        let chosen = select_profile_root(root, None);
+        assert!(chosen.join("conductor-07/databases/x").exists(), "0.7 conductor data in the profile");
+        assert!(!root.join("lair-07").exists() && !root.join("conductor-07").exists(), "nothing of the 0.7 line left at the root");
+        let yaml = std::fs::read_to_string(chosen.join("lair-07/lair-keystore-config.yaml")).unwrap();
+        assert!(yaml.contains(&format!("storeFile: {}", chosen.join("lair-07").join("store_file").display())), "0.7 key store paths rewritten: {}", yaml);
     }
 
     #[test]

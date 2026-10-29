@@ -15,6 +15,13 @@ use std::path::PathBuf;
 /// - **Release**: returns `<exe_dir>/<name>` (`<name>.exe` on Windows) — Tauri's bundlers
 ///   bundlers install externalBin contents next to the main executable.
 ///   Falls back to a bare name (PATH lookup) if not found there.
+/// Whether a file-name suffix is a target triple (`x86_64-unknown-linux-gnu`,
+/// `aarch64-apple-darwin`, ...), not another sidecar's `06-`/`07-` suffix.
+#[cfg_attr(not(debug_assertions), allow(dead_code))]
+fn is_target_triple(rest: &str) -> bool {
+    matches!(rest.split('-').next(), Some("x86_64" | "aarch64" | "i686" | "armv7"))
+}
+
 pub fn sidecar_path(name: &str) -> PathBuf {
     #[cfg(debug_assertions)]
     {
@@ -24,7 +31,10 @@ pub fn sidecar_path(name: &str) -> PathBuf {
         if let Ok(entries) = std::fs::read_dir(&binaries) {
             for entry in entries.flatten() {
                 if let Some(s) = entry.file_name().to_str() {
-                    if s.starts_with(&prefix) {
+                    // `<name>-<triple>` only: `proofpoll-holochain-` is also
+                    // the start of `proofpoll-holochain-06-<triple>`, and which
+                    // one matched depended on directory order.
+                    if s.strip_prefix(&prefix).map(is_target_triple).unwrap_or(false) {
                         return entry.path();
                     }
                 }
@@ -48,5 +58,18 @@ pub fn sidecar_path(name: &str) -> PathBuf {
             }
         }
         PathBuf::from(name)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_target_triple;
+
+    #[test]
+    fn only_a_target_triple_follows_the_name() {
+        assert!(is_target_triple("x86_64-unknown-linux-gnu"));
+        assert!(is_target_triple("aarch64-apple-darwin"));
+        assert!(!is_target_triple("06-x86_64-unknown-linux-gnu"), "proofpoll-holochain must not match the 0.6 binary");
+        assert!(!is_target_triple("07-aarch64-apple-darwin"), "proofpoll-lair-keystore must not match the 0.7 binary");
     }
 }

@@ -31,6 +31,22 @@ pub const ADMIN_WS_PORT: u16 = 4466;
 pub const ADMIN_WS_PORT_07: u16 = 4467;
 /// Data directory name of the 0.7.1 conductor (the 0.6.1 one keeps `conductor`).
 pub const CONDUCTOR_DIR_07: &str = "conductor-07";
+/// How many bytes of ops one gossip exchange may offer the 0.7 conductor
+/// (kitsune2's default is 100 MB). Holochain 0.7.1 checks which offered ops
+/// it already holds in one query that binds every op id three times, and
+/// SQLite refuses past 32,766 bound values: an exchange offering more than
+/// ~10.9k ids is dropped, every round (holochain/holochain#6062). Once
+/// ProofPoll's 0.7 network holds that many ops, a new install's first sync
+/// would never finish. 1 MiB keeps a batch to a few thousand ids; a larger
+/// backlog arrives over several rounds. The Vault's value since 1.7.0.
+pub const GOSSIP_OP_BYTES_07: u32 = 1024 * 1024;
+
+/// Key store directory of the 0.7.1 line (the 0.6.1 one keeps `lair`).
+pub const LAIR_DIR_07: &str = "lair-07";
+/// Every directory that belongs to a line, both lines. A wipe, move or
+/// set-aside names all four: a reset that left `lair-07/` behind kept it
+/// encrypted under the old passphrase, and the 0.7 line failed to start.
+pub const LINE_DIRS: &[&str] = &["conductor", "lair", CONDUCTOR_DIR_07, LAIR_DIR_07];
 
 // ── Bootstrap configuration ────────────────────────────────────────
 //
@@ -303,6 +319,10 @@ network:
   bootstrap_url: {bootstrap}
   relay_url: {relay}
   request_timeout_s: 60
+  advanced:
+    k2Gossip:
+      maxGossipOpBytes: {gossip_bytes}
+      maxRequestGossipOpBytes: {gossip_bytes}
 {auth_line}db_sync_level: Normal
 "#,
             data_root = data_root,
@@ -311,6 +331,7 @@ network:
             lair_url = lair_url,
             bootstrap = bootstrap_url_07(),
             relay = relay_url_07(),
+            gossip_bytes = GOSSIP_OP_BYTES_07,
             auth_line = auth_line,
         ),
     };
@@ -382,7 +403,9 @@ fn read_conductor_logs(conductor_dir: &Path) -> String {
 
     let output = if !stderr.is_empty() { stderr } else { stdout };
     if output.len() > 500 {
-        format!("{}...", &output[..500])
+        // Cut on a character boundary: slicing bytes panics inside a
+        // multibyte character.
+        format!("{}...", output.chars().take(500).collect::<String>())
     } else {
         output
     }
@@ -902,16 +925,7 @@ pub fn spawn_health_monitor(
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 
-            // Check if process is still alive via kill(pid, 0) on Unix.
-            // Windows lacks libc::kill — for now we just skip the proactive
-            // check there; a conductor crash surfaces via the next failing
-            // API call instead. To restore on Windows, use windows-sys
-            // `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` +
-            // `GetExitCodeProcess` and treat `STILL_ACTIVE` (259) as alive.
-            #[cfg(unix)]
-            let alive = unsafe { libc::kill(pid, 0) } == 0;
-            #[cfg(not(unix))]
-            let alive = true;
+            let alive = crate::process_ext::pid_alive(conductor_pid);
             if !alive {
                 let current = state.conductor_status.lock().unwrap().clone();
                 // Only report if we were in Ready state (not already Error/Stopped)
@@ -932,6 +946,16 @@ pub fn spawn_health_monitor(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_07_config_caps_each_gossip_exchange() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = generate_conductor_config(dir.path(), "unix:///tmp/x/socket?k=a", ADMIN_WS_PORT_07, crate::hc::Line::V07).unwrap();
+        let yaml = std::fs::read_to_string(cfg).unwrap();
+        // Under network.advanced.k2Gossip: a misplaced key fails the network
+        // join with "decode config: invalid type".
+        assert!(yaml.contains("\n  advanced:\n    k2Gossip:\n      maxGossipOpBytes: 1048576\n      maxRequestGossipOpBytes: 1048576\n"), "{yaml}");
+    }
 
     /// Full-stack probe for the "Failed to save draft" report: real lair,
     /// real conductor, the BUNDLED v1.3 happ, a fresh install whose agent

@@ -35,7 +35,6 @@ use std::sync::Mutex;
 #[derive(serde::Deserialize)]
 struct MigratedPollEntry {
     old_action_hash: ActionHash,
-    #[allow(dead_code)]
     new_action_hash: ActionHash,
     #[allow(dead_code)]
     migrated_at: i64,
@@ -175,6 +174,11 @@ pub struct AppState {
     /// proofpoll.log. The SDK and the write trigger only ever said it in the
     /// webview console, so a stale backup date had no explanation (P6).
     pub last_backup_outcome: Mutex<Option<BackupOutcome>>,
+    /// Migrated poll (its v1.4 hash) -> the v1.3 poll it came from, from the
+    /// active line's mappings; `None` until first read. Votes cast on the
+    /// old copy (an install still on 0.4.x, or a vote that could not move)
+    /// are read from there as well, or they vanished from the count.
+    pub migrated_from: Mutex<Option<std::collections::HashMap<String, String>>>,
 }
 
 impl AppState {
@@ -187,7 +191,6 @@ impl AppState {
         let passphrase_path = data_dir.join("lair-passphrase");
         let lair_config_path = data_dir.join("lair").join("lair-keystore-config.yaml");
         let lair_store_path = data_dir.join("lair").join("store_file");
-        let conductor_dir = data_dir.join("conductor");
 
         // These three files are encryption-paired: lair-passphrase derives the
         // crypto key, the config holds matching salts, store_file is encrypted
@@ -215,8 +218,9 @@ impl AppState {
                 pp, cfg, store,
             );
             let _ = std::fs::remove_file(&passphrase_path);
-            let _ = std::fs::remove_dir_all(data_dir.join("lair"));
-            let _ = std::fs::remove_dir_all(&conductor_dir);
+            for dir in crate::conductor::LINE_DIRS {
+                let _ = std::fs::remove_dir_all(data_dir.join(dir));
+            }
         }
 
         let passphrase = if passphrase_path.exists() {
@@ -249,6 +253,7 @@ impl AppState {
             lair_client: tokio::sync::Mutex::new(None),
             migration_state: tokio::sync::Mutex::new(migration_state),
             last_backup_outcome: Mutex::new(None),
+            migrated_from: Mutex::new(None),
         }
     }
 }
@@ -267,7 +272,7 @@ impl AppState {
 /// key; no flow re-adopts their authorship.
 pub fn nuke_state_and_regenerate_passphrase(data_dir: &Path, app_state: &AppState) -> String {
     log::warn!(
-        "Performing full state reset under {:?} (lair-passphrase + lair/ + conductor/)",
+        "Performing full state reset under {:?} (lair-passphrase + both lines' lair and conductor dirs)",
         data_dir,
     );
     let passphrase_path = data_dir.join("lair-passphrase");
@@ -276,14 +281,11 @@ pub fn nuke_state_and_regenerate_passphrase(data_dir: &Path, app_state: &AppStat
             log::warn!("remove lair-passphrase: {}", e);
         }
     }
-    if let Err(e) = std::fs::remove_dir_all(data_dir.join("lair")) {
-        if e.kind() != std::io::ErrorKind::NotFound {
-            log::warn!("remove_dir_all lair: {}", e);
-        }
-    }
-    if let Err(e) = std::fs::remove_dir_all(data_dir.join("conductor")) {
-        if e.kind() != std::io::ErrorKind::NotFound {
-            log::warn!("remove_dir_all conductor: {}", e);
+    for dir in crate::conductor::LINE_DIRS {
+        if let Err(e) = std::fs::remove_dir_all(data_dir.join(dir)) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                log::warn!("remove_dir_all {}: {}", dir, e);
+            }
         }
     }
 
@@ -708,11 +710,14 @@ pub async fn get_all_polls(
             let payload = crate::hc::encode(&())?;
             if let Ok(r) = call_zome(client, POLLS_ZOME, "get_all_migration_mappings", payload).await {
                 let records = crate::hc::records(client.line(), &r).unwrap_or_default();
+                let mut from = std::collections::HashMap::new();
                 for rec in &records {
                     if let Ok(entry) = decode_entry::<MigratedPollEntry>(rec) {
                         migrated_hashes.insert(entry.old_action_hash.to_string());
+                        from.insert(entry.new_action_hash.to_string(), entry.old_action_hash.to_string());
                     }
                 }
+                *state.migrated_from.lock().unwrap() = Some(from);
             }
         }
     }
@@ -917,6 +922,28 @@ pub async fn cast_vote(
     Ok(action_hash.to_string())
 }
 
+/// The v1.3 poll a v1.4 poll was migrated from: from the map `get_all_polls`
+/// keeps, read once from the active line when it is not loaded yet.
+async fn migrated_from_of(state: &AppState, new_hash: &str) -> Option<String> {
+    let cached = state.migrated_from.lock().unwrap().as_ref().map(|m| m.get(new_hash).cloned());
+    if let Some(found) = cached {
+        return found;
+    }
+    let client = state.app_client.lock().await;
+    let client = client.as_ref()?;
+    let payload = crate::hc::encode(&()).ok()?;
+    let r = call_zome(client, POLLS_ZOME, "get_all_migration_mappings", payload).await.ok()?;
+    let mut from = std::collections::HashMap::new();
+    for rec in crate::hc::records(client.line(), &r).unwrap_or_default() {
+        if let Ok(entry) = decode_entry::<MigratedPollEntry>(&rec) {
+            from.insert(entry.new_action_hash.to_string(), entry.old_action_hash.to_string());
+        }
+    }
+    let found = from.get(new_hash).cloned();
+    *state.migrated_from.lock().unwrap() = Some(from);
+    found
+}
+
 #[tauri::command]
 pub async fn get_poll_votes(
     state: tauri::State<'_, std::sync::Arc<AppState>>,
@@ -950,10 +977,34 @@ pub async fn get_poll_votes(
         let result = call_zome(client, POLLS_ZOME, "get_poll_votes", payload.clone()).await?;
         crate::hc::records(client.line(), &result)?
     } else {
-        let client = state.app_client.lock().await;
-        let client = client.as_ref().ok_or("Conductor not ready")?;
-        let result = call_zome(client, POLLS_ZOME, "get_poll_votes", payload.clone()).await?;
-        crate::hc::records(client.line(), &result)?
+        let mut records = {
+            let client = state.app_client.lock().await;
+            let client = client.as_ref().ok_or("Conductor not ready")?;
+            let result = call_zome(client, POLLS_ZOME, "get_poll_votes", payload.clone()).await?;
+            crate::hc::records(client.line(), &result)?
+        };
+        // A migrated poll: add the votes cast on the copy it came from, by
+        // anyone with no vote here (a migrated vote keeps its author's key).
+        if let Some(old) = migrated_from_of(&state, &hash.to_string()).await {
+            if let Ok(old_hash) = ActionHash::try_from(old) {
+                let client = state.app_client_v1_3.lock().await;
+                if let Some(client) = client.as_ref() {
+                    let old_payload = crate::hc::encode(&old_hash)?;
+                    match call_zome(client, POLLS_ZOME, "get_poll_votes", old_payload).await {
+                        Ok(r) => {
+                            let here: std::collections::HashSet<_> = records.iter().map(|v| v.author.clone()).collect();
+                            for rec in crate::hc::records(client.line(), &r).unwrap_or_default() {
+                                if !here.contains(&rec.author) {
+                                    records.push(rec);
+                                }
+                            }
+                        }
+                        Err(e) => log::warn!("Votes on the poll's original copy not read: {}", e),
+                    }
+                }
+            }
+        }
+        records
     };
 
     let mut votes = Vec::new();
@@ -1987,12 +2038,29 @@ pub async fn get_vote_rationale(
     vote_action_hash: String,
 ) -> Result<Option<String>, String> {
     let vote_hash = parse_action_hash(&vote_action_hash)?;
-
-    let client = state.app_client.lock().await;
-    let client = client.as_ref().ok_or("Conductor not ready")?;
     let payload = crate::hc::encode(&vote_hash)?;
-    let result = call_zome(client, POLLS_ZOME, "get_vote_rationale", payload).await?;
-    let record = crate::hc::record_opt(client.line(), &result)?;
+
+    let record = {
+        let client = state.app_client.lock().await;
+        let client = client.as_ref().ok_or("Conductor not ready")?;
+        let result = call_zome(client, POLLS_ZOME, "get_vote_rationale", payload.clone()).await?;
+        crate::hc::record_opt(client.line(), &result)?
+    };
+    // A vote still on the v1.3 network (shown beside its migrated poll) keeps
+    // its reason there.
+    let record = match record {
+        Some(r) => Some(r),
+        None => {
+            let client = state.app_client_v1_3.lock().await;
+            match client.as_ref() {
+                Some(c) => match call_zome(c, POLLS_ZOME, "get_vote_rationale", payload).await {
+                    Ok(result) => crate::hc::record_opt(c.line(), &result).unwrap_or(None),
+                    Err(_) => None,
+                },
+                None => None,
+            }
+        }
+    };
 
     let record = match record {
         Some(r) => r,
