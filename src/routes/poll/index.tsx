@@ -231,7 +231,7 @@ export default component$(() => {
 
   if (loading.value) {
     return (
-      <div class="flex flex-col items-center justify-center py-16 gap-4">
+      <div class="flex flex-col items-center justify-center py-16 gap-4" data-testid="poll-loading">
         <div class="w-8 h-8 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin" />
         <p class="text-gray-400">Loading poll...</p>
       </div>
@@ -240,7 +240,7 @@ export default component$(() => {
 
   if (error.value) {
     return (
-      <div class="max-w-md mx-auto mt-12">
+      <div class="max-w-md mx-auto mt-12" data-testid="poll-error">
         <div class="bg-red-900/20 border border-red-800/40 rounded-lg p-5">
           <div class="flex items-start gap-3">
             <svg class="w-5 h-5 text-red-400 mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={2}>
@@ -277,7 +277,7 @@ export default component$(() => {
     <div class="max-w-2xl mx-auto">
       <div class="mb-6">
         <div class="flex items-start justify-between mb-2">
-          <h1 class="text-2xl font-bold">{p.title}</h1>
+          <h1 class="text-2xl font-bold" data-testid="poll-title">{p.title}</h1>
           <div class="flex items-center gap-2 shrink-0">
             {isPublic && (
               <span class="text-xs px-2 py-0.5 rounded bg-blue-900 text-blue-300">
@@ -411,19 +411,19 @@ export default component$(() => {
       {/* Voting form */}
       {isOpen && !hasVoted.value && (
         linked.value ? (
-          <div class="bg-gray-900 border border-gray-800 rounded-lg p-5 mb-6">
+          <div class="bg-gray-900 border border-gray-800 rounded-lg p-5 mb-6" data-testid="poll-vote-form">
             <h2 class="text-sm font-medium text-gray-300 mb-3">
               Cast your vote
             </h2>
 
             {isPublic && (
               <div class="bg-blue-900/20 border border-blue-800/40 rounded-lg px-3 py-2 text-xs text-blue-300 mb-3">
-                This is a public poll — your display name will be shown alongside your vote.
+                This is a public poll: your display name is shown alongside your vote.
               </div>
             )}
 
             {voteError.value && (
-              <div class="bg-red-900/50 border border-red-700 text-red-300 px-3 py-2 rounded text-sm mb-3">
+              <div class="bg-red-900/50 border border-red-700 text-red-300 px-3 py-2 rounded text-sm mb-3" data-testid="poll-vote-error">
                 {voteError.value}
               </div>
             )}
@@ -441,6 +441,7 @@ export default component$(() => {
                   <input
                     type="radio"
                     name="vote"
+                    data-testid={`poll-option-${i}`}
                     checked={selectedOption.value === i}
                     onChange$={() => (selectedOption.value = i)}
                     class="accent-indigo-500"
@@ -452,6 +453,7 @@ export default component$(() => {
 
             <button
               type="button"
+              data-testid="poll-vote"
               onClick$={submitVote}
               disabled={selectedOption.value === null || voting.value}
               class="bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white font-medium px-4 py-2 rounded-full text-sm"
@@ -486,7 +488,7 @@ export default component$(() => {
 
       {hasVoted.value && (
         <div class="mb-6">
-          <div class="bg-green-900/20 border border-green-800 text-green-300 px-4 py-2 rounded-lg text-sm mb-3">
+          <div class="bg-green-900/20 border border-green-800 text-green-300 px-4 py-2 rounded-lg text-sm mb-3" data-testid="poll-voted">
             You have voted on this poll.
           </div>
 
@@ -530,7 +532,7 @@ export default component$(() => {
       )}
 
       {/* Results */}
-      <div class="bg-gray-900 border border-gray-800 rounded-lg p-5 mb-6">
+      <div class="bg-gray-900 border border-gray-800 rounded-lg p-5 mb-6" data-testid="poll-results">
         <h2 class="text-sm font-medium text-gray-300 mb-4">
           Results ({totalVotes} total)
         </h2>
@@ -555,7 +557,7 @@ export default component$(() => {
                 <div key={i}>
                   <div class="flex justify-between text-sm mb-1">
                     <span class="text-gray-200">{option}</span>
-                    <span class="text-gray-400">
+                    <span class="text-gray-400" data-testid={`poll-result-count-${i}`}>
                       {count} ({pct}%)
                     </span>
                   </div>

@@ -269,7 +269,7 @@ export default component$(() => {
           // Vault isn't running. Best-effort: try to open it for the user.
           void invoke("launch_vault").catch(() => {});
           error.value =
-            "Flowsta Vault isn't running — opening it now. Once it's ready, click Sign in with Flowsta again.";
+            "Flowsta Vault isn't running, so it's opening now. Once it's ready, click Sign in with Flowsta again.";
         } else if (msg.includes("VaultLocked")) {
           error.value = "Flowsta Vault is locked. Please unlock it first.";
         } else if (msg.includes("UserDenied") || msg.includes("denied")) {
@@ -347,7 +347,7 @@ export default component$(() => {
         // Vault isn't running. Best-effort: try to open it for the user.
         void invoke("launch_vault").catch(() => {});
         error.value =
-          "Flowsta Vault isn't running — opening it now. Once it's ready, click Sign in with Flowsta again.";
+          "Flowsta Vault isn't running, so it's opening now. Once it's ready, click Sign in with Flowsta again.";
       } else if (msg.includes("VaultLocked")) {
         error.value = "Flowsta Vault is locked. Please unlock it first.";
       } else if (msg.includes("UserDenied") || msg.includes("denied")) {
@@ -423,7 +423,7 @@ export default component$(() => {
       <h1 class="text-2xl font-bold mb-6">Identity</h1>
 
       {loading.value ? (
-        <div class="flex flex-col items-center justify-center py-16 gap-4">
+        <div class="flex flex-col items-center justify-center py-16 gap-4" data-testid="identity-loading">
           <div class="w-8 h-8 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin" />
           <p class="text-gray-400">Getting your identity ready...</p>
           <p class="text-gray-500 text-sm max-w-xs text-center">
@@ -433,7 +433,7 @@ export default component$(() => {
         </div>
       ) : linkedVaultKey.value && hasLocalLink.value ? (
         /* ── Linked state ── */
-        <div class="space-y-6">
+        <div class="space-y-6" data-testid="identity-linked">
           {/* Profile card */}
           <div class="bg-gray-900 border border-gray-800 rounded-lg p-6">
             <div class="flex items-center gap-4 mb-4">
@@ -451,7 +451,7 @@ export default component$(() => {
                 </div>
               )}
               <div>
-                <p class="text-white font-medium text-lg">
+                <p class="text-white font-medium text-lg" data-testid="identity-display-name">
                   {displayName.value || "Flowsta Account"}
                 </p>
                 <div class="flex items-center gap-1.5 mt-0.5">
@@ -468,13 +468,13 @@ export default component$(() => {
 
           {/* Status messages */}
           {error.value && (
-            <div class="bg-red-900/50 border border-red-700 text-red-300 px-4 py-2 rounded-lg text-sm">
+            <div class="bg-red-900/50 border border-red-700 text-red-300 px-4 py-2 rounded-lg text-sm" data-testid="identity-error">
               {error.value}
             </div>
           )}
 
           {success.value && (
-            <div class="bg-green-900/20 border border-green-800 text-green-300 px-4 py-2 rounded-lg text-sm">
+            <div class="bg-green-900/20 border border-green-800 text-green-300 px-4 py-2 rounded-lg text-sm" data-testid="identity-success">
               {success.value}
             </div>
           )}
@@ -482,7 +482,7 @@ export default component$(() => {
           {/* ── Backups & recovery: the agent-seed escrow story ──
               One panel, one voice at a time: restore conflict outranks the
               legacy re-key offer outranks the synced checkmark. */}
-          <div class="bg-gray-900 border border-gray-800 rounded-lg p-6">
+          <div class="bg-gray-900 border border-gray-800 rounded-lg p-6" data-testid="identity-backups">
             <h2 class="text-sm font-semibold text-white mb-1">
               Backups &amp; recovery
             </h2>
@@ -671,6 +671,7 @@ export default component$(() => {
             {!confirmUnlink.value ? (
               <button
                 type="button"
+                data-testid="identity-disconnect"
                 onClick$={() => (confirmUnlink.value = true)}
                 class="text-sm text-gray-500 hover:text-gray-300"
               >
@@ -706,6 +707,7 @@ export default component$(() => {
           <div>
             <button
               type="button"
+              data-testid="identity-details-toggle"
               onClick$={() => (showDetails.value = !showDetails.value)}
               class="text-xs text-gray-500 hover:text-gray-400 flex items-center gap-1"
             >
@@ -718,13 +720,13 @@ export default component$(() => {
               <div class="mt-2 bg-gray-900 border border-gray-800 rounded-lg p-4 space-y-3">
                 <div>
                   <p class="text-xs text-gray-500 mb-1">ProofPoll agent key</p>
-                  <p class="font-mono text-xs text-gray-400 break-all">
+                  <p class="font-mono text-xs text-gray-400 break-all" data-testid="identity-agent-key">
                     {agentKey.value}
                   </p>
                 </div>
                 <div>
                   <p class="text-xs text-gray-500 mb-1">Linked Vault key</p>
-                  <p class="font-mono text-xs text-gray-400 break-all">
+                  <p class="font-mono text-xs text-gray-400 break-all" data-testid="identity-vault-key">
                     {linkedVaultKey.value}
                   </p>
                 </div>
@@ -734,19 +736,19 @@ export default component$(() => {
         </div>
       ) : (
         /* ── Not linked state ── */
-        <div class="space-y-6">
+        <div class="space-y-6" data-testid="identity-signed-out">
           <div class="bg-gray-900 border border-gray-800 rounded-lg p-6 text-center">
             <h2 class="text-lg font-semibold text-white mb-2">
               Connect your Flowsta account
             </h2>
             <p class="text-sm text-gray-400 mb-6 max-w-sm mx-auto">
               Signing in proves you're a real person, so each person gets one
-              vote — even if they have multiple devices.
+              vote, even if they have multiple devices.
             </p>
 
             {/* Status messages */}
             {error.value && (
-              <div class="bg-red-900/50 border border-red-700 text-red-300 px-4 py-2 rounded-lg text-sm mb-4 text-left">
+              <div class="bg-red-900/50 border border-red-700 text-red-300 px-4 py-2 rounded-lg text-sm mb-4 text-left" data-testid="identity-error">
                 {error.value}
                 {error.value.includes("not running") && (
                   <p class="mt-2 text-gray-400">
@@ -764,13 +766,14 @@ export default component$(() => {
             )}
 
             {success.value && (
-              <div class="bg-green-900/20 border border-green-800 text-green-300 px-4 py-2 rounded-lg text-sm mb-4">
+              <div class="bg-green-900/20 border border-green-800 text-green-300 px-4 py-2 rounded-lg text-sm mb-4" data-testid="identity-success">
                 {success.value}
               </div>
             )}
 
             <button
               type="button"
+              data-testid="identity-signin"
               onClick$={linkIdentity}
               disabled={linking.value || !agentKey.value}
               class="disabled:opacity-50 inline-block"
@@ -790,7 +793,7 @@ export default component$(() => {
               )}
             </button>
             {linking.value && (
-              <p class="text-sm text-indigo-300 mt-3">
+              <p class="text-sm text-indigo-300 mt-3" data-testid="identity-connecting">
                 Check your Flowsta Vault app to approve the connection.
               </p>
             )}
@@ -811,6 +814,7 @@ export default component$(() => {
           <div>
             <button
               type="button"
+              data-testid="identity-details-toggle"
               onClick$={() => (showDetails.value = !showDetails.value)}
               class="text-xs text-gray-500 hover:text-gray-400 flex items-center gap-1"
             >

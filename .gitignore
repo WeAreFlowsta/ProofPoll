@@ -53,3 +53,6 @@ dna/v1.3/target/
 # DNA build trees (the packed bundles under dna/*/workdir are committed)
 dna/*/target/
 dna/*/tests/target/
+
+# WebdriverIO run logs (npm run e2e)
+/logs/

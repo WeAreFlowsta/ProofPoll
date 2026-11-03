@@ -16,7 +16,9 @@
     "lint": "eslint \"src/**/*.ts*\"",
     "start": "vite --open --mode ssr",
     "qwik": "qwik",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "e2e:build": "FEATURES=e2e scripts/build-test-binary.sh",
+    "e2e": "node e2e/run.mjs"
   },
   "devDependencies": {
     "@builder.io/qwik": "^1.19.0",
@@ -25,13 +27,21 @@
     "@tauri-apps/api": "~2.12.4",
     "@tauri-apps/cli": "~2.12.4",
     "@types/node": "20.19.0",
+    "@wdio/cli": "^9.33.1",
+    "@wdio/local-runner": "^9.33.1",
+    "@wdio/mocha-framework": "^9.33.1",
+    "@wdio/spec-reporter": "^9.33.1",
+    "@wdio/tauri-plugin": "^1.5.1",
+    "@wdio/tauri-service": "^1.5.1",
     "prettier": "3.6.2",
     "tailwindcss": "^4.2.0",
+    "tsx": "~4.23.15",
     "typescript": "5.4.5",
     "typescript-plugin-css-modules": "latest",
     "undici": "*",
     "vite": "7.3.2",
-    "vite-tsconfig-paths": "^4.2.1"
+    "vite-tsconfig-paths": "^4.2.1",
+    "webdriverio": "^9.33.1"
   },
   "dependencies": {
     "@flowsta/holochain": "^3.5.0",

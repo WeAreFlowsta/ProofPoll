@@ -83,12 +83,15 @@ sysinfo = "0.33"
 
 # The test harness's localhost server (feature `harness`, test builds only).
 axum = { version = "0.7", optional = true, default-features = false, features = ["http1", "json", "tokio"] }
+# The embedded WebDriver the UI suite drives (feature `e2e`, test builds only).
+tauri-plugin-wdio-webdriver = { version = "1.4", optional = true }
 
 [features]
 # Test builds only (scripts/build-test-binary.sh), never a release build:
 # scripts/check-test-features.mjs refuses them in the default features and
 # in every workflow.
 harness = ["dep:axum"]
+e2e = ["harness", "dep:tauri-plugin-wdio-webdriver"]
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

@@ -65,7 +65,7 @@ export default component$(() => {
 
   if (loading.value) {
     return (
-      <div class="flex flex-col items-center justify-center py-16 gap-4">
+      <div class="flex flex-col items-center justify-center py-16 gap-4" data-testid="drafts-loading">
         <div class="w-8 h-8 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin" />
         <p class="text-gray-400">Loading drafts...</p>
       </div>
@@ -80,18 +80,18 @@ export default component$(() => {
           <svg class="w-4 h-4 text-amber-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={2}>
             <path stroke-linecap="round" stroke-linejoin="round" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
           </svg>
-          Encrypted on the DHT — only you can read these
+          Encrypted, so only you can read these
         </div>
       </div>
 
       {error.value && (
-        <div class="bg-red-900/50 border border-red-700 text-red-300 px-4 py-3 rounded-lg mb-4 text-sm">
+        <div class="bg-red-900/50 border border-red-700 text-red-300 px-4 py-3 rounded-lg mb-4 text-sm" data-testid="drafts-error">
           {error.value}
         </div>
       )}
 
       {drafts.value.length === 0 ? (
-        <div class="bg-gray-900 border border-gray-800 rounded-lg p-8 text-center">
+        <div class="bg-gray-900 border border-gray-800 rounded-lg p-8 text-center" data-testid="drafts-empty">
           <p class="text-gray-400 mb-4">No draft polls yet.</p>
           <a
             href="/create/"
@@ -101,7 +101,7 @@ export default component$(() => {
           </a>
         </div>
       ) : (
-        <div class="space-y-3">
+        <div class="space-y-3" data-testid="drafts-list">
           {drafts.value.map((draft) => {
             const isPublishing = publishing.value === draft.hash;
             const isDeleting = deleteConfirm.value === draft.hash;
@@ -109,6 +109,7 @@ export default component$(() => {
             return (
               <div
                 key={draft.hash}
+                data-testid="drafts-row"
                 class="bg-gray-900 border border-gray-800 rounded-lg p-5"
               >
                 <div class="flex items-start justify-between mb-2">
@@ -168,6 +169,7 @@ export default component$(() => {
                   <div class="flex gap-2">
                     <button
                       type="button"
+                      data-testid="drafts-publish"
                       onClick$={() => handlePublish(draft.hash)}
                       disabled={isPublishing}
                       class="bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white font-medium px-4 py-1.5 rounded-full text-xs"

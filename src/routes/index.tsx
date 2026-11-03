@@ -180,6 +180,7 @@ export default component$(() => {
         >
           <div
             class="bg-gray-900 border border-gray-700 rounded-xl p-8 max-w-sm w-full mx-4 text-center"
+            data-testid="home-signin-dialog"
             onClick$={(e) => e.stopPropagation()}
           >
             <h2 class="text-lg font-semibold text-white mb-2">Sign in required</h2>
@@ -205,6 +206,7 @@ export default component$(() => {
             </button>
             <button
               type="button"
+              data-testid="home-signin-dialog-cancel"
               onClick$={() => (showSignIn.value = false)}
               class="mt-4 text-sm text-gray-500 hover:text-gray-300 block mx-auto"
             >
@@ -219,6 +221,7 @@ export default component$(() => {
         {linked.value ? (
           <Link
             href="/create/"
+            data-testid="home-create"
             class="bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded-full text-sm font-medium"
           >
             Create Poll
@@ -226,6 +229,7 @@ export default component$(() => {
         ) : (
           <button
             type="button"
+            data-testid="home-create"
             onClick$={() => (showSignIn.value = true)}
             class="bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded-full text-sm font-medium"
           >
@@ -275,17 +279,17 @@ export default component$(() => {
       )}
 
       {loading.value ? (
-        <div class="flex flex-col items-center justify-center py-16 gap-4">
+        <div class="flex flex-col items-center justify-center py-16 gap-4" data-testid="home-loading">
           <div class="w-8 h-8 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin" />
           <p class="text-gray-400">Loading polls...</p>
           {loadingSlow.value && (
             <p class="text-gray-500 text-sm">
-              Syncing with the network — first load can take a moment.
+              Syncing with the network. The first load can take a moment.
             </p>
           )}
         </div>
       ) : error.value ? (
-        <div class="bg-red-900/20 border border-red-800/40 rounded-lg p-5 max-w-md">
+        <div class="bg-red-900/20 border border-red-800/40 rounded-lg p-5 max-w-md" data-testid="home-error">
           <div class="flex items-start gap-3">
             <svg class="w-5 h-5 text-red-400 mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={2}>
               <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
@@ -304,7 +308,7 @@ export default component$(() => {
           </div>
         </div>
       ) : polls.value.length === 0 && inFirstSyncWindow.value ? (
-        <div class="flex flex-col items-center justify-center py-16 gap-4 text-center">
+        <div class="flex flex-col items-center justify-center py-16 gap-4 text-center" data-testid="home-syncing">
           <div class="w-8 h-8 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin" />
           <p class="text-gray-400 text-lg">Syncing polls from the network</p>
           <p class="text-gray-500 text-sm max-w-md">
@@ -318,7 +322,7 @@ export default component$(() => {
           )}
         </div>
       ) : polls.value.length === 0 ? (
-        <div class="text-center py-16">
+        <div class="text-center py-16" data-testid="home-empty">
           <p class="text-gray-400 text-lg mb-2">No polls yet</p>
           <p class="text-gray-500 text-sm mb-4">
             Still nothing from the network after several minutes. ProofPoll
@@ -348,7 +352,7 @@ export default component$(() => {
           <p class="text-gray-400">Loading your votes...</p>
         </div>
       ) : filteredPolls.value.length === 0 ? (
-        <div class="text-center py-16">
+        <div class="text-center py-16" data-testid="home-filtered-empty">
           <p class="text-gray-400 text-lg mb-4">
             {filter.value === "current"
               ? "No polls are currently open"
@@ -383,7 +387,7 @@ export default component$(() => {
           )}
         </div>
       ) : (
-        <div class="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+        <div class="grid gap-4 md:grid-cols-2 lg:grid-cols-3" data-testid="home-poll-list">
           {filteredPolls.value.map((p) => {
             const isOpen =
               !p.poll.closes_at ||
@@ -392,6 +396,7 @@ export default component$(() => {
             return (
               <div
                 key={p.hash}
+                data-testid="home-poll-row"
                 onClick$={() => nav(`/poll/#${p.hash}`)}
                 class="bg-gray-900 border border-gray-800 rounded-lg p-5 hover:border-indigo-600 transition-colors cursor-pointer"
               >

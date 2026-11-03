@@ -207,7 +207,7 @@ export default component$(() => {
       <h1 class="text-2xl font-bold mb-6">Create Poll</h1>
 
       {error.value && (
-        <div class="bg-red-900/50 border border-red-700 text-red-300 px-4 py-3 rounded-lg mb-4">{error.value}</div>
+        <div class="bg-red-900/50 border border-red-700 text-red-300 px-4 py-3 rounded-lg mb-4" data-testid="create-error">{error.value}</div>
       )}
 
       <div class="space-y-5">
@@ -215,6 +215,7 @@ export default component$(() => {
           <label class="block text-sm font-medium text-gray-300 mb-1">Title</label>
           <input
             type="text"
+            data-testid="create-title"
             value={title.value}
             onInput$={(e) => (title.value = (e.target as HTMLInputElement).value)}
             class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-white focus:outline-none focus:border-indigo-500"
@@ -225,6 +226,7 @@ export default component$(() => {
         <div>
           <label class="block text-sm font-medium text-gray-300 mb-1">Description (optional)</label>
           <textarea
+            data-testid="create-description"
             value={description.value}
             onInput$={(e) => (description.value = (e.target as HTMLTextAreaElement).value)}
             class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-white focus:outline-none focus:border-indigo-500 h-24 resize-none"
@@ -239,6 +241,7 @@ export default component$(() => {
               <div key={i} class="flex gap-2">
                 <input
                   type="text"
+                  data-testid={`create-option-${i}`}
                   value={opt}
                   onInput$={(e) => updateOption(i, (e.target as HTMLInputElement).value)}
                   class="flex-1 bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-white focus:outline-none focus:border-indigo-500"
@@ -263,6 +266,7 @@ export default component$(() => {
               {/* Trigger button */}
               <button
                 type="button"
+                data-testid="create-closes"
                 onClick$={() => (showCalendar.value = !showCalendar.value)}
                 class="flex items-center gap-2 bg-gray-900 border border-gray-700 hover:border-gray-500 rounded-lg px-3 py-2 text-white text-sm"
               >
@@ -375,7 +379,7 @@ export default component$(() => {
         </div>
 
         {draftSaved.value && (
-          <div class="bg-green-900/20 border border-green-800 text-green-300 px-4 py-2 rounded-lg text-sm">
+          <div class="bg-green-900/20 border border-green-800 text-green-300 px-4 py-2 rounded-lg text-sm" data-testid="create-draft-saved">
             Draft saved! View it on the <Link href="/drafts/" class="underline">Drafts page</Link>.
           </div>
         )}
@@ -383,6 +387,7 @@ export default component$(() => {
         <div class="flex gap-3">
           <button
             type="button"
+            data-testid="create-save-draft"
             onClick$={saveDraft}
             disabled={savingDraft.value || submitting.value}
             class="flex-1 bg-gray-700 hover:bg-gray-600 disabled:opacity-50 text-gray-200 font-medium py-2.5 rounded-full"
@@ -391,6 +396,7 @@ export default component$(() => {
           </button>
           <button
             type="button"
+            data-testid="create-submit"
             onClick$={submit}
             disabled={submitting.value || savingDraft.value}
             class="flex-1 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white font-medium py-2.5 rounded-full"

@@ -476,6 +476,7 @@ export default component$(() => {
             <nav class="flex gap-4">
               <Link
                 href="/"
+                data-testid="nav-polls"
                 class={`text-sm ${isActive("/") ? "text-indigo-400 font-medium" : "text-gray-400 hover:text-gray-200"}`}
               >
                 Polls
@@ -483,6 +484,7 @@ export default component$(() => {
               {linked.value ? (
                 <Link
                   href="/create/"
+                  data-testid="nav-create"
                   class={`text-sm ${isActive("/create/") ? "text-indigo-400 font-medium" : "text-gray-400 hover:text-gray-200"}`}
                 >
                   Create
@@ -490,6 +492,7 @@ export default component$(() => {
               ) : (
                 <button
                   type="button"
+                  data-testid="nav-create"
                   onClick$={() => (showSignIn.value = true)}
                   class={`text-sm ${isActive("/create/") ? "text-indigo-400 font-medium" : "text-gray-400 hover:text-gray-200"}`}
                 >
@@ -499,6 +502,7 @@ export default component$(() => {
               {linked.value && (
                 <Link
                   href="/drafts/"
+                  data-testid="nav-drafts"
                   class={`text-sm ${isActive("/drafts/") ? "text-indigo-400 font-medium" : "text-gray-400 hover:text-gray-200"}`}
                 >
                   Drafts
@@ -506,6 +510,7 @@ export default component$(() => {
               )}
               <Link
                 href="/identity/"
+                data-testid="nav-identity"
                 class={`text-sm ${isActive("/identity/") ? "text-indigo-400 font-medium" : "text-gray-400 hover:text-gray-200"}`}
               >
                 Identity
@@ -518,6 +523,7 @@ export default component$(() => {
           (linkState.value === "unlinked" ? (
             <button
               type="button"
+              data-testid="nav-signin"
               onClick$={() => {
                 setSignInIntent({ autoLink: true });
                 nav("/identity/");
@@ -538,6 +544,7 @@ export default component$(() => {
             // below explains the situation.
             <div
               class="flex items-center gap-2"
+              data-testid="nav-profile"
               title={
                 linkState.value === "mismatch"
                   ? "From a previous Flowsta connection. Reconnect or disconnect via the banner below."
@@ -546,6 +553,7 @@ export default component$(() => {
             >
               {displayName.value && (
                 <span
+                  data-testid="nav-profile-name"
                   class={[
                     "text-sm",
                     linkState.value === "mismatch"
@@ -585,7 +593,7 @@ export default component$(() => {
 
       <main class="flex-1 p-6">
         {!status.value ? (
-          <div class="flex items-center justify-center h-64">
+          <div class="flex items-center justify-center h-64" data-testid="nav-connecting">
             <div class="text-gray-400">Connecting...</div>
           </div>
         ) : !status.value.ready ? (
@@ -597,7 +605,7 @@ export default component$(() => {
                     <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                   </svg>
                 </div>
-                <div class="text-center max-w-md">
+                <div class="text-center max-w-md" data-testid="nav-connection-lost">
                   <h2 class="text-lg font-semibold text-white mb-1">Connection Lost</h2>
                   <p class="text-gray-400 text-sm mb-4">
                     {status.value.conductor_status.message}
@@ -615,7 +623,7 @@ export default component$(() => {
             ) : (
               <>
                 <div class="w-8 h-8 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin" />
-                <div class="text-gray-400">
+                <div class="text-gray-400" data-testid="nav-starting">
                   {status.value.conductor_status.status === "starting"
                     ? status.value.conductor_status.message
                     : "Starting conductor..."}
@@ -656,7 +664,7 @@ export default component$(() => {
                 button: pressed by mistake it re-labels one identity's polls
                 and votes as another's. We never auto-revoke. */}
             {linkState.value === "mismatch" && (
-              <div class="bg-amber-900/30 border border-amber-800/50 rounded-lg px-4 py-3 mb-4">
+              <div class="bg-amber-900/30 border border-amber-800/50 rounded-lg px-4 py-3 mb-4" data-testid="nav-mismatch-banner">
                 <div class="flex items-start gap-3">
                   <svg
                     class="h-5 w-5 shrink-0 text-amber-400 mt-0.5"
@@ -713,7 +721,7 @@ export default component$(() => {
             {relinkPending.value &&
               linkState.value !== "linked" &&
               linkState.value !== "mismatch" && (
-                <div class="bg-indigo-900/30 border border-indigo-800/50 rounded-lg px-4 py-3 mb-4">
+                <div class="bg-indigo-900/30 border border-indigo-800/50 rounded-lg px-4 py-3 mb-4" data-testid="nav-relink-banner">
                   <p class="text-sm font-medium text-indigo-200">
                     Step 2: sign back in
                   </p>
@@ -747,6 +755,7 @@ export default component$(() => {
         >
           <div
             class="bg-gray-900 border border-gray-700 rounded-xl p-8 max-w-sm w-full mx-4 text-center"
+            data-testid="nav-signin-dialog"
             onClick$={(e) => e.stopPropagation()}
           >
             <h2 class="text-lg font-semibold text-white mb-2">Sign in required</h2>
@@ -755,6 +764,7 @@ export default component$(() => {
             </p>
             <button
               type="button"
+              data-testid="nav-signin-dialog-signin"
               onClick$={() => {
                 setSignInIntent({ autoLink: true, returnTo: "/create/" });
                 showSignIn.value = false;
@@ -772,6 +782,7 @@ export default component$(() => {
             </button>
             <button
               type="button"
+              data-testid="nav-signin-dialog-cancel"
               onClick$={() => (showSignIn.value = false)}
               class="mt-4 text-sm text-gray-500 hover:text-gray-300 block mx-auto"
             >

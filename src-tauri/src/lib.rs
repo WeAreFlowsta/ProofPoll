@@ -56,7 +56,12 @@ fn test_data_dir() -> Option<std::path::PathBuf> {
 }
 
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // The embedded WebDriver the UI suite drives: the `e2e` feature only,
+    // never a release build (scripts/check-test-features.mjs).
+    #[cfg(feature = "e2e")]
+    let builder = builder.plugin(tauri_plugin_wdio_webdriver::init());
+    builder
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {
             let data_dir = match test_data_dir() {
