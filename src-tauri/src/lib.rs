@@ -41,6 +41,8 @@ use tauri::Manager;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 mod profiles;
 mod vault_probe;
+#[cfg(feature = "harness")]
+mod harness;
 
 /// A debug build takes `PROOFPOLL_DATA_DIR`: a test instance's own data
 /// folder on every platform (the harness runs several on one machine). A
@@ -115,6 +117,8 @@ pub fn run() {
                 .relaunched_into_identity
                 .store(relaunched, std::sync::atomic::Ordering::Relaxed);
             app.manage(app_state.clone());
+            #[cfg(feature = "harness")]
+            harness::spawn(app.handle().clone());
             if relaunched {
                 // app.restart() leaves focus with whatever was behind the
                 // old window (the Vault, mostly). Come back to the front now
