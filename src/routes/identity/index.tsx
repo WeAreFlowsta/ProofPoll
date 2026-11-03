@@ -6,6 +6,7 @@ import { linkedContext, linkStateContext, displayNameContext, profilePictureCont
 import { sanitizeImageSrc } from "~/lib/sanitize";
 import { readAndClearSignInIntent, vaultLinkOptions } from "~/lib/signin";
 import { focusSelf } from "~/lib/window";
+import { SettingsTabs } from "~/components/settings-tabs/settings-tabs";
 import { getLastBackupOutcome, type BackupOutcome } from "~/lib/backup";
 import {
   getLinkedAgents,
@@ -420,7 +421,7 @@ export default component$(() => {
 
   return (
     <div class="max-w-xl mx-auto">
-      <h1 class="text-2xl font-bold mb-6">Identity</h1>
+      <SettingsTabs />
 
       {loading.value ? (
         <div class="flex flex-col items-center justify-center py-16 gap-4" data-testid="identity-loading">

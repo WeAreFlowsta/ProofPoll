@@ -1,6 +1,7 @@
 // The Identity page after a relaunch, signed in (02): it shows the linked
 // identity's name, that it is signed in, the backups panel and the keys,
 // and the app stays signed in. The link is left in place (no disconnect).
+// Then Settings' Updates tab: this version and the automatic-updates switch.
 import { byId, click, COLD_START_MS, copyProblems, E2E_NAME, goto, harnessStatus, shot, timed, visibleText, waitAppShown, whichShows } from "../_helpers";
 
 const problems: string[] = [];
@@ -17,7 +18,7 @@ describe("the Identity page, signed in", () => {
   });
 
   it("shows the identity's name, that it is signed in, and the backups panel", async () => {
-    await goto("nav-identity", "/identity/");
+    await goto("nav-settings", "/identity/");
     const state = await timed("identity page settled", () => whichShows(["identity-linked", "identity-signed-out"], COLD_START_MS, "the Identity page"));
     expect(state).toBe("identity-linked");
     const name = await byId("identity-display-name");
@@ -50,6 +51,18 @@ describe("the Identity page, signed in", () => {
     expect((await agent.getText()).trim()).toBe(status.app?.agent_pub_key);
     expect((await (await byId("identity-vault-key")).getText()).trim()).toBe(status.identity_link?.vault_agent_pub_key);
     await shot("identity-details");
+  });
+
+  it("the Updates tab shows this version, updates on by default, and goes back to Identity", async () => {
+    await goto("settings-tab-updates", "/settings/updates/");
+    const version = await byId("updates-version");
+    await version.waitForDisplayed({ timeout: 10_000 });
+    expect((await version.getText()).trim()).toMatch(/^This is version \d+\.\d+\.\d+\S*\.$/);
+    expect(await (await byId("updates-auto")).getAttribute("aria-checked")).toBe("true");
+    await shot("settings-updates");
+    await note("settings, updates");
+    await goto("settings-tab-identity", "/identity/");
+    expect(await whichShows(["identity-linked", "identity-signed-out"], 60_000, "the Identity page")).toBe("identity-linked");
   });
 });
 

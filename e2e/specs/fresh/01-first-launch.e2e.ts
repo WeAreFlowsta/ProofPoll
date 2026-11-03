@@ -50,7 +50,7 @@ describe("the first launch", () => {
   });
 
   it("the Identity page offers to sign in with Flowsta", async () => {
-    await goto("nav-identity", "/identity/");
+    await goto("nav-settings", "/identity/");
     const state = await timed("identity page settled", () => whichShows(["identity-signed-out", "identity-linked"], COLD_START_MS, "the Identity page"));
     expect(state).toBe("identity-signed-out");
     await (await byId("identity-signin")).waitForEnabled({ timeout: 60_000 });

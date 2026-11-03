@@ -15,7 +15,7 @@ describe("signing in with Flowsta", () => {
   });
 
   it("the Identity page's sign-in button connects to the Vault", async () => {
-    await goto("nav-identity", "/identity/");
+    await goto("nav-settings", "/identity/");
     const state = await timed("identity page settled", () => whichShows(["identity-signed-out", "identity-linked"], COLD_START_MS, "the Identity page"));
     expect(state).toBe("identity-signed-out");
     await shot("signin-identity-signed-out");

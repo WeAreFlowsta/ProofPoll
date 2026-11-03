@@ -65,6 +65,11 @@ export default component$(() => {
   const showSignIn = useSignal(false);
   const migration = useSignal<MigrationState | null>(null);
   const migrationDismissed = useSignal(false);
+  // The app's own updates: one downloaded and checked, waiting for a
+  // restart; and, once after an update, what this copy was updated to.
+  const updateReady = useSignal<{ version: string; notes_url: string; changes_line: boolean } | null>(null);
+  const updateBusy = useSignal(false);
+  const updatedFrom = useSignal<{ version: string; to: string; notes_url: string } | null>(null);
   const disconnecting = useSignal(false);
   // Step 2 of an adopt/re-key: the key was restored, the sign-in hasn't
   // happened yet (the adopt-relink-pending marker is on disk).
@@ -102,6 +107,16 @@ export default component$(() => {
     }).then((unlisten) => unlistenMigration.push(unlisten));
     listen("migration-complete", () => {
       migration.value = null;
+    }).then((unlisten) => unlistenMigration.push(unlisten));
+
+    invoke<{ ready: typeof updateReady.value; updated: typeof updatedFrom.value }>("update_status")
+      .then((st) => {
+        updateReady.value = st.ready;
+        updatedFrom.value = st.updated;
+      })
+      .catch(() => {});
+    listen<NonNullable<typeof updateReady.value>>("update-ready", (event) => {
+      updateReady.value = event.payload;
     }).then((unlisten) => unlistenMigration.push(unlisten));
 
     const startBackup = async () => {
@@ -529,14 +544,35 @@ export default component$(() => {
               )}
               <Link
                 href="/identity/"
-                data-testid="nav-identity"
-                class={`text-sm ${isActive("/identity/") ? "text-indigo-400 font-medium" : "text-gray-400 hover:text-gray-200"}`}
+                data-testid="nav-settings"
+                class={`text-sm ${loc.url.pathname.startsWith("/identity/") || loc.url.pathname.startsWith("/settings/") ? "text-indigo-400 font-medium" : "text-gray-400 hover:text-gray-200"}`}
               >
-                Identity
+                Settings
               </Link>
             </nav>
           )}
         </div>
+        <div class="flex items-center gap-3">
+        {updateReady.value && (
+          <button
+            type="button"
+            data-testid="nav-restart-to-update"
+            disabled={updateBusy.value}
+            title={`ProofPoll ${updateReady.value.version} is downloaded and checked`}
+            class="rounded-full bg-indigo-600 px-3 py-1 text-sm font-medium text-white transition-colors hover:bg-indigo-500 disabled:opacity-60"
+            onClick$={async () => {
+              updateBusy.value = true;
+              try {
+                await invoke("restart_to_update");
+              } catch (e) {
+                console.error("Update did not install:", e);
+                updateBusy.value = false;
+              }
+            }}
+          >
+            Restart to update
+          </button>
+        )}
         {status.value?.ready &&
           status.value.agent_pub_key &&
           (linkState.value === "unlinked" ? (
@@ -608,6 +644,7 @@ export default component$(() => {
               )}
             </div>
           ))}
+        </div>
       </header>
 
       <main class="flex-1 p-6">
@@ -807,6 +844,35 @@ export default component$(() => {
         </div>
       )}
 
+      {/* Once after an update: what changed */}
+      {updatedFrom.value && (
+        <div data-testid="nav-updated" class="fixed bottom-6 left-6 z-50 flex items-center gap-3 rounded-lg border border-indigo-500/40 bg-indigo-500/15 px-4 py-3 shadow-xl">
+          <p class="text-sm text-indigo-200">Updated to ProofPoll {updatedFrom.value.to}</p>
+          {updatedFrom.value.notes_url && (
+            <button
+              type="button"
+              class="text-sm font-medium text-indigo-300 underline hover:text-indigo-200"
+              onClick$={async () => {
+                const { open } = await import("@tauri-apps/plugin-shell");
+                await open(updatedFrom.value!.notes_url);
+              }}
+            >
+              What changed
+            </button>
+          )}
+          <button
+            type="button"
+            aria-label="Dismiss"
+            class="text-indigo-300 hover:text-white"
+            onClick$={async () => {
+              updatedFrom.value = null;
+              await invoke("dismiss_updated").catch(() => {});
+            }}
+          >
+            ×
+          </button>
+        </div>
+      )}
     </div>
   );
 });
