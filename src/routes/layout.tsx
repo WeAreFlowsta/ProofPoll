@@ -89,6 +89,21 @@ export default component$(() => {
       unlistenStatus = unlisten;
     });
 
+    // The move to this version reports as it goes: the banner's count rises
+    // while it runs, and the banner goes when it is done.
+    const unlistenMigration: (() => void)[] = [];
+    listen("migration-progress", async () => {
+      try {
+        const ms = await getMigrationStatus();
+        if (ms.status === "InProgress") migration.value = ms;
+      } catch {
+        // The next event tries again.
+      }
+    }).then((unlisten) => unlistenMigration.push(unlisten));
+    listen("migration-complete", () => {
+      migration.value = null;
+    }).then((unlisten) => unlistenMigration.push(unlisten));
+
     const startBackup = async () => {
       // Write-triggered backups share the auto-backup's on/off signal: a
       // CONFIRMED identity. The hourly run below covers long sessions; the
@@ -331,7 +346,10 @@ export default component$(() => {
             // Check migration status
             try {
               const ms = await getMigrationStatus();
-              if (ms.status === "InProgress" || (ms.status === "Complete" && ms.votes_pending.length > 0)) {
+              // Only while the move runs. Votes parked for a poll whose author
+              // has not moved it yet still show and count where they are, so
+              // the app never tells anyone it waits on other people.
+              if (ms.status === "InProgress") {
                 migration.value = ms;
               }
             } catch {
@@ -425,6 +443,7 @@ export default component$(() => {
       clearInterval(linkPoll);
       stopBackup();
       if (unlistenStatus) unlistenStatus();
+      unlistenMigration.forEach((unlisten) => unlisten());
     });
   });
 
@@ -639,11 +658,7 @@ export default component$(() => {
             {migration.value && !migrationDismissed.value && (
               <div class="bg-indigo-900/30 border border-indigo-800/50 rounded-lg px-4 py-2 mb-4 flex items-center justify-between">
                 <div class="text-sm text-indigo-300">
-                  {migration.value.status === "InProgress" ? (
-                    <span>Migrating your data to v1.1... ({migration.value.polls_migrated.length} polls migrated)</span>
-                  ) : migration.value.votes_pending.length > 0 ? (
-                    <span>{migration.value.votes_pending.length} vote{migration.value.votes_pending.length !== 1 ? "s" : ""} waiting for poll authors to upgrade</span>
-                  ) : null}
+                  <span>Bringing your polls and votes over to this version... ({migration.value.polls_migrated.length} poll{migration.value.polls_migrated.length !== 1 ? "s" : ""} so far)</span>
                 </div>
                 <button
                   type="button"
