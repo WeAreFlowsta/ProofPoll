@@ -2645,3 +2645,55 @@ fn action_variant_label(action: &holochain_integrity_types_07::action::Action) -
     format!("{:?}", action.action_type())
 }
 
+/// Test harness only (feature `harness`): write the shapes ProofPoll 0.4.x
+/// left on v1.3 - a poll, an encrypted draft or vote reason - so the
+/// migration's tests start from real data. Nothing else writes to v1.3.
+#[cfg(feature = "harness")]
+pub(crate) async fn harness_v13_poll(
+    state: &AppState,
+    title: String,
+    description: String,
+    options: Vec<String>,
+    closes_at: Option<i64>,
+) -> Result<String, String> {
+    let client = state.app_client_v1_3.lock().await;
+    let client = client.as_ref().ok_or("v1.3 is not running")?;
+    let input = CreatePollInput { title, description, options, closes_at, poll_type: Some("Anonymous".to_string()) };
+    let result = call_zome(client, POLLS_ZOME, "create_poll", crate::hc::encode(&input)?).await?;
+    let action_hash: ActionHash = crate::hc::decode(&result)?;
+    Ok(action_hash.to_string())
+}
+
+/// See `harness_v13_poll`: an entry encrypted to this agent, linked as
+/// `link_as` ("draft_poll" or "vote_rationale"), on v1.3.
+#[cfg(feature = "harness")]
+pub(crate) async fn harness_v13_encrypted(
+    state: &AppState,
+    link_as: &str,
+    related_hash: Option<String>,
+    plaintext: Vec<u8>,
+) -> Result<String, String> {
+    let agent_bytes = get_agent_ed25519_bytes(state)?;
+    let (nonce, cipher) = {
+        let lair = state.lair_client.lock().await;
+        let lair = lair.as_ref().ok_or("Lair not connected")?;
+        crate::crypto::encrypt_to_self(lair, agent_bytes, &plaintext).await?
+    };
+    #[derive(serde::Serialize, Debug)]
+    struct Input {
+        cipher: Vec<u8>,
+        nonce: Vec<u8>,
+        link_as: String,
+        related_hash: Option<ActionHash>,
+    }
+    let related_hash = match related_hash {
+        Some(h) => Some(parse_action_hash(&h)?),
+        None => None,
+    };
+    let input = Input { cipher, nonce: nonce.to_vec(), link_as: link_as.to_string(), related_hash };
+    let client = state.app_client_v1_3.lock().await;
+    let client = client.as_ref().ok_or("v1.3 is not running")?;
+    let result = call_zome(client, POLLS_ZOME, "create_encrypted_entry", crate::hc::encode(&input)?).await?;
+    let action_hash: ActionHash = crate::hc::decode(&result)?;
+    Ok(action_hash.to_string())
+}

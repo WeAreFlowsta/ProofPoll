@@ -138,6 +138,42 @@ async fn op(Ax(app): Ax<tauri::AppHandle>, Json(body): Json<Value>) -> Reply {
         "identity" => ok(serde_json::to_value(commands::get_identity_link(state)).unwrap_or(Value::Null)),
         "migration" => to_value(commands::get_migration_status(state).await),
         "link" => link(&app, state, s(&body, "client_id")).await,
+        // As the UI asks it: from this install's own agent key.
+        "agent_set" => {
+            let local = commands::get_app_status(state.clone()).agent_pub_key;
+            to_value(commands::get_my_agent_set(state, local).await)
+        }
+        // ProofPoll 0.4.x's shapes on v1.3, for the migration leg.
+        "v13_poll" => to_value(commands::harness_v13_poll(&state, s(&body, "title"), s(&body, "description"), options(), closes_at).await),
+        "v13_draft" => {
+            let draft = json!({
+                "title": s(&body, "title"),
+                "description": s(&body, "description"),
+                "options": options(),
+                "closes_at": closes_at,
+                "poll_type": "Anonymous",
+            });
+            to_value(commands::harness_v13_encrypted(&state, "draft_poll", None, draft.to_string().into_bytes()).await)
+        }
+        "v13_rationale" => to_value(
+            commands::harness_v13_encrypted(&state, "vote_rationale", Some(s(&body, "vote")), s(&body, "text").into_bytes()).await,
+        ),
+        // The migration again, as a start does it: from NotStarted, then the
+        // drafts and reasons.
+        "migrate" => {
+            {
+                let mut ms = state.migration_state.lock().await;
+                *ms = crate::migration::MigrationState::default();
+                ms.save(&state.data_dir);
+            }
+            let arc = state.inner().clone();
+            if let Err(e) = crate::migration::run_migration(&arc, &app).await {
+                return failed(format!("migration: {}", e));
+            }
+            let carried = crate::migration::carry_private(&arc).await;
+            let after = serde_json::to_value(&*arc.migration_state.lock().await).unwrap_or(Value::Null);
+            to_value(carried.map(|(drafts, reasons)| json!({ "drafts": drafts, "reasons": reasons, "state": after })))
+        }
         other => failed(format!("unknown op {:?}", other)),
     }
 }
