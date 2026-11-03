@@ -56,6 +56,94 @@ pub(crate) fn clear_relink_marker(data_dir: &Path) {
     let _ = std::fs::remove_file(relink_marker_path(data_dir));
 }
 
+/// Written by an adopt whose Vault backup shows the key already has a chain
+/// on the Holochain 0.7 line (DNA v1.4). The next start rebuilds that chain
+/// from the network (`restore_from_dht`) instead of starting a second chain
+/// under the same key: in 0.7.1 the new chain and the old one, arriving from
+/// peers, share one store, so the new device's writes fail or fork the
+/// chain. Cleared once the restored app is enabled.
+pub const RESTORE_MARKER: &str = "restore-chain-07";
+
+/// What the restore marker records.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
+pub struct RestoreMarker {
+    /// The adopted agent; a start under any other key ignores the marker.
+    pub agent: String,
+    /// The highest action seq the backup holds; the restored chain reaches
+    /// at least this far.
+    pub backup_head_seq: u32,
+}
+
+fn restore_marker_path(data_dir: &Path) -> PathBuf {
+    data_dir.join(RESTORE_MARKER)
+}
+
+pub fn read_restore_marker(data_dir: &Path) -> Option<RestoreMarker> {
+    let bytes = std::fs::read(restore_marker_path(data_dir)).ok()?;
+    match serde_json::from_slice(&bytes) {
+        Ok(m) => Some(m),
+        Err(e) => {
+            log::warn!("[restore] the restore marker is unreadable ({}); ignoring it", e);
+            None
+        }
+    }
+}
+
+fn write_restore_marker(data_dir: &Path, marker: &RestoreMarker) -> Result<(), String> {
+    let bytes = serde_json::to_vec(marker).map_err(|e| e.to_string())?;
+    let tmp = data_dir.join(format!("{}.tmp", RESTORE_MARKER));
+    std::fs::write(&tmp, bytes).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, restore_marker_path(data_dir)).map_err(|e| e.to_string())
+}
+
+pub fn clear_restore_marker(data_dir: &Path) {
+    let _ = std::fs::remove_file(restore_marker_path(data_dir));
+}
+
+/// Which Holochain line a canonical backup's chain comes from: the cell's
+/// `line` (backups from 0.6.0 on), else the records' shape (a 0.7 dump's
+/// action is `{header, data}`, a 0.6 dump's a tagged `{type, ..}`).
+#[derive(Debug, PartialEq)]
+pub(crate) enum BackupChain {
+    /// The key has a v1.4 chain; the highest seq the backup holds.
+    Line07 { head_seq: u32 },
+    Line06,
+    /// No records to tell from.
+    Unknown,
+}
+
+pub(crate) fn backup_chain(data: &serde_json::Value) -> BackupChain {
+    let mut line07 = false;
+    let mut line06 = false;
+    let mut head_seq = 0u32;
+    let cells = data.get("cells").and_then(|c| c.as_array()).map(|c| c.as_slice()).unwrap_or(&[]);
+    for cell in cells {
+        match cell.get("line").and_then(|l| l.as_str()) {
+            Some("holochain-0.7") => line07 = true,
+            Some("holochain-0.6") => line06 = true,
+            _ => {}
+        }
+        let records = cell.get("records").and_then(|r| r.as_array()).map(|r| r.as_slice()).unwrap_or(&[]);
+        for rec in records {
+            let action = &rec["raw_record"]["action"];
+            if let Some(header) = action.get("header").filter(|h| h.is_object()) {
+                line07 = true;
+                let seq = header.get("action_seq").and_then(|s| s.as_u64()).unwrap_or(0);
+                head_seq = head_seq.max(u32::try_from(seq).unwrap_or(u32::MAX));
+            } else if action.get("type").is_some() {
+                line06 = true;
+            }
+        }
+    }
+    if line07 {
+        BackupChain::Line07 { head_seq }
+    } else if line06 {
+        BackupChain::Line06
+    } else {
+        BackupChain::Unknown
+    }
+}
+
 // ── The adopt engine (ordering under test) ─────────────────────────────
 
 pub(crate) trait AdoptSeams {
@@ -227,8 +315,9 @@ pub(crate) struct VaultEscrowProbe {
     pub client_id: String,
 }
 
-impl EscrowProbe for VaultEscrowProbe {
-    async fn escrowed_seed(&self) -> Result<EscrowedSeed, String> {
+impl VaultEscrowProbe {
+    /// The app's backup payload in the linked Vault; None when there is none.
+    pub(crate) async fn retrieve(&self) -> Result<Option<serde_json::Value>, String> {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(5))
             .build()
@@ -241,7 +330,7 @@ impl EscrowProbe for VaultEscrowProbe {
             .await
             .map_err(|e| format!("vault unreachable: {}", e))?;
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
-            return Ok(EscrowedSeed::NoBackup);
+            return Ok(None);
         }
         if !resp.status().is_success() {
             let body: serde_json::Value = resp.json().await.unwrap_or_default();
@@ -250,11 +339,20 @@ impl EscrowProbe for VaultEscrowProbe {
                 .unwrap_or("retrieve_failed")
                 .to_string());
         }
-        let v: serde_json::Value = resp
+        let mut v: serde_json::Value = resp
             .json()
             .await
             .map_err(|e| format!("bad retrieve response: {}", e))?;
-        classify_escrow_payload(&v["data"])
+        Ok(Some(v["data"].take()))
+    }
+}
+
+impl EscrowProbe for VaultEscrowProbe {
+    async fn escrowed_seed(&self) -> Result<EscrowedSeed, String> {
+        match self.retrieve().await? {
+            None => Ok(EscrowedSeed::NoBackup),
+            Some(data) => classify_escrow_payload(&data),
+        }
     }
 }
 
@@ -391,6 +489,7 @@ pub async fn adopt_escrowed_seed(
     state: tauri::State<'_, Arc<AppState>>,
     seed_hex: String,
     accept_data_loss: bool,
+    client_id: Option<String>,
 ) -> Result<(), String> {
     // No silent adoption path: every caller acknowledges that this install's
     // drafts/private notes die with its outgoing key.
@@ -417,8 +516,50 @@ pub async fn adopt_escrowed_seed(
         }
     };
 
+    // The backup the seed came from says whether the key already has a
+    // chain on the 0.7 line; if so the next start rebuilds it from the
+    // network rather than starting a second one under the same key. An
+    // unreadable backup stops the adopt: guessing either way is unsafe.
+    let client_id = client_id.ok_or(
+        "restore held: no client_id supplied, so the backup's chain cannot be checked first",
+    )?;
+    let backup = VaultEscrowProbe { client_id }
+        .retrieve()
+        .await
+        .map_err(|e| format!("Could not read your Vault backup ({}). Try again in a moment - nothing was changed.", e))?
+        .ok_or("Your Vault holds no ProofPoll backup any more - nothing was changed.")?;
+    match classify_escrow_payload(&backup)? {
+        EscrowedSeed::Seed(hex) if hex == incoming.device_seed_hex => {}
+        _ => {
+            return Err("Your Vault backup no longer holds that key. Reopen the Identity page and try again - nothing was changed.".into())
+        }
+    }
+    let marker = match backup_chain(&backup) {
+        BackupChain::Line07 { head_seq } => {
+            let agent = backup["agent_pub_key"]
+                .as_str()
+                .ok_or("Your Vault backup does not name its key - nothing was changed.")?;
+            Some(RestoreMarker { agent: agent.to_string(), backup_head_seq: head_seq })
+        }
+        BackupChain::Line06 | BackupChain::Unknown => None,
+    };
+    // Before the commit, so a marker that cannot be written leaves nothing
+    // changed; a marker left by an adopt that aborts names a key the next
+    // start does not use, and is ignored there.
+    match &marker {
+        Some(m) => {
+            write_restore_marker(&state.data_dir, m)
+                .map_err(|e| format!("Could not prepare the restore ({}) - nothing was changed.", e))?;
+            log::info!("[adopt] the backup holds a 0.7 chain up to seq {}: the next start restores it from the network", m.backup_head_seq);
+        }
+        None => clear_restore_marker(&state.data_dir),
+    }
+
     let seams = AppSeams { state: state.inner().clone() };
-    run_adopt(&seams, &incoming, local.as_ref()).await?;
+    if let Err(e) = run_adopt(&seams, &incoming, local.as_ref()).await {
+        clear_restore_marker(&state.data_dir);
+        return Err(e);
+    }
     log::info!("[adopt] escrowed seed committed - relaunching");
     restart_app(app)
 }
@@ -740,5 +881,52 @@ mod tests {
         assert!(classify_escrow_payload(&not_object).is_err());
         let weird = serde_json::json!({"app_keys": {"device_seed_hex": 7}});
         assert!(classify_escrow_payload(&weird).is_err());
+    }
+    /// A 0.7 dump record (`action` = `{header, data}`) and a 0.6 one (a
+    /// tagged `{type, ..}`), in the shapes `build_canonical_backup` writes.
+    fn rec07(seq: u64) -> serde_json::Value {
+        serde_json::json!({"entryType": "Poll", "raw_record": {"action": {
+            "header": {"author": [1, 2], "timestamp": 1, "action_seq": seq, "prev_action": null},
+            "data": {"type": "Create"}}}})
+    }
+    fn rec06(seq: u64) -> serde_json::Value {
+        serde_json::json!({"entryType": "Poll", "raw_record": {"action": {
+            "type": "Create", "author": [1, 2], "timestamp": 1, "action_seq": seq}}})
+    }
+
+    #[test]
+    fn backup_chain_tells_the_lines_apart() {
+        // 0.5.0's backups: v1.4 records, no `line`; the highest seq counts.
+        let b050 = serde_json::json!({"cells": [{"role_name": "polls", "records": [rec07(0), rec07(31), rec07(7)]}]});
+        assert_eq!(backup_chain(&b050), BackupChain::Line07 { head_seq: 31 });
+        // 0.3/0.4's backups: v1.3 records from the 0.6 line.
+        let b040 = serde_json::json!({"cells": [{"records": [rec06(0), rec06(12)]}]});
+        assert_eq!(backup_chain(&b040), BackupChain::Line06);
+        // From 0.6.0 the cell names its line.
+        let b060 = serde_json::json!({"cells": [{"line": "holochain-0.7", "records": [rec07(4)]}]});
+        assert_eq!(backup_chain(&b060), BackupChain::Line07 { head_seq: 4 });
+        let named_only = serde_json::json!({"cells": [{"line": "holochain-0.7", "records": []}]});
+        assert_eq!(backup_chain(&named_only), BackupChain::Line07 { head_seq: 0 });
+        // Nothing to tell from.
+        assert_eq!(backup_chain(&serde_json::json!({"cells": [{"records": []}]})), BackupChain::Unknown);
+        assert_eq!(backup_chain(&serde_json::json!({"version": 1})), BackupChain::Unknown);
+        assert_eq!(backup_chain(&serde_json::json!(null)), BackupChain::Unknown);
+    }
+
+    #[test]
+    fn restore_marker_round_trips_and_clears() {
+        let dir = std::env::temp_dir().join(format!("pp-restore-marker-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(read_restore_marker(&dir), None);
+        let m = RestoreMarker { agent: "uhCAkf5HNWEmQnKbf-3x-4i-Lmu9U1rC2XbcE0x8qVEKJLvODocb0".into(), backup_head_seq: 31 };
+        write_restore_marker(&dir, &m).unwrap();
+        assert_eq!(read_restore_marker(&dir), Some(m));
+        assert!(!dir.join(format!("{}.tmp", RESTORE_MARKER)).exists());
+        // A damaged marker is ignored, never trusted.
+        std::fs::write(dir.join(RESTORE_MARKER), b"{not json").unwrap();
+        assert_eq!(read_restore_marker(&dir), None);
+        clear_restore_marker(&dir);
+        assert!(!dir.join(RESTORE_MARKER).exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

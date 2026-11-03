@@ -254,13 +254,16 @@ export async function getSeedEscrowState(
 
 /**
  * Step 1 of the restore story: adopt the escrowed seed so this device
- * continues as the SAME agent. Restarts the app on success (this promise
+ * continues as the SAME agent. The Rust side reads the backup again (with
+ * this app's client id) to see whether the key's chain must be rebuilt from
+ * the network at the next start. Restarts the app on success (this promise
  * only settles on failure, or in dev builds where the app exits instead).
  */
-export async function adoptEscrowedSeed(seedHex: string): Promise<void> {
+export async function adoptEscrowedSeed(seedHex: string, clientId: string): Promise<void> {
   return invoke<void>("adopt_escrowed_seed", {
     seedHex,
     acceptDataLoss: true,
+    clientId,
   });
 }
 

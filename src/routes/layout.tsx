@@ -37,6 +37,7 @@ interface AppStatus {
   conductor_status:
     | { status: "stopped" }
     | { status: "starting"; message: string }
+    | { status: "restoring"; waited_secs: number }
     | { status: "ready"; admin_port: number; app_port: number }
     | { status: "error"; message: string };
   relaunched_into_identity?: boolean;
@@ -675,6 +676,25 @@ export default component$(() => {
                   </button>
                   <p class="text-gray-600 text-xs mt-2">Reopen ProofPoll after closing to reconnect.</p>
                 </div>
+              </>
+            ) : status.value.conductor_status.status === "restoring" ? (
+              <>
+                <div class="w-8 h-8 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin" />
+                <div class="text-gray-300" data-testid="nav-restoring">
+                  Restoring your polls and votes from the network
+                </div>
+                <p class="text-gray-500 text-sm max-w-sm text-center">
+                  This device now uses your restored key. ProofPoll is fetching
+                  everything that key published from other ProofPoll users and
+                  the ProofPoll node, and opens when it has all of it.
+                </p>
+                {status.value.conductor_status.waited_secs >= 120 && (
+                  <p class="text-gray-500 text-xs max-w-sm text-center" data-testid="nav-restoring-slow">
+                    Still restoring after {Math.floor(status.value.conductor_status.waited_secs / 60)} minutes.
+                    It needs other ProofPoll users or the ProofPoll node to be
+                    reachable, and keeps trying. You can leave ProofPoll open.
+                  </p>
+                )}
               </>
             ) : (
               <>

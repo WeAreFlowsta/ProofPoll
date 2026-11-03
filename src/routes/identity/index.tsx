@@ -113,7 +113,7 @@ export default component$(() => {
     seedBusy.value = true;
     seedError.value = null;
     try {
-      await adoptEscrowedSeed(escrowedHex.value);
+      await adoptEscrowedSeed(escrowedHex.value, import.meta.env.VITE_FLOWSTA_CLIENT_ID);
       // On success the app restarts (dev builds exit instead).
     } catch (e: any) {
       seedError.value = e.message || String(e);

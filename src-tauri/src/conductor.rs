@@ -207,6 +207,10 @@ pub enum ConductorStatus {
     Stopped,
     #[serde(rename = "starting")]
     Starting { message: String },
+    /// An adopted key's v1.4 chain is being rebuilt from the network
+    /// (`restore_from_dht`); the start waits for it, with no time limit.
+    #[serde(rename = "restoring")]
+    Restoring { waited_secs: u64 },
     #[serde(rename = "ready")]
     Ready { admin_port: u16, app_port: u16 },
     #[serde(rename = "error")]
@@ -859,22 +863,69 @@ async fn start_holochain_attempt(
             agent_07, install_result.agent_pub_key
         );
     }
-    let installed_07 = match crate::dna::install_dnas_07(
+    // An adopt whose backup showed the key's v1.4 chain left a marker naming
+    // that key: v1.4 then rebuilds the chain from the network instead of
+    // starting a second chain under the same key (seed_adopt.rs).
+    let restore_marker = crate::seed_adopt::read_restore_marker(&data_dir);
+    let restore = match &restore_marker {
+        Some(m) if m.agent == agent_07.to_string() => true,
+        Some(m) => {
+            log::warn!(
+                "[restore] the restore marker names {} but this start signs as {}: nothing to restore",
+                m.agent, agent_07
+            );
+            crate::seed_adopt::clear_restore_marker(&data_dir);
+            false
+        }
+        None => false,
+    };
+    let install_07 = match crate::dna::install_dnas_07(
         admin_port_07(),
         &resource_dir,
         agent_07.get_raw_39(),
+        restore,
     )
     .await
     {
-        Ok(installed) => installed,
+        Ok(outcome) => outcome,
         Err(e) => fail_with_full_cleanup!(format!("DNA installation (0.7) failed: {}", e)),
     };
+    if install_07 == crate::dna::Install07::Restoring {
+        log::info!(
+            "[restore] v1.4 is rebuilding this key's chain from the network (the backup held it to seq {})",
+            restore_marker.as_ref().map(|m| m.backup_head_seq.to_string()).unwrap_or_else(|| "?".into())
+        );
+        let progress_handle = app_handle.clone();
+        let progress = move |waited_secs: u64| {
+            use tauri::Manager;
+            let status = ConductorStatus::Restoring { waited_secs };
+            if let Some(state) = progress_handle.try_state::<std::sync::Arc<crate::commands::AppState>>() {
+                *state.conductor_status.lock().unwrap() = status.clone();
+            }
+            let _ = progress_handle.emit("conductor-status", status);
+        };
+        if let Err(e) = crate::dna::wait_for_restore_07(admin_port_07(), progress).await {
+            fail_with_full_cleanup!(e);
+        }
+        crate::seed_adopt::clear_restore_marker(&data_dir);
+        {
+            use tauri::Manager;
+            if let Some(state) = app_handle.try_state::<std::sync::Arc<crate::commands::AppState>>() {
+                *state.conductor_status.lock().unwrap() = ConductorStatus::Starting {
+                    message: "Restored your history. Finishing setup...".into(),
+                };
+            }
+        }
+    } else if restore_marker.is_some() {
+        // v1.4 was already there under this key: nothing left to restore.
+        crate::seed_adopt::clear_restore_marker(&data_dir);
+    }
     // Holochain 0.7.1 keeps the memory an install used until the conductor
     // restarts: modules dropped from its cache after each cell's genesis are
     // reloaded into one engine that keeps the old machine code (about 2 GB
     // after a first install; holochain#6064). One restart before Ready gives
-    // it back.
-    if installed_07 {
+    // it back. A restore loads the same modules.
+    if install_07 != crate::dna::Install07::Present {
         log::info!("v1.4 installed this start: restarting the 0.7 conductor once to give back the memory the install kept");
         let _ = app_handle.emit(
             "conductor-status",
@@ -1478,7 +1529,7 @@ mod tests {
             let install = crate::dna::install_dnas(admin_port(), &resource_dir, &lair_client, &data_dir).await?;
             let agent_07 = crate::device_seed::ensure_device_agent_07(&lair_client_07, &data_dir).await?;
             assert_eq!(agent_07, install.agent_pub_key, "the same seed yields the same agent on both lairs");
-            crate::dna::install_dnas_07(admin_port_07(), &resource_dir, agent_07.get_raw_39()).await?;
+            crate::dna::install_dnas_07(admin_port_07(), &resource_dir, agent_07.get_raw_39(), false).await?;
             let (_p06, v1_3, _v2, _v1, _v0) = crate::dna::setup_app_interface(admin_port(), false, false, false).await?;
             let v1_3 = v1_3.ok_or("no v1.3 client")?;
             let (_p07, v1_4) = crate::dna::setup_app_interface_07(admin_port_07()).await?;

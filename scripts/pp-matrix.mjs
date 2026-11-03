@@ -15,6 +15,7 @@ const LEG = (process.argv.find((a) => a.startsWith('--leg=')) || '--leg=').split
 const A = process.env.PP_A || 'http://127.0.0.1:28801';
 const B = process.env.PP_B || 'http://127.0.0.1:28802';
 const C = process.env.PP_C || 'http://127.0.0.1:28803';
+const D = process.env.PP_D || 'http://127.0.0.1:28804';
 const VAULT = process.env.VAULT || 'http://127.0.0.1:27778';
 const CLIENT_ID = process.env.CLIENT_ID || '';
 
@@ -116,7 +117,7 @@ async function polls() {
   record('A: lists the draft', await until(async () => ((await op(A, { op: 'drafts' })).data || []).some((d) => d.action_hash === draft.data || d.draft_action_hash === draft.data || d.hash === draft.data), 30), JSON.stringify((await op(A, { op: 'drafts' })).data)?.slice(0, 200));
   const pub = await op(A, { op: 'publish_draft', draft: draft.data });
   record('A: publishes the draft as a poll', pub.ok, pub.error || pub.data);
-  return { hash, vote: voted.data, title, agent: (await status(A)).app?.agent_pub_key };
+  return { hash, vote: voted.data, title, published: pub.data, agent: (await status(A)).app?.agent_pub_key };
 }
 
 /** A second device of the same identity sees A's poll and vote as the same person. */
@@ -191,13 +192,24 @@ async function offline(state) {
  * Vault backup), then B adopts that seed and exits (a debug build does). */
 async function adopt(state) {
   console.log('\n── Restore onto another device (adopt the escrowed seed)');
-  // C: a peer that stays up (staging has no ProofPoll node): once A is
-  // gone, the network still holds A's public records for B to fetch.
-  record('C: ready', await waitReady(C, 300));
-  if (state?.hash) {
-    record("C: holds A's poll before A goes", await until(async () => ((await op(C, { op: 'polls' })).data || []).some((p) => p.hash === state.hash), 300, 10000));
-    record("C: holds A's vote", await until(async () => ((await op(C, { op: 'votes', poll: state.hash, dna_version: '1.4' })).data || []).length >= 1, 300, 10000));
+  // C and D: peers that stay up (staging has no ProofPoll node). Once A is
+  // gone they hold A's public records, and a restore needs two peers that
+  // agree on A's chain head (restore_chain_quorum, 2 by default).
+  for (const [name, base] of [['C', C], ['D', D]]) {
+    record(`${name}: ready`, await waitReady(base, 300));
+    if (state?.hash) {
+      record(`${name}: holds A's poll before A goes`, await until(async () => ((await op(base, { op: 'polls' })).data || []).some((p) => p.hash === state.hash), 300, 10000));
+      record(`${name}: holds A's vote`, await until(async () => ((await op(base, { op: 'votes', poll: state.hash, dna_version: '1.4' })).data || []).length >= 1, 300, 10000));
+    }
+    // A's last public write: a restore soon after authoring elsewhere can pin
+    // a stale head (upstream's caution), so the peers hold it first.
+    if (state?.published) {
+      record(`${name}: holds A's latest poll`, await until(async () => ((await op(base, { op: 'polls' })).data || []).some((p) => p.hash === state.published), 300, 10000));
+    }
   }
+  const chainA = await op(A, { op: 'chain07' });
+  record("A: its v1.4 chain, one action per seq", chainA.ok && chainA.data?.forked_seqs?.length === 0 && chainA.data?.actions === chainA.data?.head_seq + 1, chainA.error || JSON.stringify(chainA.data));
+  if (process.env.PP_STATE_OUT) (await import('node:fs')).writeFileSync(process.env.PP_STATE_OUT, JSON.stringify({ ...state, a_head: chainA.data?.head_seq }));
   const b = await op(A, { op: 'backup', client_id: CLIENT_ID }, 120);
   record('A: backs up to the Vault', b.ok, b.error || JSON.stringify(b.data)?.slice(0, 120));
   const esc = await op(B, { op: 'escrow', client_id: CLIENT_ID });
@@ -206,12 +218,37 @@ async function adopt(state) {
   record('B: adopts it', ad.ok, ad.error || JSON.stringify(ad.data));
 }
 
-/** Part 2, B relaunched: it is A's agent now, both lines start under the
- * new key, and A's encrypted reason opens. */
+/** B's logs since its latest start: the app log is kept across starts; the
+ * 0.7 conductor's folder was wiped by the adopt, so its log is new. */
+async function logsSinceStart(base) {
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const root = path.join(process.env.HOME, '.local/share', `proofpoll-test-${base}`);
+  const files = fs.readdirSync(root, { recursive: true }).map(String);
+  const read = (re) => files.filter((f) => re.test(f)).map((f) => fs.readFileSync(path.join(root, f), 'utf8')).join('\n');
+  const app = read(/com\.proofpoll\.app\/logs\/proofpoll\.log$/);
+  return { app: app.slice(app.lastIndexOf('ProofPoll starting up')), conductor07: read(/conductor-07\/holochain-stderr\.log$/) };
+}
+
+/** Part 2, B relaunched: it is A's agent now. Its v1.4 chain is A's,
+ * rebuilt from the network (no second chain under the key), both lines
+ * start under the new key, A's encrypted reason opens, and B's own writes
+ * after the restore publish. */
 async function adopted(state) {
   console.log('\n── After the restore (B relaunched)');
-  record('B: ready on the adopted seed', await waitReady(B, 300));
+  let sawRestore = false;
+  const ready = await until(async () => {
+    const s = await status(B);
+    if (s.app?.conductor_status?.status === 'restoring' || s.restore_marker) sawRestore = true;
+    return s.app?.ready === true;
+  }, 900, 2000);
+  record('B: ready on the adopted seed', ready);
+  record("B: restored A's chain from the network at its start", sawRestore || /rebuilding this key's chain/.test((await logsSinceStart('pp-b')).app));
   const st = await status(B);
+  record('B: the restore marker is gone', st.restore_marker === null, JSON.stringify(st.restore_marker));
+  const chainB = await op(B, { op: 'chain07' });
+  const c = chainB.data || {};
+  record("B: its v1.4 chain is A's, one action per seq", chainB.ok && c.forked_seqs?.length === 0 && c.actions === c.head_seq + 1 && (state.a_head == null || c.head_seq >= state.a_head), chainB.error || JSON.stringify({ ...c, a_head: state.a_head }));
   record("B: runs as A's agent", !!state.agent && st.app?.agent_pub_key === state.agent, JSON.stringify({ b: st.app?.agent_pub_key, a: state.agent }));
   record('B: both conductors up with the network auth', st.configs_with_auth === 2 && st.app?.conductor_status?.status === 'ready', JSON.stringify(st.app?.conductor_status));
   if (state.vote) {
@@ -222,6 +259,18 @@ async function adopted(state) {
   if (state.hash) {
     record("B: lists A's poll", await until(async () => ((await op(B, { op: 'polls' })).data || []).some((p) => p.hash === state.hash), 300, 10000));
   }
+  // B's own writes after the restore: signed back in (the adopt dropped the
+  // old binding), a new poll lands on top of A's restored chain and reaches C.
+  await signin(B, 'B');
+  const title = `after the restore ${nowS()}`;
+  const made = await op(B, { op: 'create_poll', title, description: 'written by the restored device', options: ['yes', 'no'], closes_at: nowS() + 86400 });
+  record('B: creates a poll after the restore', made.ok && typeof made.data === 'string', made.error || made.data);
+  record("C: sees B's new poll (B's writes publish)", await until(async () => ((await op(C, { op: 'polls' })).data || []).some((p) => p.hash === made.data), 300, 10000));
+  const after = (await op(B, { op: 'chain07' })).data || {};
+  record("B: its chain grew on A's, still one action per seq", after.forked_seqs?.length === 0 && after.actions === after.head_seq + 1 && after.head_seq > (c.head_seq ?? -1), JSON.stringify(after));
+  const logs = await logsSinceStart('pp-b');
+  record('B: no "head has moved" and no failed publishes', !/head has moved/.test(logs.app) && !/FOREIGN KEY constraint failed/.test(logs.conductor07),
+    JSON.stringify({ headMoved: (logs.app.match(/head has moved/g) || []).length, foreignKey: (logs.conductor07.match(/FOREIGN KEY constraint failed/g) || []).length }));
 }
 
 // ───────────────────────── main ─────────────────────────

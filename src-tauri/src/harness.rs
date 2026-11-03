@@ -93,6 +93,51 @@ async fn status(Ax(app): Ax<tauri::AppHandle>) -> Reply {
         "identity_link": link,
         "kits": crate::kits::status(&state.device_root),
         "migration": migration,
+        "restore_marker": crate::seed_adopt::read_restore_marker(&state.data_dir),
+    }))
+}
+
+/// This device's v1.4 chain as its 0.7 conductor holds it: the app's status,
+/// the actions it authored, the head seq, and any seq held twice (a fork).
+async fn chain07() -> Reply {
+    use holochain_client_07::{AdminWebsocket, CellInfo};
+    let admin = match AdminWebsocket::connect(
+        format!("localhost:{}", crate::conductor::admin_port_07()),
+        Some(crate::conductor::node_origin()),
+    )
+    .await
+    {
+        Ok(a) => a,
+        Err(e) => return failed(format!("0.7 admin: {}", e)),
+    };
+    let apps = match admin.list_apps(None).await {
+        Ok(a) => a,
+        Err(e) => return failed(format!("list_apps: {}", e)),
+    };
+    let Some(app) = apps.iter().find(|a| a.installed_app_id == crate::dna::APP_ID_V1_4) else {
+        return failed("v1.4 is not installed");
+    };
+    let status = format!("{:?}", app.status);
+    let Some(cell_id) = app.cell_info.values().flat_map(|c| c.iter()).find_map(|c| match c {
+        CellInfo::Provisioned(p) => Some(p.cell_id.clone()),
+        _ => None,
+    }) else {
+        return failed("no v1.4 cell");
+    };
+    let dump = match admin.dump_full_state(cell_id, None, None).await {
+        Ok(d) => d,
+        Err(e) => return ok(json!({ "status": status, "dump_error": e.to_string() })),
+    };
+    let mut per_seq: std::collections::BTreeMap<u32, usize> = std::collections::BTreeMap::new();
+    for rec in &dump.source_chain_dump.records {
+        *per_seq.entry(rec.action.action_seq()).or_insert(0) += 1;
+    }
+    let forked: Vec<u32> = per_seq.iter().filter(|(_, n)| **n > 1).map(|(s, _)| *s).collect();
+    ok(json!({
+        "status": status,
+        "actions": dump.source_chain_dump.records.len(),
+        "head_seq": per_seq.keys().next_back(),
+        "forked_seqs": forked,
     }))
 }
 
@@ -178,6 +223,7 @@ async fn op(Ax(app): Ax<tauri::AppHandle>, Json(body): Json<Value>) -> Reply {
         // The canonical backup into the pinned Vault, as the SDK's backup
         // posts it (it carries this install's escrowed seed).
         "backup" => backup(state, s(&body, "client_id")).await,
+        "chain07" => chain07().await,
         // What the Vault backup holds for this app: the escrowed seed or none.
         "escrow" => {
             use crate::seed_adopt::EscrowProbe;
@@ -199,7 +245,7 @@ async fn op(Ax(app): Ax<tauri::AppHandle>, Json(body): Json<Value>) -> Reply {
                 Ok(_) => return failed("no escrowed seed in the Vault backup"),
                 Err(e) => return failed(e),
             };
-            to_value(crate::seed_adopt::adopt_escrowed_seed(app.clone(), state, hex, true).await.map(|_| json!({ "adopted": true })))
+            to_value(crate::seed_adopt::adopt_escrowed_seed(app.clone(), state, hex, true, Some(s(&body, "client_id"))).await.map(|_| json!({ "adopted": true })))
         }
         other => failed(format!("unknown op {:?}", other)),
     }

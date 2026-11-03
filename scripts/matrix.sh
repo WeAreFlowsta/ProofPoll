@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # ProofPoll's matrix end to end: a Flowsta Vault test instance with a staging
 # identity (the Vault repo beside this one, its test binary built), ProofPoll
-# test instances A and B (scripts/build-test-binary.sh), the legs in order.
+# test instances A and B (scripts/build-test-binary.sh), the legs in order;
+# C and D join for the restore (its quorum: two peers agreeing on the chain head).
 # Usage: scripts/matrix.sh [log dir]     (LEGS="fresh signin polls migration devices offline adopt")
 # Runs beside an installed ProofPoll and Vault: its own folders and ports.
 set -u
@@ -18,7 +19,7 @@ stop_all() {
   for pid in $(pgrep -x proofpoll); do case "$(readlink /proc/$pid/exe 2>/dev/null)" in "$PP"/src-tauri/target/debug/proofpoll) kill -TERM $pid;; esac; done
   for pid in $(pgrep -x flowsta-vault); do case "$(readlink /proc/$pid/exe 2>/dev/null)" in */flowsta-vault/src-tauri/target/debug/flowsta-vault) kill -TERM $pid;; esac; done
   sleep 8
-  for d in pp-a pp-b pp-c; do for pid in $(pgrep -f "proofpoll-test-$d/"); do [ "$pid" != "$$" ] && kill -9 $pid 2>/dev/null; done; done
+  for d in pp-a pp-b pp-c pp-d; do for pid in $(pgrep -f "proofpoll-test-$d/"); do [ "$pid" != "$$" ] && kill -9 $pid 2>/dev/null; done; done
   for pid in $(pgrep -f "flowsta-vault-pp-vault/"); do [ "$pid" != "$$" ] && kill -9 $pid 2>/dev/null; done
 }
 trap stop_all EXIT
@@ -26,7 +27,7 @@ trap stop_all EXIT
 # 1. The Vault test instance, with a staging identity. Whatever an earlier run
 # (this matrix, the UI suite) left running goes first, or its Vault answers.
 stop_all
-rm -rf "$HOME/.local/share/flowsta-vault-pp-vault" "$HOME/.local/share/proofpoll-test-pp-a" "$HOME/.local/share/proofpoll-test-pp-b" "$HOME/.local/share/proofpoll-test-pp-c"
+rm -rf "$HOME/.local/share/flowsta-vault-pp-vault" "$HOME/.local/share/proofpoll-test-pp-a" "$HOME/.local/share/proofpoll-test-pp-b" "$HOME/.local/share/proofpoll-test-pp-c" "$HOME/.local/share/proofpoll-test-pp-d"
 (cd "$VAULT_REPO" && exec dbus-run-session -- scripts/run-test-instance.sh pp-vault) > "$LOGS/vault.log" 2>&1 &
 VPORT=""
 for i in $(seq 1 40); do
@@ -41,7 +42,7 @@ echo "== Vault test instance on $VPORT: $(python3 -c 'import sys,json; d=json.lo
 
 # 2. ProofPoll A.
 dbus-run-session -- scripts/run-test-instance.sh pp-a 100 28801 "$VPORT" > "$LOGS/pp-a.log" 2>&1 &
-export PP_A=http://127.0.0.1:28801 PP_B=http://127.0.0.1:28802 PP_C=http://127.0.0.1:28803 VAULT="http://127.0.0.1:$VPORT" CLIENT_ID
+export PP_A=http://127.0.0.1:28801 PP_B=http://127.0.0.1:28802 PP_C=http://127.0.0.1:28803 PP_D=http://127.0.0.1:28804 VAULT="http://127.0.0.1:$VPORT" CLIENT_ID
 STATE="$LOGS/polls-state.json"
 for leg in $LEGS; do
   echo "== leg $leg $(date -u +%H:%M:%S)"
@@ -56,10 +57,12 @@ for leg in $LEGS; do
     PROOFPOLL_TEST_OFFLINE_UNTIL=$(( $(date +%s) + 90 )) dbus-run-session -- scripts/run-test-instance.sh pp-a 100 28801 "$VPORT" >> "$LOGS/pp-a.log" 2>&1 &
     PP_STATE="$(cat "$STATE" 2>/dev/null || echo '{}')" node scripts/pp-matrix.mjs --leg=offline > "$LOGS/leg-$leg.log" 2>&1 || rc=1
   elif [ "$leg" = adopt ]; then
-    # C joins as a peer that stays up; A backs up, B adopts its seed and
-    # exits; A stops (the dead machine), B starts again as A's agent.
+    # C and D join as peers that stay up (a restore needs two agreeing on
+    # A's chain head); A backs up, B adopts its seed and exits; A stops (the
+    # dead machine), B starts again as A's agent and restores A's chain.
     dbus-run-session -- scripts/run-test-instance.sh pp-c 120 28803 "$VPORT" > "$LOGS/pp-c.log" 2>&1 &
-    PP_STATE="$(cat "$STATE" 2>/dev/null || echo '{}')" node scripts/pp-matrix.mjs --leg=adopt > "$LOGS/leg-$leg.log" 2>&1 || rc=1
+    dbus-run-session -- scripts/run-test-instance.sh pp-d 130 28804 "$VPORT" > "$LOGS/pp-d.log" 2>&1 &
+    PP_STATE="$(cat "$STATE" 2>/dev/null || echo '{}')" PP_STATE_OUT="$STATE" node scripts/pp-matrix.mjs --leg=adopt > "$LOGS/leg-$leg.log" 2>&1 || rc=1
     APID=$(ss -ltnp 2>/dev/null | awk '$4 ~ /:28801$/' | grep -o 'pid=[0-9]*' | head -1 | cut -d= -f2)
     [ -n "$APID" ] && kill -TERM "$APID"
     for i in $(seq 1 60); do ss -ltn | grep -qE ':(28801|28802)\b' || break; sleep 1; done
@@ -73,7 +76,7 @@ for leg in $LEGS; do
 done
 
 stop_all; trap - EXIT
-for d in pp-a pp-b pp-c; do
+for d in pp-a pp-b pp-c pp-d; do
   f="$HOME/.local/share/proofpoll-test-$d/xdg/com.proofpoll.app/logs/proofpoll.log"; [ -f "$f" ] && cp "$f" "$LOGS/$d-app.log"
   for c in $(find "$HOME/.local/share/proofpoll-test-$d" -name 'holochain-stderr.log' 2>/dev/null); do cp "$c" "$LOGS/$d-$(basename "$(dirname "$c")")-stderr.log"; done
 done

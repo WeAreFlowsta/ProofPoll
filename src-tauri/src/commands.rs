@@ -2532,6 +2532,10 @@ pub async fn build_canonical_backup(
         "cells": [
             {
                 "role_name": "polls",
+                // Which chain this is: a restore onto another device rebuilds
+                // a 0.7 chain from the network (seed_adopt::backup_chain).
+                "line": "holochain-0.7",
+                "dna_version": "1.4",
                 "_readme": "Each record below is one action on your source chain. `human_readable` is the plain-English view (app entries only). `raw_record` is the signed record used to restore your chain onto a fresh install.",
                 "records": records,
             }
