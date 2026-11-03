@@ -42,6 +42,7 @@ use tauri::Manager;
 mod profiles;
 mod vault_probe;
 mod webview_fix;
+mod kits;
 #[cfg(feature = "harness")]
 mod harness;
 
@@ -184,6 +185,7 @@ pub fn run() {
             // tauri.conf.json land under a `resources/` subdir there, so
             // we append that to match dev's layout.
             let resource_dir = resolve_resource_dir(app.handle(), &app_state.device_root);
+            let (kit_device_root, kit_resources) = (app_state.device_root.clone(), resource_dir.clone());
 
             // Auto-start the conductor in the background.
             let startup_state = app_state.clone();
@@ -251,6 +253,9 @@ pub fn run() {
                         *startup_state.lair_client.lock().await = Some(result.lair_client);
                         *startup_state.conductor_status.lock().unwrap() =
                             conductor::ConductorStatus::Ready { admin_port, app_port };
+
+                        // Each line's kit, set aside once a run.
+                        kits::refresh_once(kit_device_root.clone(), kit_resources.clone());
 
                         // Started with no network: reconnect by itself once
                         // the rendezvous answers.

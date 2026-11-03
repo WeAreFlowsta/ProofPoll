@@ -91,6 +91,7 @@ async fn status(Ax(app): Ax<tauri::AppHandle>) -> Reply {
         "conductor_pids": pids.map(|(a, b)| json!([a, b])),
         "rss_mb": pids.map(|(a, b)| json!({ "holochain-0.6": rss_mb(a), "holochain-0.7": rss_mb(b) })),
         "identity_link": link,
+        "kits": crate::kits::status(&state.device_root),
         "migration": migration,
     }))
 }

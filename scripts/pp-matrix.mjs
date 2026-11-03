@@ -70,6 +70,10 @@ async function fresh() {
   // not the ~2 GB an install kept (holochain#6064).
   record('A: both conductors under 1 GB after their restart', (rss['holochain-0.7'] ?? 9999) < 1024 && (rss['holochain-0.6'] ?? 9999) < 1024, JSON.stringify(rss));
   record('A: no identity link yet', st.identity_link == null, JSON.stringify(st.identity_link));
+  // Each line's kit (its conductor, key store and hApp) set aside once a run.
+  const kitsCached = await until(async () => { const k = (await status(A)).kits || {}; return !!k['holochain-0.6'] && !!k['holochain-0.7']; }, 120, 5000);
+  const kits = (await status(A)).kits || {};
+  record("A: both lines' kits cached", kitsCached, JSON.stringify(Object.fromEntries(Object.entries(kits).map(([l, m]) => [l, m?.entries]))));
   const refused = await op(A, { op: 'create_poll', title: 'before sign-in', description: '', options: ['a', 'b'] });
   record('A: a write before sign-in is refused', !refused.ok && /Sign in with Flowsta/.test(refused.error || ''), refused.error);
   // A fresh conductor's first network reads can take minutes (the cold
