@@ -221,6 +221,13 @@ pub fn run() {
                         *startup_state.conductor_status.lock().unwrap() =
                             conductor::ConductorStatus::Ready { admin_port, app_port };
 
+                        // Started with no network: reconnect by itself once
+                        // the rendezvous answers.
+                        conductor::spawn_reconnect_when_online(
+                            startup_state.clone(),
+                            monitor_handle.clone(),
+                        );
+
                         // Start background health monitor
                         conductor::spawn_health_monitor(
                             conductor_pid,

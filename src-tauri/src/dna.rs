@@ -611,11 +611,12 @@ pub async fn ensure_apps_enabled(admin_ws: &AdminWebsocket) {
 /// Install v1.4 on the 0.7.1 conductor under the same agent key the 0.6
 /// conductor uses (the key lives in the shared lair; the DNA hashes differ,
 /// so one key on two conductors is allowed). Re-enables an installed v1.4.
+/// Returns whether it installed v1.4 on this start.
 pub async fn install_dnas_07(
     admin_port: u16,
     resource_dir: &Path,
     agent_key_raw39: &[u8],
-) -> Result<(), String> {
+) -> Result<bool, String> {
     use holochain_client_07::{AdminWebsocket, InstallAppPayload};
     use holochain_types_07::app::AppBundleSource;
     use holochain_types_07::prelude::AgentPubKey;
@@ -636,7 +637,7 @@ pub async fn install_dnas_07(
             .await
             .map_err(|e| format!("Failed to re-enable v1.4: {}", e))?;
         log::info!("ProofPoll v1.4 DNA present and enabled (0.7)");
-        return Ok(());
+        return Ok(false);
     }
     let happ_path = resource_dir.join(HAPP_FILE_V1_4);
     if !happ_path.exists() {
@@ -661,7 +662,7 @@ pub async fn install_dnas_07(
         .await
         .map_err(|e| format!("Failed to enable v1.4 DNA: {}", e))?;
     log::info!("ProofPoll v1.4 DNA installed and enabled (0.7)");
-    Ok(())
+    Ok(true)
 }
 
 /// Attach the 0.7 conductor's app interface, authorize signing for the v1.4

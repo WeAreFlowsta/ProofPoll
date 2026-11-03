@@ -88,6 +88,7 @@ pub struct SidecarCommand {
     program: PathBuf,
     args: Vec<OsString>,
     cwd: Option<PathBuf>,
+    envs: Vec<(OsString, OsString)>,
     stdout: Option<File>,
     stderr: Option<File>,
 }
@@ -98,9 +99,16 @@ impl SidecarCommand {
             program: program.into(),
             args: Vec::new(),
             cwd: None,
+            envs: Vec::new(),
             stdout: None,
             stderr: None,
         }
+    }
+
+    /// An environment variable for the child, on top of this process's.
+    pub fn env(mut self, key: impl Into<OsString>, value: impl Into<OsString>) -> Self {
+        self.envs.push((key.into(), value.into()));
+        self
     }
 
     pub fn arg(mut self, a: impl Into<OsString>) -> Self {
@@ -130,6 +138,7 @@ impl SidecarCommand {
         use std::process::Stdio;
         let mut cmd = Command::new(&self.program);
         cmd.args(&self.args)
+            .envs(self.envs.iter().map(|(k, v)| (k, v)))
             .stdin(Stdio::piped())
             .stdout(self.stdout.map(Stdio::from).unwrap_or_else(Stdio::null))
             .stderr(self.stderr.map(Stdio::from).unwrap_or_else(Stdio::null));
@@ -245,6 +254,57 @@ pub fn stop_pid(pid: u32) {
     }
 }
 
+/// Stop a conductor the way it expects, then end it if it has not stopped
+/// within `grace`. Holochain shuts down cleanly on SIGINT (its ctrl-c); a
+/// kill can leave its databases mid-write. Windows has no SIGINT for another
+/// process's console yet, so there it is ended at once.
+pub async fn stop_gracefully(child: &mut SidecarChild, grace: std::time::Duration, what: &str) {
+    #[cfg(not(target_os = "windows"))]
+    if matches!(child.try_wait(), Ok(None)) {
+        // SAFETY: signalling our own child by its pid.
+        unsafe {
+            libc::kill(child.id() as i32, libc::SIGINT);
+        }
+        let deadline = std::time::Instant::now() + grace;
+        while std::time::Instant::now() < deadline {
+            if !matches!(child.try_wait(), Ok(None)) {
+                log::info!("{} stopped", what);
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        log::warn!("{} did not stop within {}s and was ended", what, grace.as_secs());
+    }
+    #[cfg(target_os = "windows")]
+    let _ = grace;
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// [`stop_gracefully`] for a thread that may block: the app's own exit.
+pub fn stop_gracefully_blocking(child: &mut SidecarChild, grace: std::time::Duration, what: &str) {
+    #[cfg(not(target_os = "windows"))]
+    if matches!(child.try_wait(), Ok(None)) {
+        // SAFETY: signalling our own child by its pid.
+        unsafe {
+            libc::kill(child.id() as i32, libc::SIGINT);
+        }
+        let deadline = std::time::Instant::now() + grace;
+        while std::time::Instant::now() < deadline {
+            if !matches!(child.try_wait(), Ok(None)) {
+                log::info!("{} stopped", what);
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        log::warn!("{} did not stop within {}s and was ended", what, grace.as_secs());
+    }
+    #[cfg(target_os = "windows")]
+    let _ = grace;
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 /// Whether a process is still running. Windows has no `kill(pid, 0)`: open
 /// the process and read its exit code, where STILL_ACTIVE (259) means
 /// running. The health monitor used to assume "alive" on Windows, so a
@@ -296,8 +356,8 @@ mod win_spawn {
     use windows_sys::Win32::System::Pipes::CreatePipe;
     use windows_sys::Win32::System::Threading::{
         CreateProcessW, GetCurrentProcess, GetExitCodeProcess, TerminateProcess,
-        WaitForSingleObject, INFINITE, PROCESS_INFORMATION, STARTF_USESHOWWINDOW,
-        STARTF_USESTDHANDLES, STARTUPINFOW,
+        WaitForSingleObject, CREATE_UNICODE_ENVIRONMENT, INFINITE, PROCESS_INFORMATION,
+        STARTF_USESHOWWINDOW, STARTF_USESTDHANDLES, STARTUPINFOW,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::SW_HIDE;
 
@@ -388,6 +448,28 @@ mod win_spawn {
         s.encode_wide().chain(std::iter::once(0)).collect()
     }
 
+    /// This process's environment with `extra` on top, as the UTF-16 block
+    /// CreateProcessW takes: `NAME=value\0` per variable, sorted by name
+    /// without regard to case (as Windows requires), ending in an extra `\0`.
+    fn environment_block(extra: &[(std::ffi::OsString, std::ffi::OsString)]) -> Vec<u16> {
+        let upper = |k: &std::ffi::OsStr| k.to_string_lossy().to_uppercase();
+        let mut vars: Vec<(std::ffi::OsString, std::ffi::OsString)> = std::env::vars_os().collect();
+        for (k, v) in extra {
+            vars.retain(|(have, _)| upper(have) != upper(k));
+            vars.push((k.clone(), v.clone()));
+        }
+        vars.sort_by_key(|(k, _)| upper(k));
+        let mut block = Vec::new();
+        for (k, v) in &vars {
+            block.extend(k.encode_wide());
+            block.push(b'=' as u16);
+            block.extend(v.encode_wide());
+            block.push(0);
+        }
+        block.push(0);
+        block
+    }
+
     /// An inheritable duplicate of `h` (the child gets the copy; the
     /// original stays ours and non-inheritable).
     fn inheritable_dup(h: HANDLE) -> io::Result<HANDLE> {
@@ -467,6 +549,8 @@ mod win_spawn {
         let mut line_w = wide(std::ffi::OsStr::new(&line));
         let program_w = wide(program.as_os_str());
         let cwd_w = cmd.cwd.as_ref().map(|d| wide(d.as_os_str()));
+        // Inherit the environment as it is unless the command adds to it.
+        let env_block = (!cmd.envs.is_empty()).then(|| environment_block(&cmd.envs));
 
         let mut si: STARTUPINFOW = unsafe { std::mem::zeroed() };
         si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
@@ -486,8 +570,10 @@ mod win_spawn {
                 std::ptr::null(),
                 std::ptr::null(),
                 1, // bInheritHandles: the three std handles above
-                0, // no creation flags: a normal console, created hidden via si
-                std::ptr::null(),
+                // A normal console, created hidden via si; a UTF-16 block
+                // when the environment is given.
+                if env_block.is_some() { CREATE_UNICODE_ENVIRONMENT } else { 0 },
+                env_block.as_ref().map(|b| b.as_ptr() as *const std::ffi::c_void).unwrap_or(std::ptr::null()),
                 cwd_w.as_ref().map(|w| w.as_ptr()).unwrap_or(std::ptr::null()),
                 &si,
                 &mut pi,

@@ -1568,8 +1568,8 @@ pub async fn get_export_data(
     });
 
     // Format v6: the export carries the means of authorship (CAL) - the
-    // same app_keys block as the canonical backup. Both emitters, per the
-    // D8 precedent.
+    // same app_keys block as the canonical backup. Both emitters carry it,
+    // so either file restores the same authorship.
     match crate::device_seed::app_keys_json(&state.data_dir) {
         Ok(keys) => export["app_keys"] = keys,
         Err(e) => log::warn!("[export] could not read the device seed: {}", e),
@@ -1648,8 +1648,8 @@ async fn hubs_on(
 /// a Vault identity key, the same on every network: a new install links on
 /// the active network only, so its hub must be expanded on the previous
 /// network too, or the identity's older installs (linked there before the
-/// upgrade) never read as the same person on the new device (Eric's Mac,
-/// beta.3, 2026-10-25).
+/// upgrade) never read as the same person on the new device (seen on a Mac
+/// on 0.5.0-beta.3, 2026-10-25).
 async fn fold_siblings_on(
     state: &std::sync::Arc<AppState>,
     hub: &AgentPubKey,

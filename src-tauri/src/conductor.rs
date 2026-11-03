@@ -150,19 +150,19 @@ pub struct ConductorHandle {
     pub app_port_07: u16,
     pub conductor_pid: u32,
     pub conductor_pid_07: u32,
+    /// Which older apps the 0.6 conductor holds (its app interface serves
+    /// them), kept for a restart of the conductors.
+    pub v1_0_available: bool,
+    pub v1_1_available: bool,
+    pub v1_2_available: bool,
 }
 
 impl ConductorHandle {
     pub fn shutdown(mut self) {
         log::info!("Shutting down conductors...");
-        if let Err(e) = self.conductor_child_07.kill() {
-            log::warn!("Failed to kill the 0.7 conductor process: {}", e);
-        }
-        let _ = self.conductor_child_07.wait();
-        if let Err(e) = self.conductor_child.kill() {
-            log::warn!("Failed to kill conductor process: {}", e);
-        }
-        let _ = self.conductor_child.wait();
+        let grace = std::time::Duration::from_secs(5);
+        crate::process_ext::stop_gracefully_blocking(&mut self.conductor_child_07, grace, "The 0.7 conductor");
+        crate::process_ext::stop_gracefully_blocking(&mut self.conductor_child, grace, "The 0.6 conductor");
 
         log::info!("Shutting down lair-keystores...");
         if let Err(e) = self.lair_child_07.kill() {
@@ -250,6 +250,7 @@ fn generate_conductor_config(
     lair_connection_url: &str,
     admin_port: u16,
     line: crate::hc::Line,
+    with_auth: bool,
 ) -> Result<PathBuf, String> {
     std::fs::create_dir_all(conductor_dir)
         .map_err(|e| format!("Failed to create conductor directory: {}", e))?;
@@ -259,7 +260,7 @@ fn generate_conductor_config(
     // block; empty string when no auth material is configured (the
     // common case for fork developers). Same value goes into both
     // fields — see the module-level comment for why.
-    let auth_line = match auth_material() {
+    let auth_line = match auth_material().filter(|_| with_auth) {
         Some(material) => format!(
             "  base64_auth_material_bootstrap: \"{m}\"\n  base64_auth_material_relay: \"{m}\"\n",
             m = material,
@@ -355,18 +356,28 @@ fn start_conductor_process(
 
     let stdout_path = conductor_dir.join("holochain-stdout.log");
     let stderr_path = conductor_dir.join("holochain-stderr.log");
+    // The previous run's output is kept: a restart is the usual cure for a
+    // network problem, and it used to erase the only evidence.
+    let _ = std::fs::rename(&stdout_path, conductor_dir.join("holochain-stdout.previous.log"));
+    let _ = std::fs::rename(&stderr_path, conductor_dir.join("holochain-stderr.previous.log"));
 
     let stdout_file = std::fs::File::create(&stdout_path)
         .map_err(|e| format!("Failed to create conductor stdout log: {}", e))?;
     let stderr_file = std::fs::File::create(&stderr_path)
         .map_err(|e| format!("Failed to create conductor stderr log: {}", e))?;
 
-    let mut child = SidecarCommand::new(sidecar_path(binary))
+    let mut cmd = SidecarCommand::new(sidecar_path(binary))
         .arg("-c")
         .arg(config_path)
         .arg("--piped")
         .stdout(stdout_file)
-        .stderr(stderr_file)
+        .stderr(stderr_file);
+    // The conductor logs nothing without RUST_LOG; a developer's own is
+    // inherited instead.
+    if std::env::var_os("RUST_LOG").is_none() {
+        cmd = cmd.env("RUST_LOG", "warn");
+    }
+    let mut child = cmd
         .spawn()
         .map_err(|e| format!("Failed to spawn holochain conductor: {}", e))?;
 
@@ -617,56 +628,26 @@ async fn start_holochain_attempt(
         }};
     }
 
-    // 2. Wait for lair socket.
-    if let Err(e) = lair::wait_for_lair_socket(&connection_url, 15).await {
+    // 2. Wait for lair socket, watching the process.
+    if let Err(e) = lair::wait_for_lair_socket(&connection_url, 15, &mut lair_child, &lair_dir, "lair-keystore").await {
         fail_with_lair_cleanup!(e);
     }
 
-    // 3. Connect to lair. On Windows the named pipe is registered in the
-    //    kernel namespace asynchronously after the server process spawns —
-    //    "file not found" for the first second or two is normal. Retry until
-    //    the pipe is up or the lair process dies. On Unix this almost always
-    //    succeeds first try because step 2 already waited for the socket
-    //    file.
+    // 3. Connect to lair, retrying while it runs (on Windows the named pipe
+    //    registers a second or two after the process starts).
     let _ = app_handle.emit(
         "conductor-status",
         ConductorStatus::Starting {
             message: "Connecting to lair-keystore...".into(),
         },
     );
-    let lair_client = {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        let mut last_err: Option<String> = None;
-        loop {
-            // Short-circuit if lair died — no amount of retrying brings it back.
-            if let Ok(Some(status)) = lair_child.try_wait() {
-                let logs = lair::read_lair_logs(&lair_dir, "server");
-                fail_with_lair_cleanup!(format!(
-                    "lair-keystore exited unexpectedly (status {}): {}",
-                    status, logs
-                ));
-            }
-            match lair::connect_to_lair(&connection_url, &passphrase).await {
-                Ok(c) => break c,
-                Err(e) => {
-                    // "Pipe not ready yet" — keep waiting.
-                    let not_ready = e.contains("os error 2")
-                        || e.contains("cannot find the file")
-                        || e.contains("No such file or directory");
-                    if not_ready && std::time::Instant::now() < deadline {
-                        last_err = Some(e);
-                        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-                        continue;
-                    }
-                    let logs = lair::read_lair_logs(&lair_dir, "server");
-                    fail_with_lair_cleanup!(format!(
-                        "{} (lair output: {})",
-                        last_err.unwrap_or(e),
-                        logs,
-                    ));
-                }
-            }
-        }
+    let lair_client = match lair::connect_with_retries(&mut lair_child, &lair_dir, "lair-keystore", || {
+        lair::connect_to_lair(&connection_url, &passphrase)
+    })
+    .await
+    {
+        Ok(c) => c,
+        Err(e) => fail_with_lair_cleanup!(e),
     };
     log::info!("Connected to lair-keystore");
 
@@ -686,31 +667,16 @@ async fn start_holochain_attempt(
             fail_with_lair_cleanup!($err);
         }};
     }
-    if let Err(e) = lair::wait_for_lair_socket(&connection_url_07, 15).await {
+    if let Err(e) = lair::wait_for_lair_socket(&connection_url_07, 15, &mut lair_child_07, &lair_dir_07, "lair-keystore (0.7)").await {
         fail_with_lairs_cleanup!(e);
     }
-    let lair_client_07 = {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        let mut last_err: Option<String> = None;
-        loop {
-            if let Ok(Some(status)) = lair_child_07.try_wait() {
-                let logs = lair::read_lair_logs(&lair_dir_07, "server");
-                fail_with_lairs_cleanup!(format!("lair-keystore (0.7) exited unexpectedly (status {}): {}", status, logs));
-            }
-            match lair::connect_to_lair_07(&connection_url_07, &passphrase).await {
-                Ok(c) => break c,
-                Err(e) => {
-                    let not_ready = e.contains("os error 2") || e.contains("cannot find the file") || e.contains("No such file or directory");
-                    if not_ready && std::time::Instant::now() < deadline {
-                        last_err = Some(e);
-                        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-                        continue;
-                    }
-                    let logs = lair::read_lair_logs(&lair_dir_07, "server");
-                    fail_with_lairs_cleanup!(format!("{} (lair 0.7 output: {})", last_err.unwrap_or(e), logs));
-                }
-            }
-        }
+    let lair_client_07 = match lair::connect_with_retries(&mut lair_child_07, &lair_dir_07, "lair-keystore (0.7)", || {
+        lair::connect_to_lair_07(&connection_url_07, &passphrase)
+    })
+    .await
+    {
+        Ok(c) => c,
+        Err(e) => fail_with_lairs_cleanup!(e),
     };
     log::info!("Connected to lair-keystore (0.7)");
 
@@ -721,12 +687,19 @@ async fn start_holochain_attempt(
             message: "Starting Holochain conductor...".into(),
         },
     );
+    // With no rendezvous answering, a conductor whose config carries the
+    // auth refuses to start at all; started without it, everything local
+    // works and the conductors restart with it once the rendezvous answers.
+    STARTED_OFFLINE.store(false, std::sync::atomic::Ordering::SeqCst);
+    let with_auth = rendezvous_answers(bootstrap_url(), crate::hc::Line::V06).await;
+    let with_auth_07 = rendezvous_answers(bootstrap_url_07(), crate::hc::Line::V07).await;
     let conductor_dir = data_dir.join("conductor");
     let config_path = match generate_conductor_config(
         &conductor_dir,
         &connection_url,
         ADMIN_WS_PORT,
         crate::hc::Line::V06,
+        with_auth,
     ) {
         Ok(p) => p,
         Err(e) => fail_with_lairs_cleanup!(e),
@@ -737,6 +710,7 @@ async fn start_holochain_attempt(
         &connection_url_07,
         ADMIN_WS_PORT_07,
         crate::hc::Line::V07,
+        with_auth_07,
     ) {
         Ok(p) => p,
         Err(e) => fail_with_lairs_cleanup!(e),
@@ -849,14 +823,39 @@ async fn start_holochain_attempt(
             agent_07, install_result.agent_pub_key
         );
     }
-    if let Err(e) = crate::dna::install_dnas_07(
+    let installed_07 = match crate::dna::install_dnas_07(
         ADMIN_WS_PORT_07,
         &resource_dir,
         agent_07.get_raw_39(),
     )
     .await
     {
-        fail_with_full_cleanup!(format!("DNA installation (0.7) failed: {}", e));
+        Ok(installed) => installed,
+        Err(e) => fail_with_full_cleanup!(format!("DNA installation (0.7) failed: {}", e)),
+    };
+    // Holochain 0.7.1 keeps the memory an install used until the conductor
+    // restarts: modules dropped from its cache after each cell's genesis are
+    // reloaded into one engine that keeps the old machine code (about 2 GB
+    // after a first install; holochain#6064). One restart before Ready gives
+    // it back.
+    if installed_07 {
+        log::info!("v1.4 installed this start: restarting the 0.7 conductor once to give back the memory the install kept");
+        let _ = app_handle.emit(
+            "conductor-status",
+            ConductorStatus::Starting {
+                message: "Restarting Holochain once after setup...".into(),
+            },
+        );
+        crate::process_ext::stop_gracefully(&mut conductor_child_07, std::time::Duration::from_secs(5), "The 0.7 conductor").await;
+        conductor_child_07 = match start_conductor_process(&config_path_07, &conductor_dir_07, &passphrase, "proofpoll-holochain") {
+            Ok(c) => c,
+            Err(e) => fail_with_full_cleanup!(e),
+        };
+        if let Err(e) =
+            wait_for_admin_ws(ADMIN_WS_PORT_07, 30, &mut conductor_child_07, &conductor_dir_07).await
+        {
+            fail_with_full_cleanup!(e);
+        }
     }
     let (app_port_07, app_client) = match crate::dna::setup_app_interface_07(ADMIN_WS_PORT_07).await {
         Ok(r) => r,
@@ -897,6 +896,9 @@ async fn start_holochain_attempt(
         app_port_07,
         conductor_pid,
         conductor_pid_07,
+        v1_0_available: install_result.v1_0_available,
+        v1_1_available: install_result.v1_1_available,
+        v1_2_available: install_result.v1_2_available,
     };
 
     Ok(StartupResult {
@@ -910,6 +912,188 @@ async fn start_holochain_attempt(
         lair_client,
         needs_migration: install_result.needs_migration,
     })
+}
+
+/// Whether this session's conductors started with no rendezvous answering,
+/// and so without its auth. Holochain 0.6.1 and 0.7.1 authenticate with the
+/// relay while they start, and a conductor that cannot (no network) refuses
+/// to start at all ("Authenticate Failed", exit 101). Started without the
+/// auth, everything local works; the conductors restart with it once the
+/// rendezvous answers again.
+static STARTED_OFFLINE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn started_offline() -> bool {
+    STARTED_OFFLINE.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Whether a line's config carries the auth on this start: always when there
+/// is none to carry, otherwise only when its rendezvous answers.
+async fn rendezvous_answers(bootstrap: &str, line: crate::hc::Line) -> bool {
+    if auth_material().is_none() || bootstrap_alive(bootstrap).await {
+        return true;
+    }
+    log::warn!(
+        "[{:?}] no rendezvous answers ({}): starting without its auth; the conductors restart with it once it answers",
+        line, bootstrap
+    );
+    STARTED_OFFLINE.store(true, std::sync::atomic::Ordering::SeqCst);
+    false
+}
+
+/// Whether a bootstrap server answers its health check.
+async fn bootstrap_alive(url: &str) -> bool {
+    #[cfg(debug_assertions)]
+    if test_offline_now() {
+        return false;
+    }
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_millis(2500))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let health = format!("{}/health", url.trim_end_matches('/'));
+    matches!(client.get(&health).send().await, Ok(r) if r.status().is_success())
+}
+
+/// A debug build takes `PROOFPOLL_TEST_OFFLINE_UNTIL=<unix seconds>`: every
+/// rendezvous check fails until then ("offline, then back" in a test). A
+/// release build never reads it.
+#[cfg(debug_assertions)]
+fn test_offline_now() -> bool {
+    std::env::var("PROOFPOLL_TEST_OFFLINE_UNTIL")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .is_some_and(|until| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() < until)
+                .unwrap_or(false)
+        })
+}
+
+/// A session that started offline: once both rendezvous answer (checked each
+/// minute), restart the conductors with the auth, in place.
+pub fn spawn_reconnect_when_online(
+    state: std::sync::Arc<crate::commands::AppState>,
+    app_handle: tauri::AppHandle,
+) {
+    if !started_offline() {
+        return;
+    }
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            if !started_offline() {
+                break;
+            }
+            if !(bootstrap_alive(bootstrap_url()).await && bootstrap_alive(bootstrap_url_07()).await) {
+                continue;
+            }
+            log::info!("[network] the rendezvous answers again: restarting the conductors with its auth");
+            if let Err(e) = restart_conductors_with_auth(&state, &app_handle).await {
+                log::error!("[network] the conductors did not start again: {}", e);
+                let status = ConductorStatus::Error {
+                    message: "The Holochain conductor stopped unexpectedly. Restart the app to reconnect.".into(),
+                };
+                *state.conductor_status.lock().unwrap() = status.clone();
+                let _ = app_handle.emit("conductor-status", status);
+            }
+            break;
+        }
+    });
+}
+
+/// Stop both conductors cleanly and start them again on their configs, now
+/// with the auth: the key stores keep running, the app clients are replaced.
+async fn restart_conductors_with_auth(
+    state: &std::sync::Arc<crate::commands::AppState>,
+    app_handle: &tauri::AppHandle,
+) -> Result<(), String> {
+    // Not Ready while the old conductors stop: the health monitors then end
+    // quietly instead of reporting them as stopped unexpectedly.
+    let starting = ConductorStatus::Starting {
+        message: "Connecting to the network...".into(),
+    };
+    *state.conductor_status.lock().unwrap() = starting.clone();
+    let _ = app_handle.emit("conductor-status", starting);
+
+    let mut handle = state
+        .conductor_handle
+        .lock()
+        .unwrap()
+        .take()
+        .ok_or("no conductors are running")?;
+    let grace = std::time::Duration::from_secs(5);
+    crate::process_ext::stop_gracefully(&mut handle.conductor_child_07, grace, "The 0.7 conductor").await;
+    crate::process_ext::stop_gracefully(&mut handle.conductor_child, grace, "The 0.6 conductor").await;
+    STARTED_OFFLINE.store(false, std::sync::atomic::Ordering::SeqCst);
+
+    let data_dir = state.data_dir.clone();
+    let passphrase = state.passphrase.lock().unwrap().clone();
+    let started = async {
+        let conductor_dir = data_dir.join("conductor");
+        let conductor_dir_07 = data_dir.join(CONDUCTOR_DIR_07);
+        let config = generate_conductor_config(
+            &conductor_dir,
+            &crate::lair::connection_url_of(&data_dir.join("lair"))?,
+            ADMIN_WS_PORT,
+            crate::hc::Line::V06,
+            true,
+        )?;
+        let config_07 = generate_conductor_config(
+            &conductor_dir_07,
+            &crate::lair::connection_url_of(&data_dir.join("lair-07"))?,
+            ADMIN_WS_PORT_07,
+            crate::hc::Line::V07,
+            true,
+        )?;
+        handle.conductor_child = start_conductor_process(&config, &conductor_dir, &passphrase, "proofpoll-holochain-06")?;
+        handle.conductor_child_07 = start_conductor_process(&config_07, &conductor_dir_07, &passphrase, "proofpoll-holochain")?;
+        wait_for_admin_ws(ADMIN_WS_PORT, 30, &mut handle.conductor_child, &conductor_dir).await?;
+        wait_for_admin_ws(ADMIN_WS_PORT_07, 30, &mut handle.conductor_child_07, &conductor_dir_07).await?;
+        let clients = crate::dna::setup_app_interface(
+            ADMIN_WS_PORT,
+            handle.v1_0_available,
+            handle.v1_1_available,
+            handle.v1_2_available,
+        )
+        .await?;
+        let clients_07 = crate::dna::setup_app_interface_07(ADMIN_WS_PORT_07).await?;
+        Ok::<_, String>((clients, clients_07))
+    }
+    .await;
+    // The handle goes back either way, so quitting still stops what runs.
+    let ((app_port, client_v1_3, client_v1_2, client_v1_1, client_v1_0), (app_port_07, client)) = match started {
+        Ok(r) => r,
+        Err(e) => {
+            *state.conductor_handle.lock().unwrap() = Some(handle);
+            return Err(e);
+        }
+    };
+
+    handle.app_port = app_port;
+    handle.app_port_07 = app_port_07;
+    handle.conductor_pid = handle.conductor_child.id();
+    handle.conductor_pid_07 = handle.conductor_child_07.id();
+    let (pid, pid_07) = (handle.conductor_pid, handle.conductor_pid_07);
+    *state.app_client.lock().await = Some(client);
+    *state.app_client_v1_3.lock().await = client_v1_3;
+    *state.app_client_v1_2.lock().await = client_v1_2;
+    *state.app_client_v1_1.lock().await = client_v1_1;
+    *state.app_client_v1_0.lock().await = client_v1_0;
+    *state.conductor_handle.lock().unwrap() = Some(handle);
+    let ready = ConductorStatus::Ready {
+        admin_port: ADMIN_WS_PORT_07,
+        app_port: app_port_07,
+    };
+    *state.conductor_status.lock().unwrap() = ready.clone();
+    let _ = app_handle.emit("conductor-status", ready);
+    spawn_health_monitor(pid, state.clone(), app_handle.clone());
+    spawn_health_monitor(pid_07, state.clone(), app_handle.clone());
+    log::info!("[network] the conductors are back with the network's auth");
+    Ok(())
 }
 
 /// Spawn a background task that monitors the conductor process.
@@ -950,7 +1134,7 @@ mod tests {
     #[test]
     fn the_07_config_caps_each_gossip_exchange() {
         let dir = tempfile::tempdir().unwrap();
-        let cfg = generate_conductor_config(dir.path(), "unix:///tmp/x/socket?k=a", ADMIN_WS_PORT_07, crate::hc::Line::V07).unwrap();
+        let cfg = generate_conductor_config(dir.path(), "unix:///tmp/x/socket?k=a", ADMIN_WS_PORT_07, crate::hc::Line::V07, true).unwrap();
         let yaml = std::fs::read_to_string(cfg).unwrap();
         // Under network.advanced.k2Gossip: a misplaced key fails the network
         // join with "decode config: invalid type".
@@ -980,7 +1164,7 @@ mod tests {
         let mut conductor_child: Option<SidecarChild> = None;
 
         let result = async {
-            crate::lair::wait_for_lair_socket(&url, 15).await?;
+            crate::lair::wait_for_lair_socket(&url, 15, &mut lair_child, &lair_dir, "lair-keystore").await?;
             let mut lair_client = None;
             for _ in 0..20 {
                 match crate::lair::connect_to_lair(&url, passphrase).await {
@@ -993,7 +1177,7 @@ mod tests {
             }
             let lair_client = lair_client.ok_or("could not connect to lair")?;
 
-            let config_path = generate_conductor_config(&conductor_dir, &url, ADMIN_WS_PORT, crate::hc::Line::V06)?;
+            let config_path = generate_conductor_config(&conductor_dir, &url, ADMIN_WS_PORT, crate::hc::Line::V06, true)?;
             let mut child = start_conductor_process(&config_path, &conductor_dir, passphrase, "proofpoll-holochain-06")?;
             match wait_for_admin_ws(ADMIN_WS_PORT, 30, &mut child, &conductor_dir).await {
                 Ok(()) => {}
@@ -1092,7 +1276,7 @@ mod tests {
         let mut conductor_child: Option<SidecarChild> = None;
 
         let result = async {
-            crate::lair::wait_for_lair_socket(&url, 15).await?;
+            crate::lair::wait_for_lair_socket(&url, 15, &mut lair_child, &lair_dir, "lair-keystore").await?;
             let mut lair_client = None;
             for _ in 0..20 {
                 match crate::lair::connect_to_lair(&url, passphrase).await {
@@ -1105,7 +1289,7 @@ mod tests {
             }
             let lair_client = lair_client.ok_or("could not connect to lair")?;
 
-            let config_path = generate_conductor_config(&conductor_dir, &url, ADMIN_WS_PORT, crate::hc::Line::V06)?;
+            let config_path = generate_conductor_config(&conductor_dir, &url, ADMIN_WS_PORT, crate::hc::Line::V06, true)?;
             let mut child = start_conductor_process(&config_path, &conductor_dir, passphrase, "proofpoll-holochain-06")?;
             match wait_for_admin_ws(ADMIN_WS_PORT, 30, &mut child, &conductor_dir).await {
                 Ok(()) => {}
@@ -1222,8 +1406,8 @@ mod tests {
             crate::lair::start_lair_process_with(&data_dir.join("lair-07"), passphrase, "proofpoll-lair-keystore-07").expect("lair 0.7 start");
         let mut children: Vec<SidecarChild> = Vec::new();
         let result = async {
-            crate::lair::wait_for_lair_socket(&url, 15).await?;
-            crate::lair::wait_for_lair_socket(&url_07, 15).await?;
+            crate::lair::wait_for_lair_socket(&url, 15, &mut lair_child, &lair_dir, "lair-keystore").await?;
+            crate::lair::wait_for_lair_socket(&url_07, 15, &mut lair_child_07, &data_dir.join("lair-07"), "lair-keystore (0.7)").await?;
             let mut lair_client = None;
             for _ in 0..20 {
                 match crate::lair::connect_to_lair(&url, passphrase).await {
@@ -1240,14 +1424,14 @@ mod tests {
                 }
             }
             let lair_client_07 = lair_client_07.ok_or("could not connect to lair 0.7")?;
-            let cfg06 = generate_conductor_config(&conductor_dir, &url, ADMIN_WS_PORT, crate::hc::Line::V06)?;
+            let cfg06 = generate_conductor_config(&conductor_dir, &url, ADMIN_WS_PORT, crate::hc::Line::V06, true)?;
             let mut c06 = start_conductor_process(&cfg06, &conductor_dir, passphrase, "proofpoll-holochain-06")?;
             if let Err(e) = wait_for_admin_ws(ADMIN_WS_PORT, 60, &mut c06, &conductor_dir).await {
                 let _ = c06.kill(); let _ = c06.wait();
                 return Err(format!("0.6: {}", e));
             }
             children.push(c06);
-            let cfg07 = generate_conductor_config(&conductor_dir_07, &url_07, ADMIN_WS_PORT_07, crate::hc::Line::V07)?;
+            let cfg07 = generate_conductor_config(&conductor_dir_07, &url_07, ADMIN_WS_PORT_07, crate::hc::Line::V07, true)?;
             let mut c07 = start_conductor_process(&cfg07, &conductor_dir_07, passphrase, "proofpoll-holochain")?;
             if let Err(e) = wait_for_admin_ws(ADMIN_WS_PORT_07, 60, &mut c07, &conductor_dir_07).await {
                 let _ = c07.kill(); let _ = c07.wait();

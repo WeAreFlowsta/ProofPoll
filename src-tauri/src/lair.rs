@@ -374,6 +374,11 @@ fn read_connection_url(config_path: &Path) -> Result<String, String> {
     ))
 }
 
+/// The connection URL of the lair in `lair_dir`, from its config file.
+pub(crate) fn connection_url_of(lair_dir: &Path) -> Result<String, String> {
+    read_connection_url(&lair_dir.join("lair-keystore-config.yaml"))
+}
+
 /// Connect to a running lair-keystore via its connection URL.
 ///
 /// Single attempt — see `connect_to_lair_with_retry` in `conductor.rs` for
@@ -389,21 +394,59 @@ pub async fn connect_to_lair(
             passphrase.as_bytes().to_vec(),
         ),
     ));
-    lair_keystore_api::ipc_keystore_connect(url, passphrase_array)
-        .await
-        .map_err(|e| format!("Failed to connect to lair: {}", e))
+    match tokio::time::timeout(CONNECT_TIMEOUT, lair_keystore_api::ipc_keystore_connect(url, passphrase_array)).await {
+        Ok(r) => r.map_err(|e| format!("Failed to connect to lair: {}", e)),
+        Err(_) => Err(format!("Lair did not answer within {}s", CONNECT_TIMEOUT.as_secs())),
+    }
 }
 
-/// Wait for the lair connection to be ready.
+/// How long one connection attempt may take: a connect that never answers
+/// used to hold the start forever.
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The error to fail a start with if lair (`label`) has exited.
+fn lair_exited(child: &mut SidecarChild, lair_dir: &Path, label: &str) -> Option<String> {
+    match child.try_wait() {
+        Ok(Some(status)) => Some(format!(
+            "{} exited unexpectedly (status {}): {}",
+            label,
+            status,
+            read_lair_logs(lair_dir, "server")
+        )),
+        Ok(None) => None,
+        Err(e) => Some(format!("Could not check {}: {}", label, e)),
+    }
+}
+
+/// Wait for the lair just started as `child` to come up, watching it the
+/// whole time: lair binds its socket before it checks the passphrase, so a
+/// socket file alone proves nothing.
 ///
-/// On Unix, polls until the socket file exists.
-///
-/// On Windows, returns immediately — the named pipe lives in the kernel
-/// namespace with no on-disk counterpart to poll, so readiness is detected
-/// by the connect-with-retry loop in `conductor.rs` instead.
-pub async fn wait_for_lair_socket(connection_url: &str, timeout_secs: u64) -> Result<(), String> {
+/// On Unix, polls until the socket file exists, then one more tick to catch
+/// the common immediate exit. On Windows (a named pipe in the kernel
+/// namespace, nothing on disk to poll), watches the child for 3 s and leaves
+/// the rest to [`connect_with_retries`].
+pub async fn wait_for_lair_socket(
+    connection_url: &str,
+    timeout_secs: u64,
+    child: &mut SidecarChild,
+    lair_dir: &Path,
+    label: &str,
+) -> Result<(), String> {
+    let tick = std::time::Duration::from_millis(200);
+
     if cfg!(target_os = "windows") {
-        return Ok(());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while std::time::Instant::now() < deadline {
+            if let Some(e) = lair_exited(child, lair_dir, label) {
+                return Err(e);
+            }
+            tokio::time::sleep(tick).await;
+        }
+        return match lair_exited(child, lair_dir, label) {
+            Some(e) => Err(e),
+            None => Ok(()),
+        };
     }
 
     let url = lair_keystore_api::dependencies::url::Url::parse(connection_url)
@@ -419,17 +462,67 @@ pub async fn wait_for_lair_socket(connection_url: &str, timeout_secs: u64) -> Re
         std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
 
     while std::time::Instant::now() < deadline {
+        if let Some(e) = lair_exited(child, lair_dir, label) {
+            return Err(e);
+        }
         if socket_path.exists() {
+            tokio::time::sleep(tick).await;
+            if let Some(e) = lair_exited(child, lair_dir, label) {
+                return Err(e);
+            }
             log::info!("Lair socket ready at {:?}", socket_path);
             return Ok(());
         }
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        tokio::time::sleep(tick).await;
     }
 
     Err(format!(
         "Lair socket not ready after {}s: {:?}",
         timeout_secs, socket_path
     ))
+}
+
+/// Connect to the lair just started as `child`, retrying while it runs. On
+/// Windows the named pipe registers a second or two after the process starts
+/// ("not found" until then); on a slow machine the first try can meet a
+/// reset. Gives up as soon as lair exits, after 30 s of "not found", or after
+/// six other failures.
+pub async fn connect_with_retries<C, Fut>(
+    child: &mut SidecarChild,
+    lair_dir: &Path,
+    label: &str,
+    mut connect: impl FnMut() -> Fut,
+) -> Result<C, String>
+where
+    Fut: std::future::Future<Output = Result<C, String>>,
+{
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut failures = 0u32;
+    loop {
+        if let Some(e) = lair_exited(child, lair_dir, label) {
+            return Err(e);
+        }
+        let e = match connect().await {
+            Ok(client) => return Ok(client),
+            Err(e) => e,
+        };
+        if let Some(exited) = lair_exited(child, lair_dir, label) {
+            return Err(exited);
+        }
+        let not_found = e.contains("os error 2")
+            || e.contains("cannot find the file")
+            || e.contains("No such file or directory");
+        if !not_found {
+            failures += 1;
+        }
+        if std::time::Instant::now() >= deadline || failures >= 6 {
+            return Err(format!("{} ({} output: {})", e, label, read_lair_logs(lair_dir, "server")));
+        }
+        if !not_found {
+            log::warn!("[{}] connect attempt {} failed ({}), retrying", label, failures, e);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(if not_found { 250 } else { 400 })).await;
+    }
 }
 
 #[cfg(test)]
@@ -531,7 +624,7 @@ mod tests {
         let (mut child, url) =
             start_lair_process(&dir, passphrase).expect("lair start");
         let result = async {
-            wait_for_lair_socket(&url, 15).await?;
+            wait_for_lair_socket(&url, 15, &mut child, &dir, "lair-keystore").await?;
             // The server accepts connections a beat after the socket exists.
             let mut client = None;
             for _ in 0..20 {
@@ -726,9 +819,10 @@ pub async fn connect_to_lair_07(
             passphrase.as_bytes().to_vec(),
         ),
     ));
-    lair_keystore_api_07::ipc_keystore_connect(url, passphrase_array)
-        .await
-        .map_err(|e| format!("Failed to connect to lair (0.7): {}", e))
+    match tokio::time::timeout(CONNECT_TIMEOUT, lair_keystore_api_07::ipc_keystore_connect(url, passphrase_array)).await {
+        Ok(r) => r.map_err(|e| format!("Failed to connect to lair (0.7): {}", e)),
+        Err(_) => Err(format!("Lair (0.7) did not answer within {}s", CONNECT_TIMEOUT.as_secs())),
+    }
 }
 
 /// Import the same seed into the 0.7 lair under the same tag (so the agent
