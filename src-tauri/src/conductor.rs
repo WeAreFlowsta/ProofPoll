@@ -807,6 +807,21 @@ async fn start_holochain_attempt(
         };
 
     // 8. Attach app interface.
+    // The 0.6.1 conductor too keeps what an install used until it restarts
+    // (~800 MB after a fresh start, ~280 MB after a restart): once, before
+    // its app interface, when this start installed v1.3.
+    if install_result.installed_now {
+        log::info!("v1.3 installed this start: restarting the 0.6 conductor once to give back the memory the install kept");
+        crate::process_ext::stop_gracefully(&mut conductor_child, std::time::Duration::from_secs(5), "The 0.6 conductor").await;
+        conductor_child = match start_conductor_process(&config_path, &conductor_dir, &passphrase, "proofpoll-holochain-06") {
+            Ok(c) => c,
+            Err(e) => fail_with_full_cleanup!(e),
+        };
+        if let Err(e) = wait_for_admin_ws(admin_port(), 30, &mut conductor_child, &conductor_dir).await {
+            fail_with_full_cleanup!(e);
+        }
+    }
+
     let _ = app_handle.emit(
         "conductor-status",
         ConductorStatus::Starting {
