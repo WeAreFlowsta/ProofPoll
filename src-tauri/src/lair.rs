@@ -567,6 +567,9 @@ mod tests {
         assert_eq!(line_07, crate::profiles::short_socket_path(&root.join("lair-07")));
     }
 
+    // Lair's unix:// socket addresses (macOS and Linux); a Windows named
+    // pipe does not move with the folder.
+    #[cfg(unix)]
     #[test]
     fn a_moved_key_store_is_repointed_when_its_path_has_a_space() {
         let tmp = tempfile::tempdir().unwrap();
@@ -591,6 +594,9 @@ mod tests {
         assert_eq!(repoint_config(&new), Ok(false));
     }
 
+    // Lair's unix:// socket addresses (macOS and Linux); a Windows named
+    // pipe does not move with the folder.
+    #[cfg(unix)]
     #[test]
     fn a_config_left_half_fixed_by_a_text_replace_is_healed() {
         // What 0.7.3-beta.6 left behind on a Mac: the two file paths moved,
@@ -612,6 +618,9 @@ mod tests {
         assert!(url.contains("profiles/local/lair/socket"), "{url}");
     }
 
+    // Lair's unix:// socket addresses (macOS and Linux); a Windows named
+    // pipe does not move with the folder.
+    #[cfg(unix)]
     #[test]
     fn a_config_already_in_place_is_left_alone() {
         let tmp = tempfile::tempdir().unwrap();
@@ -633,6 +642,16 @@ mod tests {
     /// must behave identically to a lair-generated one.
     #[tokio::test(flavor = "multi_thread")]
     async fn imported_seed_crypto_box_matches_generated_seed() {
+        // Needs the real bundled lair binary: CI has placeholders.
+        let real = std::process::Command::new(crate::sidecar::sidecar_path("proofpoll-lair-keystore"))
+            .arg("--version")
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).contains("lair_keystore"))
+            .unwrap_or(false);
+        if !real {
+            eprintln!("skipped: no real lair-keystore binary here");
+            return;
+        }
         let dir = std::env::temp_dir().join(format!("pp-lair-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let passphrase = "test-passphrase-0123456789";
