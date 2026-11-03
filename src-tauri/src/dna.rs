@@ -62,6 +62,8 @@ pub struct InstallResult {
     pub v1_1_available: bool,
     /// True if v1.2 is installed and usable (for migration reads).
     pub v1_2_available: bool,
+    /// True if v1.3 was installed on this start.
+    pub installed_now: bool,
 }
 
 /// Install ProofPoll DNAs, handling upgrades across all versions.
@@ -159,11 +161,16 @@ pub async fn install_dnas(
         }
         if app.installed_app_id == APP_ID_V1_3 {
             if matches!(app.status, holochain_types::prelude::AppStatus::Disabled(_)) {
-                log::warn!("v1.3 DNA disabled, reinstalling...");
+                // Never uninstall a cell that can hold data: it deletes this
+                // device's chain (its polls, votes, drafts and reasons).
+                // Enable it again; if that fails, stop with nothing changed.
+                log::warn!("v1.3 DNA disabled, enabling it again...");
                 admin_ws
-                    .uninstall_app(APP_ID_V1_3.to_string(), false)
+                    .enable_app(APP_ID_V1_3.to_string())
                     .await
-                    .map_err(|e| format!("Failed to uninstall disabled v1.3: {}", e))?;
+                    .map_err(|e| format!("ProofPoll v1.3 is disabled and could not be enabled again ({}). Nothing was changed.", e))?;
+                v1_3_installed = true;
+                v1_3_agent_key = Some(app.agent_pub_key.clone());
             } else {
                 v1_3_installed = true;
                 v1_3_agent_key = Some(app.agent_pub_key.clone());
@@ -254,6 +261,7 @@ pub async fn install_dnas(
         v1_0_available: v1_0_installed,
         v1_1_available: v1_1_installed,
         v1_2_available: v1_2_installed,
+        installed_now: !v1_3_installed,
     })
 }
 
