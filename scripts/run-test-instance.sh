@@ -13,4 +13,8 @@ export PROOFPOLL_DATA_DIR="$DIR"
 export XDG_DATA_HOME="$DIR/xdg" XDG_CACHE_HOME="$DIR/xdg-cache"
 export PROOFPOLL_TEST_PORT_OFFSET="$OFFSET" PROOFPOLL_HARNESS_PORT="$HARNESS"
 [ -n "$VAULT" ] && export PROOFPOLL_TEST_VAULT_PORT="$VAULT"
+# No accessibility bridge: each instance runs in its own dbus session, and two
+# started in the same second race for the accessibility bus's socket; the
+# loser's bus launcher crashes and that window stalls for good (matrix 11-04).
+export NO_AT_BRIDGE=1
 exec "${PROOFPOLL_TEST_BIN:-src-tauri/target/debug/proofpoll}"

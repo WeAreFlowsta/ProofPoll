@@ -23,6 +23,8 @@ stop_all() {
   for pid in $(pgrep -f "flowsta-vault-pp-vault/"); do [ "$pid" != "$$" ] && kill -9 $pid 2>/dev/null; done
 }
 trap stop_all EXIT
+# Wait until a test instance's harness answers (its window is up).
+wait_harness() { for i in $(seq 1 "${2:-60}"); do curl -s -m 2 "http://127.0.0.1:$1/dev/status" | grep -q '"harness":true' && return 0; sleep 2; done; echo "  (the harness on $1 never answered)"; return 1; }
 
 # 1. The Vault test instance, with a staging identity. Whatever an earlier run
 # (this matrix, the UI suite) left running goes first, or its Vault answers.
@@ -60,8 +62,12 @@ for leg in $LEGS; do
     # C and D join as peers that stay up (a restore needs two agreeing on
     # A's chain head); A backs up, B adopts its seed and exits; A stops (the
     # dead machine), B starts again as A's agent and restores A's chain.
+    # One after the other: two windows starting in the same second collided
+    # on their sessions' accessibility bus (11-04).
     dbus-run-session -- scripts/run-test-instance.sh pp-c 120 28803 "$VPORT" > "$LOGS/pp-c.log" 2>&1 &
+    wait_harness 28803 || true
     dbus-run-session -- scripts/run-test-instance.sh pp-d 130 28804 "$VPORT" > "$LOGS/pp-d.log" 2>&1 &
+    wait_harness 28804 || true
     PP_STATE="$(cat "$STATE" 2>/dev/null || echo '{}')" PP_STATE_OUT="$STATE" node scripts/pp-matrix.mjs --leg=adopt > "$LOGS/leg-$leg.log" 2>&1 || rc=1
     APID=$(ss -ltnp 2>/dev/null | awk '$4 ~ /:28801$/' | grep -o 'pid=[0-9]*' | head -1 | cut -d= -f2)
     [ -n "$APID" ] && kill -TERM "$APID"
