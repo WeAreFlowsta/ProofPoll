@@ -48,9 +48,6 @@ export default component$(() => {
                 downloads in the background and installs when you restart
                 ProofPoll or quit it.
               </p>
-              <p class="mt-2 text-xs text-gray-500" data-testid="updates-version">
-                This is version {updates.value.version}.
-              </p>
               {!updates.value.can_update && !updates.value.notice && (
                 <p class="mt-2 text-sm text-amber-200/90">
                   This copy was not installed from a package ProofPoll can

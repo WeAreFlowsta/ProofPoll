@@ -1,7 +1,7 @@
 // The Identity page after a relaunch, signed in (02): it shows the linked
 // identity's name, that it is signed in, the backups panel and the keys,
 // and the app stays signed in. The link is left in place (no disconnect).
-// Then Settings' Updates tab: this version and the automatic-updates switch.
+// Then Settings: this copy's version, and the Updates tab's automatic-updates switch.
 import { byId, click, COLD_START_MS, copyProblems, E2E_NAME, goto, harnessStatus, shot, timed, visibleText, waitAppShown, whichShows } from "../_helpers";
 
 const problems: string[] = [];
@@ -53,12 +53,14 @@ describe("the Identity page, signed in", () => {
     await shot("identity-details");
   });
 
-  it("the Updates tab shows this version, updates on by default, and goes back to Identity", async () => {
-    await goto("settings-tab-updates", "/settings/updates/");
-    const version = await byId("updates-version");
+  it("Settings shows this version; the Updates tab has updates on by default, and goes back to Identity", async () => {
+    const version = await byId("settings-version");
     await version.waitForDisplayed({ timeout: 10_000 });
-    expect((await version.getText()).trim()).toMatch(/^This is version \d+\.\d+\.\d+\S*\.$/);
+    expect((await version.getText()).trim()).toMatch(/^ProofPoll \d+\.\d+\.\d+\S*$/);
+    await goto("settings-tab-updates", "/settings/updates/");
+    await (await byId("updates-auto")).waitForDisplayed({ timeout: 10_000 });
     expect(await (await byId("updates-auto")).getAttribute("aria-checked")).toBe("true");
+    expect((await (await byId("settings-version")).getText()).trim()).toMatch(/^ProofPoll \d+\.\d+\.\d+\S*$/);
     await shot("settings-updates");
     await note("settings, updates");
     await goto("settings-tab-identity", "/identity/");
