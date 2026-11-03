@@ -81,6 +81,12 @@ percent-encoding = "2"
 # `spawn_health_monitor`. Windows uses a stubbed check (see conductor.rs).
 sysinfo = "0.33"
 
+# The app's own updates: the updater plugin (Tauri's signature on the file)
+# and the release manifest check (Team Flowsta's signature on the release).
+tauri-plugin-updater = "~2.12.0"
+flowsta-update-check = { git = "https://github.com/WeAreFlowsta/flowsta-update-check", rev = "1e892e20aa577a3ece65945b3d8f0fd4b95532f6" }
+url = "2"
+
 # The kit cache (and, from 0.5.2, the rest of the lines library): the same
 # rev as Flowsta Vault; its Holochain client pins are ProofPoll's own.
 flowsta-hc-lines = { git = "https://github.com/WeAreFlowsta/flowsta-hc-lines", rev = "99f04c23fcd1a48c8271b03ce11c43d7613fe5df" }

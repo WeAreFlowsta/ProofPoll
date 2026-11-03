@@ -43,6 +43,7 @@ mod profiles;
 mod vault_probe;
 mod webview_fix;
 mod kits;
+mod updater;
 #[cfg(feature = "harness")]
 mod harness;
 
@@ -72,6 +73,7 @@ pub fn run() {
     let builder = builder.plugin(tauri_plugin_wdio_webdriver::init());
     builder
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let data_dir = match test_data_dir() {
                 Some(dir) => dir,
@@ -136,6 +138,9 @@ pub fn run() {
             app.manage(app_state.clone());
             #[cfg(feature = "harness")]
             harness::spawn(app.handle().clone());
+            // The app's own updates: a first check after 90 s, then every
+            // few hours.
+            updater::spawn(app.handle().clone(), app_state.device_root.clone());
             if relaunched {
                 // app.restart() leaves focus with whatever was behind the
                 // old window (the Vault, mostly). Come back to the front now
@@ -359,6 +364,10 @@ pub fn run() {
             vault_probe::probe_vault,
             vault_probe::restart_app,
             vault_probe::test_vault_url,
+            updater::update_status,
+            updater::set_update_prefs,
+            updater::dismiss_updated,
+            updater::restart_to_update,
             // ── Your app commands (replace these) ─────────────────
             commands::create_poll,
             commands::get_poll,
@@ -411,6 +420,11 @@ pub fn run() {
             // also has PR_SET_PDEATHSIG; macOS and Windows have only this
             // plus the sweep at the next launch.
             if let tauri::RunEvent::Exit = event {
+                // A downloaded update installs on quit (Windows, macOS); it
+                // stops the conductors cleanly itself first.
+                if let Some(state) = app_handle.try_state::<Arc<AppState>>() {
+                    updater::install_on_quit(app_handle, &state.device_root);
+                }
                 let handle = app_handle
                     .try_state::<Arc<AppState>>()
                     .and_then(|s| s.conductor_handle.lock().ok().and_then(|mut h| h.take()));
