@@ -41,6 +41,7 @@ use tauri::Manager;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 mod profiles;
 mod vault_probe;
+mod webview_fix;
 #[cfg(feature = "harness")]
 mod harness;
 
@@ -55,7 +56,14 @@ fn test_data_dir() -> Option<std::path::PathBuf> {
     None
 }
 
+static WEBVIEW_FIX: std::sync::OnceLock<webview_fix::Outcome> = std::sync::OnceLock::new();
+
 pub fn run() {
+    // First, before anything starts a thread: on Linux with the NVIDIA driver
+    // loaded, WebKitGTK 2.52 segfaults on a page change when NVIDIA's EGL
+    // draws the window. The fix sets environment variables for the webview
+    // only (the sidecars never inherit them).
+    let _ = WEBVIEW_FIX.set(webview_fix::apply());
     let builder = tauri::Builder::default();
     // The embedded WebDriver the UI suite drives: the `e2e` feature only,
     // never a release build (scripts/check-test-features.mjs).
@@ -115,6 +123,9 @@ pub fn run() {
                 .and_then(|(unlocked, key)| if unlocked { key } else { None });
             let profile_root = profiles::select_profile_root(&data_dir, live_identity.as_deref());
             log::info!("Profile root: {:?}", profile_root);
+            if let Some(fix) = WEBVIEW_FIX.get() {
+                log::info!("[webview] {:?}", fix);
+            }
 
             let app_state = Arc::new(AppState::new_with_device_root(profile_root, data_dir.clone()));
             let relaunched = vault_probe::take_relaunch_marker(&data_dir);
