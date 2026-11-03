@@ -15,12 +15,15 @@ for (const dep of ["axum", "tauri-plugin-wdio-webdriver"]) {
   const line = cargo.match(new RegExp(`^${dep}\\s*=[^\\n]*`, "m"))?.[0];
   if (line && !/optional = true/.test(line)) bad.push(`Cargo.toml: ${dep} is not optional`);
 }
+// A workflow that builds the app (tauri build / tauri-action) must never pass
+// a test feature; the test workflow may compile them (cargo check only).
 for (const f of readdirSync(".github/workflows")) {
   const y = readFileSync(`.github/workflows/${f}`, "utf8");
-  if (/--features[^\n]*(harness|e2e)|features:[^\n]*(harness|e2e)/.test(y)) bad.push(`.github/workflows/${f}: passes a test feature`);
+  const buildsTheApp = /tauri-apps\/tauri-action|tauri build|tauri:build/.test(y);
+  if (buildsTheApp && /--features[^\n]*(harness|e2e)|features:[^\n]*(harness|e2e)/.test(y)) bad.push(`.github/workflows/${f}: builds the app with a test feature`);
 }
 if (bad.length) {
   console.error("check-test-features:\n  " + bad.join("\n  "));
   process.exit(1);
 }
-console.log("check-test-features: ok (harness and e2e are optional, off by default, and no workflow passes them)");
+console.log("check-test-features: ok (harness and e2e are optional, off by default, and no workflow that builds the app passes them)");

@@ -5,7 +5,7 @@
 // staging identity, wipes the scratch data folder and runs the specs.
 // Screenshots land in e2e/shots.
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { SevereServiceError } from "webdriverio";
 
@@ -28,8 +28,11 @@ function ps(): RegExpMatchArray[] {
 function stopBinary(bin: string, what: string) {
   if (process.platform === "win32") return;
   try {
-    for (const [, pid, , args] of ps()) {
-      if (args === bin || args.startsWith(bin + " ")) {
+    for (const [, pid] of ps()) {
+      // By the executable itself: a launcher may start it by a relative path.
+      let exe = "";
+      try { exe = readlinkSync(`/proc/${pid}/exe`); } catch { continue; }
+      if (exe === bin) {
         try { process.kill(Number(pid), "SIGTERM"); } catch { /* gone */ }
         execFileSync("sleep", ["3"]);
         try { process.kill(Number(pid), 0); process.kill(Number(pid), "SIGKILL"); } catch { /* it left */ }

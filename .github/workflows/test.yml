@@ -1,0 +1,71 @@
+name: Tests
+
+on:
+  push:
+    branches: [main, "proofpoll-*"]
+    paths:
+      - "src-tauri/**"
+      - ".github/workflows/test.yml"
+  pull_request:
+    paths:
+      - "src-tauri/**"
+
+jobs:
+  rust-tests:
+    # The same tests on each platform ProofPoll ships for: paths, sidecar
+    # names and process handling differ between them.
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [ubuntu-latest, macos-latest, windows-2022]
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # The Tauri build script refuses to compile unless the sidecar binaries
+      # (externalBin) and the front-end dist exist. Unit tests never spawn the
+      # sidecars and never load the front end, so placeholders are enough
+      # here; the release workflow fetches the real Holochain binaries.
+      # bash on Windows too, for this step only.
+      - name: Placeholder sidecars and front-end dist for the build script
+        shell: bash
+        run: |
+          mkdir -p src-tauri/binaries dist
+          triple=$(cd src-tauri && rustc -vV | sed -n 's/^host: //p')
+          ext=""; [ "$RUNNER_OS" = Windows ] && ext=".exe"
+          for b in proofpoll-holochain proofpoll-holochain-06 proofpoll-lair-keystore proofpoll-lair-keystore-07; do
+            f="src-tauri/binaries/$b-$triple$ext"
+            [ -f "$f" ] || { printf '#!/bin/sh\nexit 0\n' > "$f"; chmod +x "$f"; }
+          done
+
+      - name: Run unit tests
+        working-directory: src-tauri
+        run: cargo test --lib
+
+      # The test harness and the UI suite's WebDriver must build on every
+      # platform too (test builds only; never a release).
+      - name: Test-feature check
+        working-directory: src-tauri
+        run: cargo check --features e2e
+
+      # Debug builds skip every #[cfg(not(debug_assertions))] arm; code used
+      # only there rots invisibly. Compile those arms on every push instead.
+      - name: Release-profile check
+        working-directory: src-tauri
+        run: cargo check --release

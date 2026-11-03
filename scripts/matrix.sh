@@ -23,7 +23,9 @@ stop_all() {
 }
 trap stop_all EXIT
 
-# 1. The Vault test instance, with a staging identity.
+# 1. The Vault test instance, with a staging identity. Whatever an earlier run
+# (this matrix, the UI suite) left running goes first, or its Vault answers.
+stop_all
 rm -rf "$HOME/.local/share/flowsta-vault-pp-vault" "$HOME/.local/share/proofpoll-test-pp-a" "$HOME/.local/share/proofpoll-test-pp-b" "$HOME/.local/share/proofpoll-test-pp-c"
 (cd "$VAULT_REPO" && exec dbus-run-session -- scripts/run-test-instance.sh pp-vault) > "$LOGS/vault.log" 2>&1 &
 VPORT=""
