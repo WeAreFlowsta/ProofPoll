@@ -13,6 +13,7 @@
 // covered automatically. Per-command scheduling is how backup freshness
 // drifts; keep new writes on the wrapper pattern.
 import { invoke } from "@tauri-apps/api/core";
+import { vaultLinkOptions } from "./signin";
 
 const DEBOUNCE_MS = 30_000;
 
@@ -92,7 +93,8 @@ async function runBackup() {
     );
     // Same empty-payload guard startAutoBackup applies internally - posting
     // directly with backupToVault means running it ourselves.
-    if (await wouldOverwriteNonEmptyBackup({ clientId }, payload)) {
+    const pin = await vaultLinkOptions();
+    if (await wouldOverwriteNonEmptyBackup({ clientId, ...pin }, payload)) {
       console.warn("[ProofPoll] write-triggered backup skipped: empty payload");
       reportBackupOutcome(
         false,
@@ -101,7 +103,7 @@ async function runBackup() {
       return;
     }
     const result = await backupToVault(
-      { clientId, appName: "ProofPoll" },
+      { clientId, appName: "ProofPoll", ...pin },
       payload,
     );
     console.log(`[ProofPoll] Vault backup after write: ${result.dataSize} bytes`);

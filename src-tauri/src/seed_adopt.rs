@@ -221,7 +221,7 @@ pub(crate) fn classify_escrow_payload(data: &serde_json::Value) -> Result<Escrow
 
 // ── Production implementations ─────────────────────────────────────────
 
-use crate::vault_probe::WEBVIEW_ORIGIN;
+use crate::vault_probe::webview_origin;
 
 pub(crate) struct VaultEscrowProbe {
     pub client_id: String,
@@ -235,7 +235,7 @@ impl EscrowProbe for VaultEscrowProbe {
             .map_err(|e| e.to_string())?;
         let resp = client
             .post(format!("{}/backup/retrieve", crate::vault_probe::vault_base_url().await))
-            .header("Origin", WEBVIEW_ORIGIN)
+            .header("Origin", webview_origin())
             .json(&serde_json::json!({ "client_id": self.client_id }))
             .send()
             .await

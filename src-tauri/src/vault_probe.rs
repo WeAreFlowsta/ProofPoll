@@ -25,12 +25,28 @@ pub(crate) const VAULT_PORTS: [u16; 3] = [27777, 27778, 27779];
 /// `/status` without the display name and picture (scope-gated per origin
 /// since Vault 1.2), `/revoke-identity` refused. Found twice: the
 /// /revoke-identity lesson, then the "F" avatar on Windows (2026-10-25).
-#[cfg(debug_assertions)]
-pub(crate) const WEBVIEW_ORIGIN: &str = "http://localhost:5174"; // devUrl in tauri.conf.json
-#[cfg(all(not(debug_assertions), target_os = "windows"))]
-pub(crate) const WEBVIEW_ORIGIN: &str = "http://tauri.localhost";
-#[cfg(all(not(debug_assertions), not(target_os = "windows")))]
-pub(crate) const WEBVIEW_ORIGIN: &str = "tauri://localhost";
+/// `tauri dev` serves the dev server's origin; every built app (a debug
+/// test build too) serves the bundled one.
+pub(crate) fn webview_origin() -> &'static str {
+    if tauri::is_dev() {
+        "http://localhost:5174" // devUrl in tauri.conf.json
+    } else if cfg!(target_os = "windows") {
+        "http://tauri.localhost"
+    } else {
+        "tauri://localhost"
+    }
+}
+
+/// A debug build takes `PROOFPOLL_TEST_VAULT_PORT`: the one Vault a test
+/// instance talks to (several test Vaults answer on one machine). A release
+/// build never reads it.
+pub(crate) fn test_vault_port() -> Option<u16> {
+    #[cfg(debug_assertions)]
+    if let Some(p) = std::env::var("PROOFPOLL_TEST_VAULT_PORT").ok().and_then(|v| v.trim().parse::<u16>().ok()) {
+        return Some(p);
+    }
+    None
+}
 
 fn http() -> reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
@@ -39,7 +55,7 @@ fn http() -> reqwest::Client {
             let mut headers = reqwest::header::HeaderMap::new();
             headers.insert(
                 reqwest::header::ORIGIN,
-                reqwest::header::HeaderValue::from_static(WEBVIEW_ORIGIN),
+                reqwest::header::HeaderValue::from_static(webview_origin()),
             );
             reqwest::Client::builder()
                 .default_headers(headers)
@@ -100,9 +116,15 @@ async fn probe_vaults(timeout: Duration) -> Vec<VaultProbe> {
             Some(VaultProbe::from_status(port, &v))
         }
     };
-    let (a, b, c) = tokio::join!(one(VAULT_PORTS[0]), one(VAULT_PORTS[1]), one(VAULT_PORTS[2]));
+    let found = match test_vault_port() {
+        Some(port) => vec![one(port).await],
+        None => {
+            let (a, b, c) = tokio::join!(one(VAULT_PORTS[0]), one(VAULT_PORTS[1]), one(VAULT_PORTS[2]));
+            vec![a, b, c]
+        }
+    };
     let mut mine = Vec::new();
-    for p in [a, b, c].into_iter().flatten() {
+    for p in found.into_iter().flatten() {
         if vault_is_mine(p.port).await {
             mine.push(p);
         }
@@ -366,4 +388,11 @@ mod tests {
         let tl = "\"flowsta-vault.exe\",\"4242\",\"Console\",\"1\",\"12,345 K\",\"Running\",\"PC\\eric\",\"0:00:01\",\"Flowsta Vault\"\n";
         assert_eq!(tasklist_user(tl).as_deref(), Some("PC\\eric"));
     }
+}
+
+/// The Vault the sign-in must use, when a test build pins one (`None` in
+/// every release build: the SDK then finds the Vault itself).
+#[tauri::command]
+pub fn test_vault_url() -> Option<String> {
+    test_vault_port().map(|p| format!("http://127.0.0.1:{p}"))
 }

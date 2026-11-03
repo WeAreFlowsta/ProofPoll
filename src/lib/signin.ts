@@ -38,3 +38,15 @@ export function readAndClearSignInIntent(): SignInIntent {
     returnTo: returnTo && returnTo.startsWith("/") ? returnTo : null,
   };
 }
+
+/** The Vault a test build pins for sign-in, as `linkFlowstaIdentity`
+ * options. A release build has none, and the SDK finds the Vault itself. */
+export async function vaultLinkOptions(): Promise<{ ipcUrl?: string }> {
+  try {
+    const { invoke } = await import("@tauri-apps/api/core");
+    const url = await invoke<string | null>("test_vault_url");
+    return url ? { ipcUrl: url } : {};
+  } catch {
+    return {};
+  }
+}

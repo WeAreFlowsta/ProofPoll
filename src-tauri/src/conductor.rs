@@ -8,7 +8,7 @@
 //! ## For forking developers
 //!
 //! This file is reusable infrastructure. The only things you might change:
-//!   - `ADMIN_WS_PORT` (4466, the 0.6 line) and `ADMIN_WS_PORT_07` (4467) — change
+//!   - `admin_port()` (4466, the 0.6 line) and `admin_port_07()` (4467) — change
 //!     if running alongside other Holochain apps
 //!   - Bootstrap / signal / relay URLs and the optional auth material — set
 //!     via compile-time env vars (see "Bootstrap configuration" below).
@@ -26,9 +26,30 @@ use tauri::Emitter;
 /// Admin WebSocket port for the local Holochain conductor.
 /// Different from Flowsta Vault's 4455 so both can run simultaneously.
 /// Change this if running alongside other Holochain apps.
-pub const ADMIN_WS_PORT: u16 = 4466;
+const ADMIN_WS_PORT_BASE: u16 = 4466;
 /// Admin websocket of the Holochain 0.7.1 conductor (DNA v1.4+).
-pub const ADMIN_WS_PORT_07: u16 = 4467;
+const ADMIN_WS_PORT_07_BASE: u16 = 4467;
+
+/// The 0.6.1 conductor's admin port.
+pub fn admin_port() -> u16 {
+    ADMIN_WS_PORT_BASE + test_port_offset()
+}
+
+/// The 0.7.1 conductor's admin port.
+pub fn admin_port_07() -> u16 {
+    ADMIN_WS_PORT_07_BASE + test_port_offset()
+}
+
+/// A debug build adds `PROOFPOLL_TEST_PORT_OFFSET` to both admin ports, so
+/// test instances run beside each other and beside an installed ProofPoll.
+/// A release build never reads it.
+fn test_port_offset() -> u16 {
+    #[cfg(debug_assertions)]
+    if let Some(n) = std::env::var("PROOFPOLL_TEST_PORT_OFFSET").ok().and_then(|v| v.trim().parse::<u16>().ok()) {
+        return n;
+    }
+    0
+}
 /// Data directory name of the 0.7.1 conductor (the 0.6.1 one keeps `conductor`).
 pub const CONDUCTOR_DIR_07: &str = "conductor-07";
 /// How many bytes of ops one gossip exchange may offer the 0.7 conductor
@@ -601,7 +622,7 @@ async fn start_holochain_attempt(
     //    (seen 2026-09-27: after "Open as this identity" the relaunch
     //    picked the new profile but reused the old conductor). Refuse
     //    instead; the pre-spawn check is the only moment this is certain.
-    for port in [ADMIN_WS_PORT, ADMIN_WS_PORT_07] {
+    for port in [admin_port(), admin_port_07()] {
         if let Ok(Ok(_)) = tokio::time::timeout(
             std::time::Duration::from_millis(400),
             tokio::net::TcpStream::connect(("127.0.0.1", port)),
@@ -697,7 +718,7 @@ async fn start_holochain_attempt(
     let config_path = match generate_conductor_config(
         &conductor_dir,
         &connection_url,
-        ADMIN_WS_PORT,
+        admin_port(),
         crate::hc::Line::V06,
         with_auth,
     ) {
@@ -708,7 +729,7 @@ async fn start_holochain_attempt(
     let config_path_07 = match generate_conductor_config(
         &conductor_dir_07,
         &connection_url_07,
-        ADMIN_WS_PORT_07,
+        admin_port_07(),
         crate::hc::Line::V07,
         with_auth_07,
     ) {
@@ -759,12 +780,12 @@ async fn start_holochain_attempt(
         },
     );
     if let Err(e) =
-        wait_for_admin_ws(ADMIN_WS_PORT, 30, &mut conductor_child, &conductor_dir).await
+        wait_for_admin_ws(admin_port(), 30, &mut conductor_child, &conductor_dir).await
     {
         fail_with_full_cleanup!(e);
     }
     if let Err(e) =
-        wait_for_admin_ws(ADMIN_WS_PORT_07, 30, &mut conductor_child_07, &conductor_dir_07).await
+        wait_for_admin_ws(admin_port_07(), 30, &mut conductor_child_07, &conductor_dir_07).await
     {
         fail_with_full_cleanup!(e);
     }
@@ -779,7 +800,7 @@ async fn start_holochain_attempt(
 
 
     let install_result =
-        match crate::dna::install_dnas(ADMIN_WS_PORT, &resource_dir, &lair_client, &data_dir).await
+        match crate::dna::install_dnas(admin_port(), &resource_dir, &lair_client, &data_dir).await
         {
             Ok(r) => r,
             Err(e) => fail_with_full_cleanup!(format!("DNA installation failed: {}", e)),
@@ -794,7 +815,7 @@ async fn start_holochain_attempt(
     );
     let (app_port, app_client_v1_3, app_client_v1_2, app_client_v1_1, app_client_v1_0) =
         match crate::dna::setup_app_interface(
-            ADMIN_WS_PORT,
+            admin_port(),
             install_result.v1_0_available,
             install_result.v1_1_available,
             install_result.v1_2_available,
@@ -824,7 +845,7 @@ async fn start_holochain_attempt(
         );
     }
     let installed_07 = match crate::dna::install_dnas_07(
-        ADMIN_WS_PORT_07,
+        admin_port_07(),
         &resource_dir,
         agent_07.get_raw_39(),
     )
@@ -852,12 +873,12 @@ async fn start_holochain_attempt(
             Err(e) => fail_with_full_cleanup!(e),
         };
         if let Err(e) =
-            wait_for_admin_ws(ADMIN_WS_PORT_07, 30, &mut conductor_child_07, &conductor_dir_07).await
+            wait_for_admin_ws(admin_port_07(), 30, &mut conductor_child_07, &conductor_dir_07).await
         {
             fail_with_full_cleanup!(e);
         }
     }
-    let (app_port_07, app_client) = match crate::dna::setup_app_interface_07(ADMIN_WS_PORT_07).await {
+    let (app_port_07, app_client) = match crate::dna::setup_app_interface_07(admin_port_07()).await {
         Ok(r) => r,
         Err(e) => fail_with_full_cleanup!(format!("App interface setup (0.7) failed: {}", e)),
     };
@@ -869,15 +890,15 @@ async fn start_holochain_attempt(
     let _ = app_handle.emit(
         "conductor-status",
         ConductorStatus::Ready {
-            admin_port: ADMIN_WS_PORT_07,
+            admin_port: admin_port_07(),
             app_port: app_port_07,
         },
     );
     log::info!(
         "Holochain conductors ready (0.6 admin {} app {}; 0.7 admin {} app {}; agent {}; migration: {})",
-        ADMIN_WS_PORT,
+        admin_port(),
         app_port,
-        ADMIN_WS_PORT_07,
+        admin_port_07(),
         app_port_07,
         agent_key_str,
         install_result.needs_migration,
@@ -890,8 +911,8 @@ async fn start_holochain_attempt(
         lair_child_07,
         conductor_child,
         conductor_child_07,
-        admin_port: ADMIN_WS_PORT,
-        admin_port_07: ADMIN_WS_PORT_07,
+        admin_port: admin_port(),
+        admin_port_07: admin_port_07(),
         app_port,
         app_port_07,
         conductor_pid,
@@ -1038,29 +1059,29 @@ async fn restart_conductors_with_auth(
         let config = generate_conductor_config(
             &conductor_dir,
             &crate::lair::connection_url_of(&data_dir.join("lair"))?,
-            ADMIN_WS_PORT,
+            admin_port(),
             crate::hc::Line::V06,
             true,
         )?;
         let config_07 = generate_conductor_config(
             &conductor_dir_07,
             &crate::lair::connection_url_of(&data_dir.join("lair-07"))?,
-            ADMIN_WS_PORT_07,
+            admin_port_07(),
             crate::hc::Line::V07,
             true,
         )?;
         handle.conductor_child = start_conductor_process(&config, &conductor_dir, &passphrase, "proofpoll-holochain-06")?;
         handle.conductor_child_07 = start_conductor_process(&config_07, &conductor_dir_07, &passphrase, "proofpoll-holochain")?;
-        wait_for_admin_ws(ADMIN_WS_PORT, 30, &mut handle.conductor_child, &conductor_dir).await?;
-        wait_for_admin_ws(ADMIN_WS_PORT_07, 30, &mut handle.conductor_child_07, &conductor_dir_07).await?;
+        wait_for_admin_ws(admin_port(), 30, &mut handle.conductor_child, &conductor_dir).await?;
+        wait_for_admin_ws(admin_port_07(), 30, &mut handle.conductor_child_07, &conductor_dir_07).await?;
         let clients = crate::dna::setup_app_interface(
-            ADMIN_WS_PORT,
+            admin_port(),
             handle.v1_0_available,
             handle.v1_1_available,
             handle.v1_2_available,
         )
         .await?;
-        let clients_07 = crate::dna::setup_app_interface_07(ADMIN_WS_PORT_07).await?;
+        let clients_07 = crate::dna::setup_app_interface_07(admin_port_07()).await?;
         Ok::<_, String>((clients, clients_07))
     }
     .await;
@@ -1085,7 +1106,7 @@ async fn restart_conductors_with_auth(
     *state.app_client_v1_0.lock().await = client_v1_0;
     *state.conductor_handle.lock().unwrap() = Some(handle);
     let ready = ConductorStatus::Ready {
-        admin_port: ADMIN_WS_PORT_07,
+        admin_port: admin_port_07(),
         app_port: app_port_07,
     };
     *state.conductor_status.lock().unwrap() = ready.clone();
@@ -1134,7 +1155,7 @@ mod tests {
     #[test]
     fn the_07_config_caps_each_gossip_exchange() {
         let dir = tempfile::tempdir().unwrap();
-        let cfg = generate_conductor_config(dir.path(), "unix:///tmp/x/socket?k=a", ADMIN_WS_PORT_07, crate::hc::Line::V07, true).unwrap();
+        let cfg = generate_conductor_config(dir.path(), "unix:///tmp/x/socket?k=a", admin_port_07(), crate::hc::Line::V07, true).unwrap();
         let yaml = std::fs::read_to_string(cfg).unwrap();
         // Under network.advanced.k2Gossip: a misplaced key fails the network
         // join with "decode config: invalid type".
@@ -1177,9 +1198,9 @@ mod tests {
             }
             let lair_client = lair_client.ok_or("could not connect to lair")?;
 
-            let config_path = generate_conductor_config(&conductor_dir, &url, ADMIN_WS_PORT, crate::hc::Line::V06, true)?;
+            let config_path = generate_conductor_config(&conductor_dir, &url, admin_port(), crate::hc::Line::V06, true)?;
             let mut child = start_conductor_process(&config_path, &conductor_dir, passphrase, "proofpoll-holochain-06")?;
-            match wait_for_admin_ws(ADMIN_WS_PORT, 30, &mut child, &conductor_dir).await {
+            match wait_for_admin_ws(admin_port(), 30, &mut child, &conductor_dir).await {
                 Ok(()) => {}
                 Err(e) => {
                     let _ = child.kill();
@@ -1192,10 +1213,10 @@ mod tests {
             // Fresh install: no prior apps, so this derives the agent from
             // the app-held seed - the escrow model's runtime.
             let install =
-                crate::dna::install_dnas(ADMIN_WS_PORT, &resource_dir, &lair_client, &data_dir)
+                crate::dna::install_dnas(admin_port(), &resource_dir, &lair_client, &data_dir)
                     .await?;
             let (_port, app_client, _v2, _v1, _v0) =
-                crate::dna::setup_app_interface(ADMIN_WS_PORT, false, false, false).await?;
+                crate::dna::setup_app_interface(admin_port(), false, false, false).await?;
             let app_client = app_client.ok_or("no v1.3 client")?;
 
             // save_draft_poll's body, verbatim minus the Vault gate.
@@ -1289,9 +1310,9 @@ mod tests {
             }
             let lair_client = lair_client.ok_or("could not connect to lair")?;
 
-            let config_path = generate_conductor_config(&conductor_dir, &url, ADMIN_WS_PORT, crate::hc::Line::V06, true)?;
+            let config_path = generate_conductor_config(&conductor_dir, &url, admin_port(), crate::hc::Line::V06, true)?;
             let mut child = start_conductor_process(&config_path, &conductor_dir, passphrase, "proofpoll-holochain-06")?;
-            match wait_for_admin_ws(ADMIN_WS_PORT, 30, &mut child, &conductor_dir).await {
+            match wait_for_admin_ws(admin_port(), 30, &mut child, &conductor_dir).await {
                 Ok(()) => {}
                 Err(e) => {
                     let _ = child.kill();
@@ -1304,7 +1325,7 @@ mod tests {
             // Pre-install v1.2 with a CONDUCTOR-GENERATED agent (what 0.2.x
             // installs have), so install_dnas takes the inherit branch.
             let admin_ws = AdminWebsocket::connect(
-                format!("localhost:{}", ADMIN_WS_PORT),
+                format!("localhost:{}", admin_port()),
                 Some(crate::conductor::node_origin()),
             )
             .await
@@ -1331,13 +1352,13 @@ mod tests {
                 .map_err(|e| format!("enable v1.2: {}", e))?;
 
             let install =
-                crate::dna::install_dnas(ADMIN_WS_PORT, &resource_dir, &lair_client, &data_dir)
+                crate::dna::install_dnas(admin_port(), &resource_dir, &lair_client, &data_dir)
                     .await?;
             if install.agent_pub_key != legacy_agent {
                 return Err("v1.3 did not inherit the v1.2 agent".to_string());
             }
             let (_port, app_client, _v0, _v1, _v2) =
-                crate::dna::setup_app_interface(ADMIN_WS_PORT, false, false, true).await?;
+                crate::dna::setup_app_interface(admin_port(), false, false, true).await?;
             let app_client = app_client.ok_or("no v1.3 client")?;
 
             let raw = install.agent_pub_key.get_raw_39();
@@ -1424,28 +1445,28 @@ mod tests {
                 }
             }
             let lair_client_07 = lair_client_07.ok_or("could not connect to lair 0.7")?;
-            let cfg06 = generate_conductor_config(&conductor_dir, &url, ADMIN_WS_PORT, crate::hc::Line::V06, true)?;
+            let cfg06 = generate_conductor_config(&conductor_dir, &url, admin_port(), crate::hc::Line::V06, true)?;
             let mut c06 = start_conductor_process(&cfg06, &conductor_dir, passphrase, "proofpoll-holochain-06")?;
-            if let Err(e) = wait_for_admin_ws(ADMIN_WS_PORT, 60, &mut c06, &conductor_dir).await {
+            if let Err(e) = wait_for_admin_ws(admin_port(), 60, &mut c06, &conductor_dir).await {
                 let _ = c06.kill(); let _ = c06.wait();
                 return Err(format!("0.6: {}", e));
             }
             children.push(c06);
-            let cfg07 = generate_conductor_config(&conductor_dir_07, &url_07, ADMIN_WS_PORT_07, crate::hc::Line::V07, true)?;
+            let cfg07 = generate_conductor_config(&conductor_dir_07, &url_07, admin_port_07(), crate::hc::Line::V07, true)?;
             let mut c07 = start_conductor_process(&cfg07, &conductor_dir_07, passphrase, "proofpoll-holochain")?;
-            if let Err(e) = wait_for_admin_ws(ADMIN_WS_PORT_07, 60, &mut c07, &conductor_dir_07).await {
+            if let Err(e) = wait_for_admin_ws(admin_port_07(), 60, &mut c07, &conductor_dir_07).await {
                 let _ = c07.kill(); let _ = c07.wait();
                 return Err(format!("0.7: {}", e));
             }
             children.push(c07);
 
-            let install = crate::dna::install_dnas(ADMIN_WS_PORT, &resource_dir, &lair_client, &data_dir).await?;
+            let install = crate::dna::install_dnas(admin_port(), &resource_dir, &lair_client, &data_dir).await?;
             let agent_07 = crate::device_seed::ensure_device_agent_07(&lair_client_07, &data_dir).await?;
             assert_eq!(agent_07, install.agent_pub_key, "the same seed yields the same agent on both lairs");
-            crate::dna::install_dnas_07(ADMIN_WS_PORT_07, &resource_dir, agent_07.get_raw_39()).await?;
-            let (_p06, v1_3, _v2, _v1, _v0) = crate::dna::setup_app_interface(ADMIN_WS_PORT, false, false, false).await?;
+            crate::dna::install_dnas_07(admin_port_07(), &resource_dir, agent_07.get_raw_39()).await?;
+            let (_p06, v1_3, _v2, _v1, _v0) = crate::dna::setup_app_interface(admin_port(), false, false, false).await?;
             let v1_3 = v1_3.ok_or("no v1.3 client")?;
-            let (_p07, v1_4) = crate::dna::setup_app_interface_07(ADMIN_WS_PORT_07).await?;
+            let (_p07, v1_4) = crate::dna::setup_app_interface_07(admin_port_07()).await?;
             assert_eq!(v1_3.line(), crate::hc::Line::V06);
             assert_eq!(v1_4.line(), crate::hc::Line::V07);
 

@@ -111,6 +111,15 @@ pub fn reap_orphaned_sidecars() -> u32 {
         if !is_sidecar_name(&name) {
             continue;
         }
+        // A test instance (debug, `PROOFPOLL_DATA_DIR`) reaps only the
+        // sidecars of its own data folder: the others belong to the
+        // installed ProofPoll or to another test instance.
+        if let Some(dir) = test_data_dir() {
+            let mine = proc_.cmd().iter().any(|a| a.to_string_lossy().contains(&dir));
+            if !mine {
+                continue;
+            }
+        }
         // Linux lists each thread as a process; stopping a thread's id stops
         // its whole process, which may be a live sidecar of another app copy.
         if proc_.thread_kind().is_some() {
@@ -208,4 +217,13 @@ mod tests {
         let left = std::process::Command::new("pgrep").arg("-f").arg(fake.to_string_lossy().as_ref()).output().unwrap();
         assert!(String::from_utf8_lossy(&left.stdout).trim().is_empty(), "no fake sidecar left: {:?}", left);
     }
+}
+
+/// The test data folder a debug build was started with, if any.
+fn test_data_dir() -> Option<String> {
+    #[cfg(debug_assertions)]
+    if let Some(dir) = std::env::var_os("PROOFPOLL_DATA_DIR").filter(|d| !d.is_empty()) {
+        return Some(dir.to_string_lossy().to_string());
+    }
+    None
 }

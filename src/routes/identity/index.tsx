@@ -4,7 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import { linkedContext, linkStateContext, displayNameContext, profilePictureContext } from "~/lib/context";
 import { sanitizeImageSrc } from "~/lib/sanitize";
-import { readAndClearSignInIntent } from "~/lib/signin";
+import { readAndClearSignInIntent, vaultLinkOptions } from "~/lib/signin";
 import { focusSelf } from "~/lib/window";
 import { getLastBackupOutcome, type BackupOutcome } from "~/lib/backup";
 import {
@@ -180,6 +180,7 @@ export default component$(() => {
         const result = await getFlowstaLinkStatus({
           clientId: import.meta.env.VITE_FLOWSTA_CLIENT_ID,
           localAgentPubKey: pubKey,
+          ...(await vaultLinkOptions()),
         });
         if (result.state === "linked") return "linked";
         if (result.state === "offline") return "offline";
@@ -240,6 +241,7 @@ export default component$(() => {
           appName: "ProofPoll",
           clientId: import.meta.env.VITE_FLOWSTA_CLIENT_ID,
           localAgentPubKey: agentKey.value,
+          ...(await vaultLinkOptions()),
         });
         if (!result.success) {
           error.value = "Identity linking was not completed";
@@ -314,6 +316,7 @@ export default component$(() => {
         appName: "ProofPoll",
         clientId: import.meta.env.VITE_FLOWSTA_CLIENT_ID,
         localAgentPubKey: agentKey.value,
+        ...(await vaultLinkOptions()),
       });
 
       if (!result.success) {

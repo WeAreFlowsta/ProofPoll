@@ -42,14 +42,25 @@ use tauri::Manager;
 mod profiles;
 mod vault_probe;
 
+/// A debug build takes `PROOFPOLL_DATA_DIR`: a test instance's own data
+/// folder on every platform (the harness runs several on one machine). A
+/// release build never reads it.
+fn test_data_dir() -> Option<std::path::PathBuf> {
+    #[cfg(debug_assertions)]
+    if let Some(dir) = std::env::var_os("PROOFPOLL_DATA_DIR").filter(|d| !d.is_empty()) {
+        return Some(std::path::PathBuf::from(dir));
+    }
+    None
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {
-            let data_dir = app
-                .path()
-                .app_data_dir()
-                .expect("Failed to get app data directory");
+            let data_dir = match test_data_dir() {
+                Some(dir) => dir,
+                None => app.path().app_data_dir().expect("Failed to get app data directory"),
+            };
             std::fs::create_dir_all(&data_dir).expect("Failed to create data directory");
 
             // Log to file (and stdout in dev) at INFO level in both dev and
@@ -322,6 +333,7 @@ pub fn run() {
             commands::launch_vault,
             vault_probe::probe_vault,
             vault_probe::restart_app,
+            vault_probe::test_vault_url,
             // ── Your app commands (replace these) ─────────────────
             commands::create_poll,
             commands::get_poll,

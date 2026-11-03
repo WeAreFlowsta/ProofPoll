@@ -4,7 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { linkedContext, linkStateContext, displayNameContext, profilePictureContext, type LinkState } from "~/lib/context";
 import { sanitizeImageSrc } from "~/lib/sanitize";
-import { setSignInIntent } from "~/lib/signin";
+import { setSignInIntent, vaultLinkOptions } from "~/lib/signin";
 import {
   getLinkedAgents,
   getIdentityLink,
@@ -104,9 +104,11 @@ export default component$(() => {
         // it as JSON. Vault recognises the shape and renders per-entry-type
         // counts in the UI plus inlines human_readable views in CAL §4.2.1
         // exports — see backup.rs::is_canonical_backup over in flowsta-vault.
+        const pin = await vaultLinkOptions();
         stopAutoBackup = startAutoBackup({
           clientId: import.meta.env.VITE_FLOWSTA_CLIENT_ID,
           appName: "ProofPoll",
+          ...pin,
           intervalMinutes: 60,
           // clientId rides along so the Rust side can check the Vault's
           // escrowed seed BEFORE building a payload - without that gate, a
@@ -195,6 +197,7 @@ export default component$(() => {
       const vaultStatus = await getFlowstaLinkStatus({
         clientId: import.meta.env.VITE_FLOWSTA_CLIENT_ID,
         localAgentPubKey: agentPubKey,
+        ...(await vaultLinkOptions()),
       }).catch(() => ({ state: "offline" as const }));
       if (vaultStatus.state === "linked") return "linked";
       if (vaultStatus.state === "offline") return "offline";
@@ -261,6 +264,7 @@ export default component$(() => {
                           appName: "ProofPoll",
                           clientId: import.meta.env.VITE_FLOWSTA_CLIENT_ID,
                           localAgentPubKey: agentPubKey,
+                          ...(await vaultLinkOptions()),
                         });
                         if (result.success) {
                           await commitIdentityLink(
