@@ -90,9 +90,25 @@ pub fn start_lair_process_with(
                 .map_err(|e| format!("Failed to write passphrase to lair init: {}", e))?;
         }
 
-        let status = child
-            .wait()
-            .map_err(|e| format!("Failed to wait for lair init: {}", e))?;
+        // A bounded wait: an init that never finishes held the start on
+        // "Starting lair-keystore..." for good. Ended, it fails this attempt
+        // and start_holochain's second attempt runs.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) if std::time::Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(100)),
+                Ok(None) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!(
+                        "lair-keystore init did not finish within 60 s: {}",
+                        read_lair_logs(lair_dir, "init"),
+                    ));
+                }
+                Err(e) => return Err(format!("Failed to wait for lair init: {}", e)),
+            }
+        };
         if !status.success() {
             return Err(format!(
                 "lair-keystore init failed (status {}): {}",
