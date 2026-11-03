@@ -174,7 +174,56 @@ async fn op(Ax(app): Ax<tauri::AppHandle>, Json(body): Json<Value>) -> Reply {
             let after = serde_json::to_value(&*arc.migration_state.lock().await).unwrap_or(Value::Null);
             to_value(carried.map(|(drafts, reasons)| json!({ "drafts": drafts, "reasons": reasons, "state": after })))
         }
+        // The canonical backup into the pinned Vault, as the SDK's backup
+        // posts it (it carries this install's escrowed seed).
+        "backup" => backup(state, s(&body, "client_id")).await,
+        // What the Vault backup holds for this app: the escrowed seed or none.
+        "escrow" => {
+            use crate::seed_adopt::EscrowProbe;
+            let probe = crate::seed_adopt::VaultEscrowProbe { client_id: s(&body, "client_id") };
+            match probe.escrowed_seed().await {
+                Ok(crate::seed_adopt::EscrowedSeed::Seed(_)) => ok(json!({ "seed": true })),
+                Ok(crate::seed_adopt::EscrowedSeed::NoBackup) => ok(json!({ "seed": false, "backup": "none" })),
+                Ok(crate::seed_adopt::EscrowedSeed::DataOnly) => ok(json!({ "seed": false, "backup": "data only" })),
+                Err(e) => failed(e),
+            }
+        }
+        // The machine-death restore: adopt the seed escrowed in the Vault
+        // backup. A debug build exits after it (the script relaunches).
+        "adopt" => {
+            use crate::seed_adopt::EscrowProbe;
+            let probe = crate::seed_adopt::VaultEscrowProbe { client_id: s(&body, "client_id") };
+            let hex = match probe.escrowed_seed().await {
+                Ok(crate::seed_adopt::EscrowedSeed::Seed(hex)) => hex,
+                Ok(_) => return failed("no escrowed seed in the Vault backup"),
+                Err(e) => return failed(e),
+            };
+            to_value(crate::seed_adopt::adopt_escrowed_seed(app.clone(), state, hex, true).await.map(|_| json!({ "adopted": true })))
+        }
         other => failed(format!("unknown op {:?}", other)),
+    }
+}
+
+async fn backup(state: tauri::State<'_, Arc<AppState>>, client_id: String) -> Reply {
+    let Some(port) = crate::vault_probe::test_vault_port() else {
+        return failed("no PROOFPOLL_TEST_VAULT_PORT");
+    };
+    let expected = commands::get_identity_link(state.clone()).map(|l| l.vault_agent_pub_key);
+    let data = match commands::build_canonical_backup(state, Some(client_id.clone())).await {
+        Ok(d) => d,
+        Err(e) => return failed(format!("build_canonical_backup: {}", e)),
+    };
+    let resp = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{}/backup", port))
+        .header("Origin", crate::vault_probe::webview_origin())
+        .json(&json!({ "client_id": client_id, "app_name": "ProofPoll", "data": data, "expected_identity": expected }))
+        .timeout(std::time::Duration::from_secs(60))
+        .send()
+        .await;
+    match resp {
+        Ok(r) if r.status().is_success() => ok(r.json().await.unwrap_or(Value::Null)),
+        Ok(r) => failed(format!("backup {}: {}", r.status(), r.text().await.unwrap_or_default())),
+        Err(e) => failed(e),
     }
 }
 

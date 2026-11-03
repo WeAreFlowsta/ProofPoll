@@ -14,6 +14,7 @@
 const LEG = (process.argv.find((a) => a.startsWith('--leg=')) || '--leg=').split('=')[1];
 const A = process.env.PP_A || 'http://127.0.0.1:28801';
 const B = process.env.PP_B || 'http://127.0.0.1:28802';
+const C = process.env.PP_C || 'http://127.0.0.1:28803';
 const VAULT = process.env.VAULT || 'http://127.0.0.1:27778';
 const CLIENT_ID = process.env.CLIENT_ID || '';
 
@@ -67,7 +68,7 @@ async function fresh() {
   const rss = st.rss_mb || {};
   // After the one restart, the 0.7 conductor holds what it compiled since,
   // not the ~2 GB an install kept (holochain#6064).
-  record('A: the 0.7 conductor under 1 GB after its restart', (rss['holochain-0.7'] ?? 9999) < 1024, JSON.stringify(rss));
+  record('A: both conductors under 1 GB after their restart', (rss['holochain-0.7'] ?? 9999) < 1024 && (rss['holochain-0.6'] ?? 9999) < 1024, JSON.stringify(rss));
   record('A: no identity link yet', st.identity_link == null, JSON.stringify(st.identity_link));
   const refused = await op(A, { op: 'create_poll', title: 'before sign-in', description: '', options: ['a', 'b'] });
   record('A: a write before sign-in is refused', !refused.ok && /Sign in with Flowsta/.test(refused.error || ''), refused.error);
@@ -111,7 +112,7 @@ async function polls() {
   record('A: lists the draft', await until(async () => ((await op(A, { op: 'drafts' })).data || []).some((d) => d.action_hash === draft.data || d.draft_action_hash === draft.data || d.hash === draft.data), 30), JSON.stringify((await op(A, { op: 'drafts' })).data)?.slice(0, 200));
   const pub = await op(A, { op: 'publish_draft', draft: draft.data });
   record('A: publishes the draft as a poll', pub.ok, pub.error || pub.data);
-  return { hash, vote: voted.data, title };
+  return { hash, vote: voted.data, title, agent: (await status(A)).app?.agent_pub_key };
 }
 
 /** A second device of the same identity sees A's poll and vote as the same person. */
@@ -161,13 +162,71 @@ async function migration() {
   record('A: the old reason reads', reasonNow.ok && reasonNow.data === 'an old reason', reasonNow.error || JSON.stringify(reasonNow.data));
 }
 
+/** A restarted with every rendezvous check failing for ~90 s (debug switch):
+ * it starts without the auth, works, and reconnects with it by itself. */
+async function offline(state) {
+  console.log('\n── Offline start, then back');
+  record('A: ready while the rendezvous does not answer', await waitReady(A, 240));
+  const st = await status(A);
+  record('A: started without the network auth', st.started_offline === true && st.configs_with_auth === 0, JSON.stringify({ started_offline: st.started_offline, configs_with_auth: st.configs_with_auth }));
+  let polls = { ok: false };
+  const read = await until(async () => (polls = await op(A, { op: 'polls' })).ok && Array.isArray(polls.data), 120, 5000);
+  record('A: its polls read while offline', read, polls.error || `${polls.data?.length} polls`);
+  const t0 = Date.now();
+  const back = await until(async () => { const s = await status(A); return s.started_offline === false && s.configs_with_auth === 2 && s.app?.ready === true; }, 300, 5000);
+  record('A: reconnects with the auth by itself', back, `${Math.round((Date.now() - t0) / 1000)} s after the check began`);
+  if (state?.hash) {
+    record("A: its poll still lists after the reconnect", await until(async () => ((await op(A, { op: 'polls' })).data || []).some((p) => p.hash === state.hash), 180, 5000));
+  }
+  const rss = (await status(A)).rss_mb || {};
+  // Watch item (11-03): the 0.6 conductor at ~800 MB after a fresh start.
+  record('A: both conductors under 1.5 GB after the run', (rss['holochain-0.6'] ?? 9999) < 1536 && (rss['holochain-0.7'] ?? 9999) < 1536, JSON.stringify(rss));
+}
+
+/** The machine-death restore, part 1: A backs up (its seed escrowed in the
+ * Vault backup), then B adopts that seed and exits (a debug build does). */
+async function adopt(state) {
+  console.log('\n── Restore onto another device (adopt the escrowed seed)');
+  // C: a peer that stays up (staging has no ProofPoll node): once A is
+  // gone, the network still holds A's public records for B to fetch.
+  record('C: ready', await waitReady(C, 300));
+  if (state?.hash) {
+    record("C: holds A's poll before A goes", await until(async () => ((await op(C, { op: 'polls' })).data || []).some((p) => p.hash === state.hash), 300, 10000));
+    record("C: holds A's vote", await until(async () => ((await op(C, { op: 'votes', poll: state.hash, dna_version: '1.4' })).data || []).length >= 1, 300, 10000));
+  }
+  const b = await op(A, { op: 'backup', client_id: CLIENT_ID }, 120);
+  record('A: backs up to the Vault', b.ok, b.error || JSON.stringify(b.data)?.slice(0, 120));
+  const esc = await op(B, { op: 'escrow', client_id: CLIENT_ID });
+  record('B: the Vault backup holds an escrowed seed', esc.ok && esc.data?.seed === true, esc.error || JSON.stringify(esc.data));
+  const ad = await op(B, { op: 'adopt', client_id: CLIENT_ID }, 180).catch((e) => ({ ok: true, data: { exited: String(e) } }));
+  record('B: adopts it', ad.ok, ad.error || JSON.stringify(ad.data));
+}
+
+/** Part 2, B relaunched: it is A's agent now, both lines start under the
+ * new key, and A's encrypted reason opens. */
+async function adopted(state) {
+  console.log('\n── After the restore (B relaunched)');
+  record('B: ready on the adopted seed', await waitReady(B, 300));
+  const st = await status(B);
+  record("B: runs as A's agent", !!state.agent && st.app?.agent_pub_key === state.agent, JSON.stringify({ b: st.app?.agent_pub_key, a: state.agent }));
+  record('B: both conductors up with the network auth', st.configs_with_auth === 2 && st.app?.conductor_status?.status === 'ready', JSON.stringify(st.app?.conductor_status));
+  if (state.vote) {
+    let r = { ok: false };
+    const opened = await until(async () => (r = await op(B, { op: 'rationale', vote: state.vote })).ok && r.data === 'because the matrix said so', 300, 10000);
+    record("B: opens A's encrypted reason (A's key is B's now)", opened, r.error || JSON.stringify(r.data));
+  }
+  if (state.hash) {
+    record("B: lists A's poll", await until(async () => ((await op(B, { op: 'polls' })).data || []).some((p) => p.hash === state.hash), 300, 10000));
+  }
+}
+
 // ───────────────────────── main ─────────────────────────
 
 const legs = { fresh, signin: () => signin(), polls, migration };
 try {
-  if (LEG === 'devices') {
+  if (['devices', 'offline', 'adopt', 'adopted'].includes(LEG)) {
     const s = JSON.parse(process.env.PP_STATE || '{}');
-    await devices(s);
+    await ({ devices, offline, adopt, adopted })[LEG](s);
   } else if (LEG === 'polls') {
     const s = await polls();
     if (process.env.PP_STATE_OUT) (await import('node:fs')).writeFileSync(process.env.PP_STATE_OUT, JSON.stringify(s));
