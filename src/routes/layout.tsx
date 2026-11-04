@@ -578,8 +578,8 @@ export default component$(() => {
             disabled={updateStage.value !== null && updateStage.value !== "failed"}
             title={
               updateReady.value.asks_password
-                ? `Installs ProofPoll ${updateReady.value.version} and restarts. Your computer asks for your password first.`
-                : `Installs ProofPoll ${updateReady.value.version} and restarts.`
+                ? `Installs ProofPoll ${updateReady.value.version}, then closes and opens ProofPoll again. Your computer asks for your password first.`
+                : `Installs ProofPoll ${updateReady.value.version}, then closes and opens ProofPoll again.`
             }
             class="flex items-center gap-2 rounded-full bg-indigo-600 px-3 py-1 text-sm font-medium text-white transition-colors hover:bg-indigo-500 disabled:cursor-default disabled:bg-indigo-600/80"
             onClick$={async () => {
@@ -597,7 +597,7 @@ export default component$(() => {
               <span class="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white border-t-transparent" />
             )}
             {updateStage.value === "restarting"
-              ? "Restarting…"
+              ? "Reopening…"
               : updateStage.value !== null && updateStage.value !== "failed"
                 ? "Installing…"
                 : "Restart to update"}
@@ -942,15 +942,15 @@ export default component$(() => {
             {updateStage.value === "password" ? (
               <>
                 <p class="text-sm text-gray-100">Installing ProofPoll {updateReady.value.version}</p>
-                <p class="mt-0.5 text-xs text-gray-400">Your computer asks for your password to install it. ProofPoll then restarts.</p>
+                <p class="mt-0.5 text-xs text-gray-400">Your computer asks for your password to install it. Then ProofPoll closes and opens again.</p>
               </>
             ) : updateStage.value === "installing" ? (
               <>
                 <p class="text-sm text-gray-100">Installing ProofPoll {updateReady.value.version}</p>
-                <p class="mt-0.5 text-xs text-gray-400">ProofPoll restarts when it is done.</p>
+                <p class="mt-0.5 text-xs text-gray-400">Then ProofPoll closes and opens again.</p>
               </>
             ) : updateStage.value === "restarting" ? (
-              <p class="text-sm text-gray-100">Installed. ProofPoll is restarting.</p>
+              <p class="text-sm text-gray-100">Installed. ProofPoll is closing and opening again.</p>
             ) : (
               <>
                 <p class="text-sm text-red-200">ProofPoll {updateReady.value.version} was not installed</p>
