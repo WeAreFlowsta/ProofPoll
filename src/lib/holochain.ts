@@ -182,6 +182,15 @@ export async function getLinkedAgents(
   });
 }
 
+/** The agents linked on the active network only (v1.4), not v1.3 too. */
+export async function getLinkedAgentsActive(
+  agentPubKey: string,
+): Promise<string[]> {
+  return invoke<string[]>("get_linked_agents_active", {
+    agentPubKey,
+  });
+}
+
 export async function getIdentityLink(): Promise<IdentityLinkData | null> {
   return invoke<IdentityLinkData | null>("get_identity_link");
 }

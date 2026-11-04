@@ -7,6 +7,7 @@ import { sanitizeImageSrc } from "~/lib/sanitize";
 import { setSignInIntent, vaultLinkOptions } from "~/lib/signin";
 import {
   getLinkedAgents,
+  getLinkedAgentsActive,
   getIdentityLink,
   commitIdentityLink,
   revokeIdentityLink,
@@ -34,6 +35,8 @@ import { setBackupTriggersEnabled, reportBackupOutcome } from "~/lib/backup";
 interface AppStatus {
   ready: boolean;
   agent_pub_key: string | null;
+  /** The key v1.4 runs as; differs only for a conductor-born 0.6 agent. */
+  agent_pub_key_07?: string | null;
   conductor_status:
     | { status: "stopped" }
     | { status: "starting"; message: string }
@@ -282,10 +285,19 @@ export default component$(() => {
               // background so peers can verify. Safe against account
               // switches: commit_identity_link hard-refuses binding any
               // identity other than the one already linked AND live.
-              if (state === "linked") {
-                const dhtLinked = await getLinkedAgents(s.agent_pub_key)
+              // The check reads the active network only: counting v1.3 links
+              // too, it never re-created a link the move left on v1.3. An
+              // install whose v1.4 key differs from its 0.6 one (a
+              // conductor-born 0.6 agent) is skipped: the link the Vault
+              // signs names the 0.6 key, which v1.4 refuses.
+              const keysDiffer = !!s.agent_pub_key_07 && s.agent_pub_key_07 !== s.agent_pub_key;
+              if (state === "linked" && keysDiffer) {
+                console.log("[ProofPoll] identity link on v1.4 not re-created: this install's v1.4 key differs from its 0.6 key");
+              }
+              if (state === "linked" && !keysDiffer) {
+                const dhtLinked = await getLinkedAgentsActive(s.agent_pub_key)
                   .then((a) => a.length > 0)
-                  .catch(() => false);
+                  .catch(() => true);
                 if (!dhtLinked) {
                   const agentPubKey = s.agent_pub_key;
                   import("@flowsta/holochain")

@@ -276,6 +276,7 @@ pub fn run() {
 
                         *startup_state.conductor_handle.lock().unwrap() = Some(result.handle);
                         *startup_state.agent_pub_key.lock().unwrap() = Some(result.agent_key);
+                        *startup_state.agent_pub_key_07.lock().unwrap() = Some(result.agent_key_07);
                         *startup_state.app_client.lock().await = Some(result.app_client);
                         *startup_state.app_client_v1_3.lock().await = result.app_client_v1_3;
                         *startup_state.app_client_v1_2.lock().await = result.app_client_v1_2;
@@ -411,6 +412,7 @@ pub fn run() {
             commands::save_profile_cache,
             commands::commit_identity_link,
             commands::get_linked_agents,
+            commands::get_linked_agents_active,
             commands::get_my_agent_set,
             commands::get_identity_link,
             commands::revoke_identity_link,

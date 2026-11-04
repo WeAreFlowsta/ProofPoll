@@ -155,6 +155,9 @@ pub struct AppState {
     pub conductor_handle: Mutex<Option<ConductorHandle>>,
     pub conductor_status: Mutex<ConductorStatus>,
     pub agent_pub_key: Mutex<Option<String>>,
+    /// The key the 0.7 line (v1.4) runs as: the same as `agent_pub_key`
+    /// unless the 0.6 agent was conductor-born, before the app-held seed.
+    pub agent_pub_key_07: Mutex<Option<String>>,
     /// Active (v1.4, Holochain 0.7.1) app client for all reads and writes.
     pub app_client: tokio::sync::Mutex<Option<crate::hc::AppClient>>,
     /// v1.3 app client (Holochain 0.6.1): the migration source, and reads and
@@ -244,6 +247,7 @@ impl AppState {
             conductor_handle: Mutex::new(None),
             conductor_status: Mutex::new(ConductorStatus::Stopped),
             agent_pub_key: Mutex::new(None),
+            agent_pub_key_07: Mutex::new(None),
             app_client: tokio::sync::Mutex::new(None),
             app_client_v1_3: tokio::sync::Mutex::new(None),
             app_client_v1_2: tokio::sync::Mutex::new(None),
@@ -461,6 +465,8 @@ pub(crate) fn parse_agent_pub_key_string(s: &str) -> Result<AgentPubKey, String>
 pub struct AppStatus {
     pub ready: bool,
     pub agent_pub_key: Option<String>,
+    /// The key v1.4 runs as (see `AppState::agent_pub_key_07`).
+    pub agent_pub_key_07: Option<String>,
     pub conductor_status: ConductorStatus,
     /// This launch was asked for by "Open as this identity".
     pub relaunched_into_identity: bool,
@@ -478,6 +484,7 @@ pub fn get_app_status(state: tauri::State<'_, std::sync::Arc<AppState>>) -> AppS
     AppStatus {
         ready,
         agent_pub_key: agent_key,
+        agent_pub_key_07: state.agent_pub_key_07.lock().unwrap().clone(),
         conductor_status: status,
         relaunched_into_identity: state
             .relaunched_into_identity
@@ -1695,6 +1702,18 @@ async fn fold_siblings_on(
         }
         Err(e) => log::warn!("[identity] get_my_agent_set ({}): hub lookup failed: {}", line, e),
     }
+}
+
+/// The agents linked to `agent_pub_key` on the active network (v1.4) only,
+/// for the launch check that re-creates a link the move left on v1.3.
+/// `get_linked_agents` also counts v1.3, so that check never ran.
+#[tauri::command]
+pub async fn get_linked_agents_active(
+    state: tauri::State<'_, std::sync::Arc<AppState>>,
+    agent_pub_key: String,
+) -> Result<Vec<String>, String> {
+    let agent = AgentPubKey::try_from(agent_pub_key).map_err(|e| format!("Invalid agent key: {:?}", e))?;
+    Ok(linked_agent_keys(state.inner(), &agent).await?.iter().map(|a| a.to_string()).collect())
 }
 
 #[tauri::command]

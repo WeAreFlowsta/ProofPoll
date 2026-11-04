@@ -512,6 +512,8 @@ async fn wait_for_admin_ws(
 pub struct StartupResult {
     pub handle: ConductorHandle,
     pub agent_key: String,
+    /// The key v1.4 runs as (differs from `agent_key` for a conductor-born 0.6 agent).
+    pub agent_key_07: String,
     /// The active client: v1.4 on the 0.7.1 conductor.
     pub app_client: crate::hc::AppClient,
     /// v1.3 client on the 0.6.1 conductor: the migration source, and reads
@@ -991,6 +993,7 @@ async fn start_holochain_attempt(
     Ok(StartupResult {
         handle,
         agent_key: agent_key_str,
+        agent_key_07: agent_07.to_string(),
         app_client,
         app_client_v1_3,
         app_client_v1_2,
