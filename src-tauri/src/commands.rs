@@ -2862,6 +2862,19 @@ pub(crate) async fn harness_v13_poll(
     Ok(action_hash.to_string())
 }
 
+/// See `harness_v13_poll`: a vote on a v1.3 poll, cast there with no
+/// identity gate (the carrier's test fixtures need one).
+#[cfg(feature = "harness")]
+pub(crate) async fn harness_v13_vote(state: &AppState, poll: String, option_index: u32) -> Result<String, String> {
+    let client = state.app_client_v1_3.lock().await;
+    let client = client.as_ref().ok_or("v1.3 is not running")?;
+    let poll_action_hash = ActionHash::try_from(poll).map_err(|e| format!("Invalid action hash: {:?}", e))?;
+    let input = CastVoteInput { poll_action_hash, option_index, display_name: None, profile_picture: None };
+    let result = call_zome(client, POLLS_ZOME, "cast_vote", crate::hc::encode(&input)?).await?;
+    let action_hash: ActionHash = crate::hc::decode(&result)?;
+    Ok(action_hash.to_string())
+}
+
 /// See `harness_v13_poll`: an entry encrypted to this agent, linked as
 /// `link_as` ("draft_poll" or "vote_rationale"), on v1.3.
 #[cfg(feature = "harness")]

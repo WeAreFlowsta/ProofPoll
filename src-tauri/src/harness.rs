@@ -224,6 +224,92 @@ async fn proof_check() -> Reply {
     ok(json!({ "records": checked }))
 }
 
+/// Test fixtures for the v1.5 DNA's carried-record validation: every app
+/// record this install authored on v1.3 (0.6) and v1.4 (0.7), as signed:
+/// the action's exact signed bytes, the signature and the entry (hex), with
+/// the action hash, author, time (microseconds) and the entry's zome and
+/// entry index. Test identities only; nothing here is a person's data.
+async fn fixtures() -> Reply {
+    use holochain_types::prelude::encode;
+    let mut v13 = Vec::new();
+    {
+        use holochain_client::{AdminWebsocket, CellInfo};
+        use holochain_integrity_types::EntryType;
+        let admin = match AdminWebsocket::connect(format!("localhost:{}", crate::conductor::admin_port()), Some(crate::conductor::node_origin())).await {
+            Ok(a) => a,
+            Err(e) => return failed(format!("0.6 admin: {}", e)),
+        };
+        let apps = admin.list_apps(None).await.map_err(|e| e.to_string());
+        let cell = apps.ok().and_then(|apps| {
+            apps.iter().find(|a| a.installed_app_id == crate::dna::APP_ID_V1_3).and_then(|app| {
+                app.cell_info.values().flat_map(|c| c.iter()).find_map(|c| match c {
+                    CellInfo::Provisioned(p) => Some(p.cell_id.clone()),
+                    _ => None,
+                })
+            })
+        });
+        let Some(cell_id) = cell else { return failed("no v1.3 cell") };
+        let dump = match admin.dump_full_state(cell_id, None).await {
+            Ok(d) => d,
+            Err(e) => return failed(format!("v1.3 dump: {}", e)),
+        };
+        for rec in &dump.source_chain_dump.records {
+            let (Some(entry), Some(EntryType::App(def))) = (rec.entry.as_ref().and_then(|e| e.as_app_entry()), rec.action.entry_type()) else { continue };
+            let Ok(action) = encode(&rec.action) else { continue };
+            v13.push(json!({
+                "dna": "1.3",
+                "action_hash": rec.action_address.to_string(),
+                "author": rec.action.author().to_string(),
+                "timestamp_us": rec.action.timestamp().as_micros(),
+                "zome_index": def.zome_index.0,
+                "entry_index": def.entry_index.0,
+                "action": hex::encode(&action),
+                "signature": hex::encode(rec.signature.0),
+                "entry": hex::encode(entry.as_ref().bytes()),
+            }));
+        }
+    }
+    let mut v14 = Vec::new();
+    {
+        use holochain_client_07::{AdminWebsocket, CellInfo};
+        use holochain_integrity_types_07::action::EntryType;
+        let admin = match AdminWebsocket::connect(format!("localhost:{}", crate::conductor::admin_port_07()), Some(crate::conductor::node_origin())).await {
+            Ok(a) => a,
+            Err(e) => return failed(format!("0.7 admin: {}", e)),
+        };
+        let apps = admin.list_apps(None).await.map_err(|e| e.to_string());
+        let cell = apps.ok().and_then(|apps| {
+            apps.iter().find(|a| a.installed_app_id == crate::dna::APP_ID_V1_4).and_then(|app| {
+                app.cell_info.values().flat_map(|c| c.iter()).find_map(|c| match c {
+                    CellInfo::Provisioned(p) => Some(p.cell_id.clone()),
+                    _ => None,
+                })
+            })
+        });
+        let Some(cell_id) = cell else { return failed("no v1.4 cell") };
+        let dump = match admin.dump_full_state(cell_id, None, None).await {
+            Ok(d) => d,
+            Err(e) => return failed(format!("v1.4 dump: {}", e)),
+        };
+        for rec in &dump.source_chain_dump.records {
+            let (Some(entry), Some(EntryType::App(def))) = (rec.entry.as_ref().and_then(|e| e.as_app_entry()), rec.action.entry_type()) else { continue };
+            let Ok(action) = encode(&rec.action) else { continue };
+            v14.push(json!({
+                "dna": "1.4",
+                "action_hash": rec.action_address.to_string(),
+                "author": rec.action.author().to_string(),
+                "timestamp_us": rec.action.timestamp().as_micros(),
+                "zome_index": def.zome_index.0,
+                "entry_index": def.entry_index.0,
+                "action": hex::encode(&action),
+                "signature": hex::encode(rec.signature.0),
+                "entry": hex::encode(entry.as_ref().bytes()),
+            }));
+        }
+    }
+    ok(json!({ "v13": v13, "v14": v14 }))
+}
+
 fn s(body: &Value, key: &str) -> String {
     body.get(key).and_then(|v| v.as_str()).unwrap_or_default().to_string()
 }
@@ -308,6 +394,10 @@ async fn op(Ax(app): Ax<tauri::AppHandle>, Json(body): Json<Value>) -> Reply {
         "backup" => backup(state, s(&body, "client_id")).await,
         "chain07" => chain07().await,
         "proof_check" => proof_check().await,
+        "v13_vote" => to_value(
+            commands::harness_v13_vote(&state, s(&body, "poll"), body.get("option").and_then(|v| v.as_u64()).unwrap_or(0) as u32).await,
+        ),
+        "fixtures" => fixtures().await,
         // What the Vault backup holds for this app: the escrowed seed or none.
         "escrow" => {
             use crate::seed_adopt::EscrowProbe;
