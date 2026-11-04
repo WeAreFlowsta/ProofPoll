@@ -208,10 +208,12 @@ jobs:
             librsvg2-dev \
             patchelf
 
+      # Node 22: the build tools need 22.19 or later (undici 8); Node 20 ended
+      # in April 2026.
       - name: Setup Node.js
         uses: actions/setup-node@v5
         with:
-          node-version: 20
+          node-version: 22
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
