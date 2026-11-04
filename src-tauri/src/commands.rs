@@ -924,6 +924,29 @@ pub async fn cast_vote(
 
 /// The v1.3 poll a v1.4 poll was migrated from: from the map `get_all_polls`
 /// keeps, read once from the active line when it is not loaded yet.
+/// The client of the network a poll of `dna_version` lives on ("1.4" and
+/// unknown versions: the active one).
+fn client_for<'a>(state: &'a AppState, dna_version: &str) -> &'a tokio::sync::Mutex<Option<crate::hc::AppClient>> {
+    match dna_version {
+        "1.0" => &state.app_client_v1_0,
+        "1.1" => &state.app_client_v1_1,
+        "1.2" => &state.app_client_v1_2,
+        "1.3" => &state.app_client_v1_3,
+        _ => &state.app_client,
+    }
+}
+
+/// A poll's flag records on one network.
+async fn flag_records(
+    slot: &tokio::sync::Mutex<Option<crate::hc::AppClient>>,
+    poll: &ActionHash,
+) -> Result<Vec<crate::hc::RecordView>, String> {
+    let client = slot.lock().await;
+    let client = client.as_ref().ok_or("This poll's network is not available")?;
+    let result = call_zome(client, POLLS_ZOME, "get_poll_flags", crate::hc::encode(poll)?).await?;
+    crate::hc::records(client.line(), &result)
+}
+
 async fn migrated_from_of(state: &AppState, new_hash: &str) -> Option<String> {
     let cached = state.migrated_from.lock().unwrap().as_ref().map(|m| m.get(new_hash).cloned());
     if let Some(found) = cached {
@@ -1834,13 +1857,16 @@ pub async fn flag_poll(
     state: tauri::State<'_, std::sync::Arc<AppState>>,
     poll_action_hash: String,
     reason: String,
+    dna_version: Option<String>,
 ) -> Result<String, String> {
     // Tier-1 gate: signed-in install, no unlock required - but never while
     // a different identity's Vault is open. See require_identity_link.
     require_identity_link(&state).await?;
 
-    let client = state.app_client.lock().await;
-    let client = client.as_ref().ok_or("Conductor not ready")?;
+    // On the poll's own network: its coordinator refuses a poll it cannot
+    // find there ("Poll not found" for every v1.3 poll before).
+    let client = client_for(&state, dna_version.as_deref().unwrap_or_default()).lock().await;
+    let client = client.as_ref().ok_or("This poll's network is not available")?;
 
     let hash = ActionHash::try_from(poll_action_hash)
         .map_err(|e| format!("Invalid action hash: {:?}", e))?;
@@ -1867,16 +1893,28 @@ pub async fn flag_poll(
 pub async fn get_poll_flags(
     state: tauri::State<'_, std::sync::Arc<AppState>>,
     poll_action_hash: String,
+    // The poll's dna_version: its flags live on its own network. None =
+    // the active one.
+    dna_version: Option<String>,
 ) -> Result<Vec<FlagData>, String> {
-    let client = state.app_client.lock().await;
-    let client = client.as_ref().ok_or("Conductor not ready")?;
-
     let hash = ActionHash::try_from(poll_action_hash)
         .map_err(|e| format!("Invalid action hash: {:?}", e))?;
-    let payload = crate::hc::encode(&hash)?;
-    let result = call_zome(client, POLLS_ZOME, "get_poll_flags", payload).await?;
-
-    let records = crate::hc::records(client.line(), &result)?;
+    let version = dna_version.unwrap_or_default();
+    let mut records = flag_records(client_for(&state, &version), &hash).await?;
+    // A migrated poll: add the flags on the copy it came from, by anyone
+    // with no flag here (flags were never migrated).
+    let active = !matches!(version.as_str(), "1.0" | "1.1" | "1.2" | "1.3");
+    if active {
+        if let Some(old) = migrated_from_of(&state, &hash.to_string()).await.and_then(|o| ActionHash::try_from(o).ok()) {
+            match flag_records(&state.app_client_v1_3, &old).await {
+                Ok(older) => {
+                    let here: Vec<String> = records.iter().map(|r| r.author.clone()).collect();
+                    records.extend(older.into_iter().filter(|r| !here.contains(&r.author)));
+                }
+                Err(e) => log::debug!("[flags] the old copy's flags were not read: {}", e),
+            }
+        }
+    }
     let mut flags = Vec::new();
     for record in &records {
         let flag: FlagEntry = decode_entry(record)?;
@@ -1897,10 +1935,12 @@ pub async fn get_poll_flags(
 pub async fn remove_flag(
     state: tauri::State<'_, std::sync::Arc<AppState>>,
     flag_action_hash: String,
+    // The flagged poll's dna_version (the flag is on that network).
+    dna_version: Option<String>,
 ) -> Result<String, String> {
     require_identity_link(&state).await?;
-    let client = state.app_client.lock().await;
-    let client = client.as_ref().ok_or("Conductor not ready")?;
+    let client = client_for(&state, dna_version.as_deref().unwrap_or_default()).lock().await;
+    let client = client.as_ref().ok_or("This poll's network is not available")?;
 
     let hash = ActionHash::try_from(flag_action_hash)
         .map_err(|e| format!("Invalid action hash: {:?}", e))?;

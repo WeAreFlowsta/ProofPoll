@@ -51,13 +51,14 @@ export default component$(() => {
       myAgent.value = status.agent_pub_key;
       flagThreshold.value = threshold;
 
-      // Load flag counts in background. Flags only exist on v1.1 polls.
+      // Load flag counts in background, each from the poll's own network
+      // (v1.0 has no flags).
       if (allPolls.length > 0) {
         Promise.all(
           allPolls.map(async (p) => {
-            if (p.dna_version !== "1.1") return { hash: p.hash, count: 0 };
+            if (p.dna_version === "1.0") return { hash: p.hash, count: 0 };
             try {
-              const flags = await getPollFlags(p.hash);
+              const flags = await getPollFlags(p.hash, p.dna_version);
               return { hash: p.hash, count: flags.length };
             } catch {
               return { hash: p.hash, count: 0 };

@@ -99,11 +99,11 @@ export default component$(() => {
       pollAuthor.value = pollResult.author;
       pollDnaVersion.value = pollResult.dna_version;
 
-      // Fetch votes from the correct cell. Flags exist on v1.1 and v1.2.
+      // Fetch votes and flags from the poll's own cell (v1.0 has no flags).
       const [votesResult, flagsResult] = await Promise.all([
         getPollVotes(pollHash, pollResult.dna_version),
-        (pollResult.dna_version === "1.1" || pollResult.dna_version === "1.2")
-          ? getPollFlags(pollHash).catch(() => [] as FlagData[])
+        pollResult.dna_version !== "1.0"
+          ? getPollFlags(pollHash, pollResult.dna_version).catch(() => [] as FlagData[])
           : Promise.resolve([] as FlagData[]),
       ]);
 
@@ -184,8 +184,8 @@ export default component$(() => {
     flagging.value = true;
     showFlagPicker.value = false;
     try {
-      await flagPoll(pollHashSig.value, reason);
-      const updatedFlags = await getPollFlags(pollHashSig.value);
+      await flagPoll(pollHashSig.value, reason, pollDnaVersion.value ?? "");
+      const updatedFlags = await getPollFlags(pollHashSig.value, pollDnaVersion.value ?? "");
       flags.value = updatedFlags;
       myFlag.value = updatedFlags.find(
         (f) => f.author === myAgent.value,
@@ -202,7 +202,7 @@ export default component$(() => {
     flagError.value = null;
     flagging.value = true;
     try {
-      await removeFlag(myFlag.value.hash);
+      await removeFlag(myFlag.value.hash, pollDnaVersion.value ?? "");
       myFlag.value = null;
       flags.value = flags.value.filter(
         (f) => f.author !== myAgent.value,
@@ -314,7 +314,7 @@ export default component$(() => {
           )}
         </div>
 
-        {/* Flag / unflag — only on v1.1 and v1.2 polls (v1.0 has no Flag entry type) */}
+        {/* Flag / unflag: every poll but v1.0 (no Flag entry type), on its own network */}
         {linked.value && myAgent.value && !myAgentSet.value.has(pollAuthor.value ?? "") && (pollDnaVersion.value !== "1.0") && (
           <div class="mt-3">
             {flagError.value && (

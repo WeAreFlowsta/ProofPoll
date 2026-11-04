@@ -285,21 +285,24 @@ export interface FlagData {
   author: string;
 }
 
+// Flags live on the poll's own network: pass the poll's dna_version.
 export async function flagPoll(
   pollActionHash: string,
   reason: FlagReason,
+  dnaVersion: string,
 ): Promise<string> {
-  return backedUp(invoke<string>("flag_poll", { pollActionHash, reason }));
+  return backedUp(invoke<string>("flag_poll", { pollActionHash, reason, dnaVersion }));
 }
 
 export async function getPollFlags(
   pollActionHash: string,
+  dnaVersion: string,
 ): Promise<FlagData[]> {
-  return invoke<FlagData[]>("get_poll_flags", { pollActionHash });
+  return invoke<FlagData[]>("get_poll_flags", { pollActionHash, dnaVersion });
 }
 
-export async function removeFlag(flagActionHash: string): Promise<string> {
-  return backedUp(invoke<string>("remove_flag", { flagActionHash }));
+export async function removeFlag(flagActionHash: string, dnaVersion: string): Promise<string> {
+  return backedUp(invoke<string>("remove_flag", { flagActionHash, dnaVersion }));
 }
 
 export async function getFlagThreshold(): Promise<number> {
