@@ -17,7 +17,7 @@ ProofPoll is built on **[Flowsta Vault](https://flowsta.com/vault/)**, which kee
 
 ## What's New
 
-### v0.6.0-beta.2 - 2026-11-04
+### v0.6.0-beta.2 - 2026-11-05
 - **The first version that arrives by itself.** Installs of 0.6.0-beta.1 download this one in the background and install it when you restart ProofPoll or quit it.
 - **Your Vault backup includes everything.** It now also carries what you did on polls still on the older network, so the Vault's count of your polls and votes and your data export are complete. Polls and votes already copied to the new network count once.
 - **Flags work on every poll.** Flagging a poll still on the older network failed with "Poll not found", a flag on a newer poll did not show after a reload, and hiding a poll with several flags worked only for the oldest polls. Each poll's flags are now read and written on its own network.
