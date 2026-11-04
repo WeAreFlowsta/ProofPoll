@@ -2446,7 +2446,7 @@ pub async fn build_canonical_backup(
     .await
     .map_err(|e| format!("Failed to connect to admin WS for backup: {}", e))?;
 
-    // 2. Find the active (v1.3) provisioned cell.
+    // 2. Find the active (v1.4) provisioned cell.
     let apps = admin_ws
         .list_apps(None)
         .await
@@ -2501,11 +2501,71 @@ pub async fn build_canonical_backup(
         }));
     }
 
+    // 4b. The v1.3 chain on the 0.6 line, while that line runs. It holds
+    // what was authored there and never copied to v1.4 (a vote on a poll
+    // still on the 0.6 network, a closed poll that stayed there); without
+    // it the Vault's counts and the data export left all of that out (a
+    // Mac, 0.6.0-beta.1). Every record goes in the export; the summary
+    // counts only those the migration did not copy, so none counts twice.
+    let cell_06 = match dump_chain_06(&state).await {
+        Ok(Some(chain)) => {
+            let copied = Copied06::from(&*state.migration_state.lock().await);
+            let mut records_06: Vec<serde_json::Value> = Vec::new();
+            let mut copied_hashes: Vec<String> = Vec::new();
+            for rec in &chain.records {
+                let action_hash = rec.action_address.to_string();
+                let (entry_type_name, human_readable) = classify_dump_record_06(rec);
+                let vote_poll = (entry_type_name == "Vote")
+                    .then(|| app_entry_bytes_06(rec).and_then(|b| rmp_serde::from_slice::<Vote>(b).ok()))
+                    .flatten()
+                    .map(|v| v.poll_action_hash.to_string());
+                if copied.holds(&entry_type_name, &action_hash, vote_poll.as_deref()) {
+                    copied_hashes.push(action_hash.clone());
+                } else if !human_readable.is_null() {
+                    *counts.entry(entry_type_name.clone()).or_insert(0) += 1;
+                }
+                let raw_record = serde_json::to_value(rec)
+                    .map_err(|e| format!("serialize SourceChainDumpRecord (0.6): {}", e))?;
+                records_06.push(serde_json::json!({
+                    "entryType": entry_type_name,
+                    "actionHash": action_hash,
+                    "createdAtMs": rec.action.timestamp().as_millis(),
+                    "human_readable": human_readable,
+                    "raw_record": raw_record,
+                }));
+            }
+            Some(serde_json::json!({
+                "role_name": "polls",
+                "line": "holochain-0.6",
+                "dna_version": "1.3",
+                "_readme": "The same, from the previous Holochain line (0.6): what you authored on ProofPoll before it moved to Holochain 0.7, and since then on polls still on the 0.6 network. The records listed in `copied_to_07` were copied to the 0.7 chain when this install moved, so they appear in both chains but are counted once.",
+                "copied_to_07": copied_hashes,
+                "records": records_06,
+            }))
+        }
+        Ok(None) => None,
+        Err(e) => {
+            log::warn!("[backup] the 0.6 chain was not read, so this backup carries the 0.7 chain only: {}", e);
+            None
+        }
+    };
+
     let total_records: usize = counts.values().sum();
     let counts_json: serde_json::Map<String, serde_json::Value> = counts
         .into_iter()
         .map(|(k, v)| (k, serde_json::json!(v)))
         .collect();
+
+    let mut cells = vec![serde_json::json!({
+        "role_name": "polls",
+        // Which chain this is: a restore onto another device rebuilds
+        // a 0.7 chain from the network (seed_adopt::backup_chain).
+        "line": "holochain-0.7",
+        "dna_version": "1.4",
+        "_readme": "Each record below is one action on your source chain. `human_readable` is the plain-English view (app entries only). `raw_record` is the signed record used to restore your chain onto a fresh install.",
+        "records": records,
+    })];
+    cells.extend(cell_06);
 
     // 5. Assemble the canonical payload.
     let payload = serde_json::json!({
@@ -2529,17 +2589,7 @@ pub async fn build_canonical_backup(
             "countsByEntryType": counts_json,
             "totalRecords": total_records,
         },
-        "cells": [
-            {
-                "role_name": "polls",
-                // Which chain this is: a restore onto another device rebuilds
-                // a 0.7 chain from the network (seed_adopt::backup_chain).
-                "line": "holochain-0.7",
-                "dna_version": "1.4",
-                "_readme": "Each record below is one action on your source chain. `human_readable` is the plain-English view (app entries only). `raw_record` is the signed record used to restore your chain onto a fresh install.",
-                "records": records,
-            }
-        ],
+        "cells": cells,
     });
     let mut payload = payload;
     // The means of authorship travels WITH the data (CAL): the agent seed
@@ -2597,9 +2647,6 @@ fn classify_dump_record(
         EntryType::CapGrant => return ("CapGrant".to_string(), serde_json::Value::Null),
     };
 
-    let zome = app_def.zome_index.0;
-    let entry_idx = app_def.entry_index.0;
-
     // Pull the raw msgpack entry bytes (if the entry is present in the dump).
     let entry_bytes: Option<&[u8]> = rec
         .entry
@@ -2607,6 +2654,12 @@ fn classify_dump_record(
         .and_then(|e| e.as_app_entry())
         .map(|app_bytes| app_bytes.as_ref().bytes().as_slice());
 
+    classify_app_entry(app_def.zome_index.0, app_def.entry_index.0, entry_bytes)
+}
+
+/// The `(zome_index, entry_index)` table of [`classify_dump_record`], the
+/// same on both lines (v1.4 keeps v1.3's zome and entry order).
+fn classify_app_entry(zome: u8, entry_idx: u8, entry_bytes: Option<&[u8]>) -> (String, serde_json::Value) {
     match (zome, entry_idx) {
         // polls_integrity (zome index 1)
         (1, 0) => decode_named::<Poll>("Poll", entry_bytes),
@@ -2647,6 +2700,88 @@ fn decode_named<T: serde::de::DeserializeOwned + serde::Serialize>(
 fn action_variant_label(action: &holochain_integrity_types_07::action::Action) -> String {
     // The 0.7 action model: one Action struct, its kind named by ActionType.
     format!("{:?}", action.action_type())
+}
+
+/// The v1.3 source chain on the 0.6 conductor, for the backup. None when the
+/// 0.6 line is not running (post-window builds) or v1.3 is not installed.
+async fn dump_chain_06(state: &AppState) -> Result<Option<holochain_state_types::SourceChainDump>, String> {
+    use holochain_client::{AdminWebsocket, CellInfo};
+    if state.app_client_v1_3.lock().await.is_none() {
+        return Ok(None);
+    }
+    let admin_ws = AdminWebsocket::connect(
+        format!("localhost:{}", crate::conductor::admin_port()),
+        Some(crate::conductor::node_origin()),
+    )
+    .await
+    .map_err(|e| format!("admin WS: {}", e))?;
+    let apps = admin_ws.list_apps(None).await.map_err(|e| format!("list_apps: {}", e))?;
+    let Some(cell_id) = apps
+        .iter()
+        .find(|a| a.installed_app_id == crate::dna::ACTIVE_APP_ID_06)
+        .and_then(|app| {
+            app.cell_info.values().flat_map(|cells| cells.iter()).find_map(|c| match c {
+                CellInfo::Provisioned(p) => Some(p.cell_id.clone()),
+                _ => None,
+            })
+        })
+    else {
+        return Ok(None);
+    };
+    let dump = admin_ws
+        .dump_full_state(cell_id, None)
+        .await
+        .map_err(|e| format!("dump_full_state: {}", e))?;
+    Ok(Some(dump.source_chain_dump))
+}
+
+/// [`classify_dump_record`] for a v1.3 record (the 0.6 action model).
+fn classify_dump_record_06(rec: &holochain_state_types::SourceChainDumpRecord) -> (String, serde_json::Value) {
+    use holochain_integrity_types::EntryType;
+    let app_def = match rec.action.entry_type() {
+        Some(EntryType::App(def)) => def,
+        Some(EntryType::AgentPubKey) => return ("AgentPubKey".to_string(), serde_json::Value::Null),
+        Some(EntryType::CapClaim) => return ("CapClaim".to_string(), serde_json::Value::Null),
+        Some(EntryType::CapGrant) => return ("CapGrant".to_string(), serde_json::Value::Null),
+        None => return (format!("{:?}", rec.action.action_type()), serde_json::Value::Null),
+    };
+    classify_app_entry(app_def.zome_index.0, app_def.entry_index.0, app_entry_bytes_06(rec))
+}
+
+fn app_entry_bytes_06(rec: &holochain_state_types::SourceChainDumpRecord) -> Option<&[u8]> {
+    rec.entry
+        .as_ref()
+        .and_then(|e| e.as_app_entry())
+        .map(|app_bytes| app_bytes.as_ref().bytes().as_slice())
+}
+
+/// What the migration copied from v1.3 to v1.4: the polls (by their v1.3
+/// hash), the polls whose votes it cast again on v1.4, and the drafts and
+/// vote reasons. Such a record is on both chains and the backup's summary
+/// counts it on the 0.7 one.
+struct Copied06 {
+    polls: std::collections::HashSet<String>,
+    voted_polls: std::collections::HashSet<String>,
+    private: std::collections::HashSet<String>,
+}
+
+impl Copied06 {
+    fn from(state: &crate::migration::MigrationState) -> Self {
+        Copied06 {
+            polls: state.polls_migrated.iter().map(|p| p.old_hash.clone()).collect(),
+            voted_polls: state.votes_migrated.iter().map(|v| v.old_poll_hash.clone()).collect(),
+            private: state.private_copied.iter().cloned().collect(),
+        }
+    }
+
+    fn holds(&self, entry_type: &str, action_hash: &str, vote_poll: Option<&str>) -> bool {
+        match entry_type {
+            "Poll" => self.polls.contains(action_hash),
+            "Vote" => vote_poll.is_some_and(|p| self.voted_polls.contains(p)),
+            "EncryptedEntry" => self.private.contains(action_hash),
+            _ => false,
+        }
+    }
 }
 
 /// Test harness only (feature `harness`): write the shapes ProofPoll 0.4.x
@@ -2700,4 +2835,36 @@ pub(crate) async fn harness_v13_encrypted(
     let result = call_zome(client, POLLS_ZOME, "create_encrypted_entry", crate::hc::encode(&input)?).await?;
     let action_hash: ActionHash = crate::hc::decode(&result)?;
     Ok(action_hash.to_string())
+}
+
+#[cfg(test)]
+mod backup_tests {
+    use super::Copied06;
+    use crate::migration::{MigratedPollRecord, MigratedVoteRecord, MigrationState};
+
+    const OWN_POLL_06: &str = "uhCkkn8fJ8VnqKtA2LtNyMfwW0mGfLtqH6b2yyqFMSZr7aN9Q_Cfa";
+    const OWN_POLL_07: &str = "uhCkkpz3Wd4Ko5dTH5Kq4pKm4gM-oq6i0W0b1rQyPBwXc4vO3tZl6";
+    const VOTED_POLL_06: &str = "uhCkkxS1Z1kEw2u9fGhB4sQ0mVYdL3tKzHqA8pRc7nWj5yUe6oDiT";
+    const OTHER_POLL_06: &str = "uhCkk0b7cR2mQ8nJw4kXz9tLp3sVfE6hYqG1aUd5oNiT2rKyWxMcB";
+    const DRAFT_06: &str = "uhCkkT3vJq9Lw0sXn4mB7cYz2kR5pG8hUd1aEoNiW6rKyQxMfVtC";
+
+    #[test]
+    fn a_v13_record_the_migration_copied_counts_once() {
+        let mut state = MigrationState::default();
+        state.polls_migrated.push(MigratedPollRecord { old_hash: OWN_POLL_06.into(), new_hash: OWN_POLL_07.into(), title: "Lunch".into() });
+        state.votes_migrated.push(MigratedVoteRecord { old_poll_hash: VOTED_POLL_06.into(), new_poll_hash: OWN_POLL_07.into(), option_index: 1 });
+        let copied = Copied06::from(&state);
+        // Copied to v1.4: counted on the 0.7 chain only.
+        assert!(copied.holds("Poll", OWN_POLL_06, None));
+        assert!(copied.holds("Vote", "uhCkkVoteActionHashIsNotTheKeyHereQ8nJw4kXz9tLp3sVfE6", Some(VOTED_POLL_06)));
+        // Authored on v1.3 and never copied (a poll created there after the
+        // move, a vote on a poll still on the 0.6 network): counted here.
+        assert!(!copied.holds("Poll", OTHER_POLL_06, None));
+        assert!(!copied.holds("Vote", "uhCkkVoteActionHashIsNotTheKeyHereQ8nJw4kXz9tLp3sVfE6", Some(OTHER_POLL_06)));
+        assert!(!copied.holds("Vote", OWN_POLL_06, None));
+        // A draft or vote reason: copied once `carry_private` recorded it.
+        assert!(!copied.holds("EncryptedEntry", DRAFT_06, None));
+        state.private_copied.push(DRAFT_06.into());
+        assert!(Copied06::from(&state).holds("EncryptedEntry", DRAFT_06, None));
+    }
 }
