@@ -61,12 +61,32 @@ jobs:
         id: version
         run: echo "version=${GITHUB_REF_NAME#proofpoll-v}" >> $GITHUB_OUTPUT
 
+      # The release notes are the README's What's New entry for this version
+      # (the block from "### v<version>" to the next "### v" heading). A
+      # release without one stops here rather than publishing a placeholder.
+      - name: What's new, from the README
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          awk -v head="### v${VERSION} " '
+            index($0, head) == 1 { flag=1; next }
+            flag && /^### v/ { exit }
+            flag && /^## / { exit }
+            flag { print }
+          ' README.md > /tmp/whats-new.md
+          if ! grep -q '[^[:space:]]' /tmp/whats-new.md; then
+            echo "::error::README.md has no What's New entry for v${VERSION} (a '### v${VERSION} - <date>' heading)"
+            exit 1
+          fi
+          cat /tmp/whats-new.md
+
       - name: Create GitHub Release
         id: create-release
         uses: actions/github-script@v8
         with:
           script: |
+            const fs = require('fs');
             const version = "${{ steps.version.outputs.version }}";
+            const whatsNew = fs.readFileSync('/tmp/whats-new.md', 'utf8').trim();
             // Tags like proofpoll-v1.4.0 are stable; -betaN / -rcN are
             // pre-releases. Marking pre-releases correctly keeps them out
             // of GitHub's "Latest" slot when published.
@@ -80,33 +100,32 @@ jobs:
             const winPublisher = (process.env.WINDOWS_PUBLISHER || '').trim();
             const macSigned = process.env.MACOS_SIGNED === 'true';
             const windowsLine = winSigned
-              ? `- **Windows** — \`.exe\` installer or \`.msi\`${winPublisher ? ` (code-signed; verified publisher **${winPublisher}**)` : ' (code-signed)'}`
+              ? `- **Windows:** \`.exe\` installer or \`.msi\`${winPublisher ? ` (code-signed; verified publisher **${winPublisher}**)` : ' (code-signed)'}`
               : isBeta
-                ? '- **Windows** — `.exe` installer (beta builds are not code-signed — SmartScreen shows a warning on first launch; verify via `SHA256SUMS.txt`)'
-                : '- **Windows** — `.exe` installer or `.msi` (unsigned — SmartScreen shows a warning on first launch; verify via `SHA256SUMS.txt` or build from source)';
+                ? '- **Windows:** `.exe` installer (beta builds are not code-signed, so SmartScreen shows a warning on first launch; verify via `SHA256SUMS.txt`)'
+                : '- **Windows:** `.exe` installer or `.msi` (unsigned, so SmartScreen shows a warning on first launch; verify via `SHA256SUMS.txt` or build from source)';
             const macLine = macSigned
-              ? '- **macOS** — `.dmg` (Intel or Apple Silicon, signed + notarized)'
-              : '- **macOS** — `.dmg` (Intel or Apple Silicon; unsigned — Gatekeeper requires right-click → Open on first launch)';
+              ? '- **macOS:** `.dmg` (Intel or Apple Silicon, signed and notarized)'
+              : '- **macOS:** `.dmg` (Intel or Apple Silicon; unsigned, so Gatekeeper requires right-click, Open on first launch)';
             const body = [
               `## ProofPoll v${version}`,
               '',
-              "**Verified polls that can't be faked, censored, or quietly rewritten — running on your own machine, owned by the people who use them.**",
+              "**Verified polls that can't be faked, censored, or quietly rewritten, running on your own machine and owned by the people who use them.**",
               '',
               'ProofPoll is a free, open-source desktop app for polls and votes where the results actually mean something:',
               '',
-              '- **One identity, one vote.** Voters link a verified [Flowsta](https://flowsta.com) identity, so every vote resolves to a single identity — even across all their devices — and duplicates are dropped.',
-              "- **No one can rewrite or delete it.** Polls and votes live on a peer-to-peer Holochain network, replicated and validated across everyone who runs the app. There's no admin who can change a result or take a poll down — not even us.",
-              '- **Private data on a public network.** Attach a private rationale to a vote, or draft a poll before publishing — ProofPoll encrypts it on your machine before it ever leaves.',
+              '- **One identity, one vote.** Voters link a verified [Flowsta](https://flowsta.com) identity, so every vote resolves to a single identity, even across all their devices, and duplicates are dropped.',
+              "- **No one can rewrite or delete it.** Polls and votes live on a peer-to-peer Holochain network, replicated and validated across everyone who runs the app. There's no admin who can change a result or take a poll down, not even us.",
+              '- **Private data on a public network.** Attach a private rationale to a vote, or draft a poll before publishing: ProofPoll encrypts it on your machine before it ever leaves.',
               '',
-              'Built on **[Flowsta Vault](https://flowsta.com/vault/)** (your identity and keys stay on your own machine), and a complete, fork-ready template for any desktop Holochain app — see the [forking guide](https://github.com/WeAreFlowsta/ProofPoll#forking-guide).',
+              'Built on **[Flowsta Vault](https://flowsta.com/vault/)** (your identity and keys stay on your own machine), and a complete, fork-ready template for any desktop Holochain app: see the [forking guide](https://github.com/WeAreFlowsta/ProofPoll#forking-guide).',
               '',
               "### What's new in this release",
-              '<!-- Edit this section with the highlights for this release: new features, fixes, security/integrity changes. -->',
-              '- _See the commit history for full details._',
+              whatsNew,
               '',
               '### Downloads',
               'Pick your platform from the assets below:',
-              '- **Linux** — `.deb` or `.rpm`; betas ship `.deb` only (AppImage is not provided: its sandboxing breaks the embedded Holochain conductor)',
+              '- **Linux:** `.deb` or `.rpm`; betas ship `.deb` only (AppImage is not provided: its sandboxing breaks the embedded Holochain conductor)',
               macLine,
               windowsLine,
               '',

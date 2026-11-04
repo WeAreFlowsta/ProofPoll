@@ -3,7 +3,7 @@
 //! loads) is set aside compressed in `<data dir>/kits/`. A later ProofPoll
 //! that stops bundling the 0.6 line reads a device's own 0.6 chain from it,
 //! offline, after checking every file against the hashes it compiles in.
-//! 0.5.1 keeps both lines, so both kits are cached.
+//! 0.6.0 keeps both lines, so both kits are cached.
 
 use flowsta_hc_lines::kit::{KitBinary, KitCache, KitDescriptor, KitFile};
 use flowsta_hc_lines::Line;

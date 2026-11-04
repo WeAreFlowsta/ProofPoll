@@ -413,8 +413,8 @@ mod tests {
 
     #[test]
     fn a_beta_install_follows_betas_and_the_stable_release_a_stable_one_stable_only() {
-        assert_eq!(channels_for("0.5.1-beta.1"), &["beta", "stable"]);
-        assert_eq!(channels_for("0.5.1"), &["stable"]);
+        assert_eq!(channels_for("0.6.0-beta.1"), &["beta", "stable"]);
+        assert_eq!(channels_for("0.6.0"), &["stable"]);
     }
 
     #[test]

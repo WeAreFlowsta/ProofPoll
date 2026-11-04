@@ -17,6 +17,20 @@ ProofPoll is built on **[Flowsta Vault](https://flowsta.com/vault/)**, which kee
 
 ## What's New
 
+### v0.6.0-beta.1 - 2026-11-04
+- **ProofPoll updates itself.** A new version downloads in the background, is checked against its signed release record and its own signature, and installs when you restart ProofPoll or quit it. "Restart to update" appears in the header when one is ready, and after an update ProofPoll says once what it was updated to. Turn it off in Settings, Updates. A beta follows the betas and then the release. This first beta is installed by hand; versions after it arrive on their own.
+- **Settings.** The header's Identity link is now Settings: an Identity tab, an Updates tab, and this copy's version at the top.
+- **Restoring your key on a new computer keeps your history in one piece.** "Restore my key" now rebuilds that key's history from the network instead of starting a second history under the same key. Before, the new computer could fail to save anything in that session, and its new polls and votes could stop reaching other people. While it restores, ProofPoll says so; it needs other ProofPoll users or the ProofPoll node to be reachable, and keeps trying until they are.
+- **Your polls from before 0.5.0 stay on this computer.** 0.5.0 deleted this computer's copy of the older network (its polls, votes, drafts and vote reasons, the private ones kept nowhere else) when it found that network switched off at start. ProofPoll now switches it back on, or stops with nothing changed.
+- **Starts without a network.** With no connection, ProofPoll starts and shows your polls, then connects by itself once the network answers. Before, it would not start.
+- **The move to 0.5.0's network finishes.** A closed poll stays where it is instead of failing the move on every launch, votes cast on a moved poll's original copy are counted, and drafts and vote reasons written before 0.5.0 are copied over once.
+- **Less memory.** After a first install, each Holochain conductor restarts once to give back the memory the install held.
+- **Resets and restores cover both networks**, and the startup cleanup recognizes all four of ProofPoll's background programs.
+- **Linux with the NVIDIA driver:** the window no longer crashes when you change pages (WebKitGTK 2.52).
+- **Each network's programs are kept aside**, so a later version that no longer ships the older network can still open data that needs it.
+- **Security and build:** updated dependencies (rustls, rustls-webpki, quinn-proto, tar, time and others); every downloaded Holochain program is checked against a pinned SHA-256; the code-signing tool is pinned; a build refuses network credentials that are not valid base64.
+- **For developers and forks:** a headless test run (`scripts/matrix.sh`: two devices, an offline start, the move from 0.4.x data, and a restore onto another device) and a UI suite (`npm run e2e`), both behind debug-only build features that release builds never include; unit tests run on Linux, macOS and Windows for every change to the app's core.
+
 ### v0.5.0 — 2026-10-25
 - **Holochain 0.7.1.** ProofPoll runs on Holochain 0.7.1, and keeps the 0.6.1 line running beside it for a while: polls and votes from before this update stay readable and votable, new polls go on the new network, and your own polls and votes carry over with their original author and time. People still on 0.4.2 keep seeing the polls from before the update and see new ones once they update.
 - **Your other devices count as you, on every device.** Polls and votes cast by your other installs read as yours on a new device too, including installs from before the update.
