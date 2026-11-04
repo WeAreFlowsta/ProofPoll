@@ -93,9 +93,11 @@ flowsta-hc-lines = { git = "https://github.com/WeAreFlowsta/flowsta-hc-lines", r
 
 # The test harness's localhost server (feature `harness`, test builds only).
 axum = { version = "0.7", optional = true, default-features = false, features = ["http1", "json", "tokio"] }
-# The harness's proof check (`/dev/op` "proof_check"): a v1.3 signature
-# verified the way a v1.5 validator would.
-ed25519-dalek = { version = "2.2", optional = true }
+# Carried records (carried.rs): the checks a v1.5 validator runs, run
+# before a record is carried, and the harness's proof check.
+ed25519-dalek = "2.2"
+holo_hash_07 = { package = "holo_hash", version = "=0.7.1", features = ["hashing"] }
+serde_bytes = "0.11"
 # The embedded WebDriver the UI suite drives (feature `e2e`, test builds only).
 tauri-plugin-wdio-webdriver = { version = "1.4", optional = true }
 
@@ -103,7 +105,7 @@ tauri-plugin-wdio-webdriver = { version = "1.4", optional = true }
 # Test builds only (scripts/build-test-binary.sh), never a release build:
 # scripts/check-test-features.mjs refuses them in the default features and
 # in every workflow.
-harness = ["dep:axum", "dep:ed25519-dalek"]
+harness = ["dep:axum"]
 e2e = ["harness", "dep:tauri-plugin-wdio-webdriver"]
 
 [target.'cfg(unix)'.dependencies]

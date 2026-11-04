@@ -40,6 +40,10 @@ use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 mod profiles;
+// The move to v1.5 and the node's carrier use it (in progress: the slices
+// in planning/PROOFPOLL_CARRIER.md); until then only its tests do.
+#[allow(dead_code)]
+mod carried;
 mod vault_probe;
 mod webview_fix;
 mod kits;
