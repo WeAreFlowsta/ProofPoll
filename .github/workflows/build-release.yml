@@ -510,6 +510,9 @@ jobs:
       # ProofPoll reads it only after the release manifest (signed by Team
       # Flowsta, flowsta-dht-node tools/release-manifest.mjs) names the same
       # version.
+      # The links are built from the tag: the release is still a draft here,
+      # and a draft asset's browser_download_url is a temporary untagged-...
+      # address that stops working once the release is published.
       - name: Updater version file
         uses: actions/github-script@v8
         env:
@@ -519,6 +522,7 @@ jobs:
             const { owner, repo } = context.repo;
             const release_id = Number(process.env.release_id);
             const version = context.ref.replace('refs/tags/proofpoll-v', '');
+            const tag = context.ref.replace('refs/tags/', '');
             const { data: assets } = await github.rest.repos.listReleaseAssets({ owner, repo, release_id, per_page: 100 });
             const text = async (a) => Buffer.from((await github.request('GET /repos/{owner}/{repo}/releases/assets/{asset_id}', { owner, repo, asset_id: a.id, headers: { accept: 'application/octet-stream' } })).data).toString('utf8').trim();
             const files = [
@@ -535,7 +539,8 @@ jobs:
               const sig = assets.find((a) => a.name.endsWith(`${suffix}.sig`));
               if (!file || !sig) { console.log(`no updater file for ${suffix}`); continue; }
               const signature = await text(sig);
-              for (const k of keys) platforms[k] = { signature, url: file.browser_download_url };
+              const url = `https://github.com/${owner}/${repo}/releases/download/${tag}/${encodeURIComponent(file.name)}`;
+              for (const k of keys) platforms[k] = { signature, url };
             }
             if (Object.keys(platforms).length === 0) throw new Error('no updater files: is TAURI_SIGNING_PRIVATE_KEY set?');
             const latest = {
