@@ -202,96 +202,105 @@ async fn fetch_manifest(client: &reqwest::Client, channel: &str) -> Option<Vec<u
     }
 }
 
-/// Check once: the manifests, then (only if one passes) the download.
-async fn check_once(app: &tauri::AppHandle, data_dir: &Path) {
+/// Check once: the manifests, then (only if one passes) the download. Says
+/// what it found in one line, so every check shows in the log (field logs
+/// could not tell a quiet updater from one that never ran): Ok for the
+/// info level, Err for warn (it found something that did not verify).
+async fn check_once(app: &tauri::AppHandle, data_dir: &Path) -> Result<String, String> {
     let mut saved = load(data_dir);
-    if !saved.auto() || READY.lock().unwrap().is_some() {
-        return;
+    if !saved.auto() {
+        return Ok("automatic updates are off".into());
     }
-    let (Some(platform), Some(kind)) = (platform(), kind()) else {
-        return;
+    if READY.lock().unwrap().is_some() {
+        return Ok("an update is already waiting to install".into());
+    }
+    let Some(platform) = platform() else {
+        return Ok("not checked: there are no release packages for this platform".into());
     };
-    let client = match reqwest::Client::builder().timeout(Duration::from_secs(30)).build() {
-        Ok(c) => c,
-        Err(e) => {
-            log::warn!("[update] no HTTP client: {}", e);
-            return;
-        }
+    let Some(kind) = kind() else {
+        return Ok("not checked: this copy was not installed from a release package".into());
     };
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("not checked: no HTTP client: {}", e))?;
     let rollout_ticket = ticket(data_dir, &mut saved);
     let version = env!("CARGO_PKG_VERSION");
+    let channels = channels_for(version);
     // The newest release any of this copy's channels offers.
     let mut best: Option<(&str, Release)> = None;
-    for &channel in channels_for(version) {
+    let (mut read, mut verified, mut rolling_out) = (0, 0, false);
+    let mut install_first = None;
+    for &channel in channels {
         let Some(manifest) = fetch_manifest(&client, channel).await else {
             continue;
         };
+        read += 1;
         let installed = Installed { version, last_sequence: saved.last_sequence.get(channel).copied(), rollout_ticket };
         match check(&manifest, &Trust { app: APP_ID, channel, signers: SIGNERS }, &installed) {
             Ok(r) => {
+                verified += 1;
                 if best.as_ref().map_or(true, |(_, b)| compare_versions(&r.version, &b.version) == std::cmp::Ordering::Greater) {
                     best = Some((channel, r));
                 }
             }
-            Err(Refused::NotNewer { .. }) | Err(Refused::Replayed { .. }) | Err(Refused::NotYet { .. }) => {}
+            Err(Refused::NotNewer { .. }) | Err(Refused::Replayed { .. }) => verified += 1,
+            Err(Refused::NotYet { .. }) => {
+                verified += 1;
+                rolling_out = true;
+            }
             Err(Refused::InstallFirst(first)) => {
+                verified += 1;
+                install_first = Some(first.clone());
                 *NOTICE.lock().unwrap() = Some(format!("A newer ProofPoll is out, and it updates from {first} or later. Install {first} from the ProofPoll releases page first; this copy then updates itself again."));
             }
             Err(e) => log::warn!("[update] the {} manifest was refused: {}", channel, e),
         }
     }
     let Some((channel, release)) = best else {
-        return;
+        let on = channels.join(", ");
+        return if let Some(first) = install_first {
+            Ok(format!("a newer release updates only from {} or later: install that one first", first))
+        } else if read == 0 {
+            Ok(format!("no release manifest could be read ({}): offline, or none published yet", on))
+        } else if verified == 0 {
+            Err(format!("no release manifest verified ({}): nothing to install", on))
+        } else if rolling_out {
+            Ok(format!("up to date for now ({}; {}): a newer release is rolling out and reaches this copy later", version, on))
+        } else {
+            Ok(format!("up to date ({}; {})", version, on))
+        };
     };
     let channel = channel.to_string();
     let Some(file) = release.file(platform, kind).cloned() else {
-        log::info!("[update] {} {} has no {} for {}", APP_ID, release.version, kind, platform);
-        return;
+        return Ok(format!("{} {} has no {} for {}", APP_ID, release.version, kind, platform));
     };
     if kind == "msi" {
         // An MSI install is managed by whoever deployed it: say so, never replace it.
         *NOTICE.lock().unwrap() = Some(format!("ProofPoll {} is out. This copy was installed with the Windows Installer (MSI), so it does not update itself: get it from the ProofPoll releases page.", release.version));
-        return;
+        return Ok(format!("{} is out; an MSI install does not update itself", release.version));
     }
-    let endpoint = match url::Url::parse(&latest_json_url(&channel)) {
-        Ok(u) => u,
-        Err(e) => {
-            log::warn!("[update] bad endpoint: {}", e);
-            return;
-        }
-    };
-    let updater = match app.updater_builder().endpoints(vec![endpoint]).and_then(|b| b.build()) {
-        Ok(u) => u,
-        Err(e) => {
-            log::warn!("[update] the updater did not start: {}", e);
-            return;
-        }
-    };
+    let endpoint = url::Url::parse(&latest_json_url(&channel)).map_err(|e| format!("bad endpoint: {}", e))?;
+    let updater = app
+        .updater_builder()
+        .endpoints(vec![endpoint])
+        .and_then(|b| b.build())
+        .map_err(|e| format!("the updater did not start: {}", e))?;
     let update = match updater.check().await {
         Ok(Some(u)) => u,
-        Ok(None) => return,
-        Err(e) => {
-            log::info!("[update] the {} version file was not read: {}", channel, e);
-            return;
-        }
+        Ok(None) => return Err(format!("the signed manifest offers {} but the {} version file nothing newer", release.version, channel)),
+        Err(e) => return Ok(format!("the {} version file was not read: {}", channel, e)),
     };
     if update.version != release.version {
-        log::warn!("[update] the version file names {} but the signed manifest {}: not downloaded", update.version, release.version);
-        return;
+        return Err(format!("the version file names {} but the signed manifest {}: not downloaded", update.version, release.version));
     }
     log::info!("[update] downloading {} {} ({} bytes)", APP_ID, release.version, file.size);
-    let bytes = match update.download(|_, _| {}, || {}).await {
-        Ok(b) => b,
-        Err(e) => {
-            log::warn!("[update] the download failed or its updater signature did not verify: {}", e);
-            return;
-        }
-    };
-    if let Err(e) = check_file(&file, &bytes) {
-        log::warn!("[update] the download is not the file the manifest names: {}", e);
-        return;
-    }
-    log::info!("[update] {} ready: installs at \"Restart to update\" or on quit", release.version);
+    let bytes = update
+        .download(|_, _| {}, || {})
+        .await
+        .map_err(|e| format!("the download failed or its updater signature did not verify: {}", e))?;
+    check_file(&file, &bytes).map_err(|e| format!("the download is not the file the manifest names: {}", e))?;
+    let said = format!("{} ready: installs at \"Restart to update\" or on quit", release.version);
     let info = ReadyInfo { version: release.version.clone(), notes_url: release.notes_url.clone(), changes_line: release.changes_line };
     *READY.lock().unwrap() = Some(Ready {
         update,
@@ -303,6 +312,7 @@ async fn check_once(app: &tauri::AppHandle, data_dir: &Path) {
         sequence: release.sequence,
     });
     let _ = app.emit("update-ready", info);
+    Ok(said)
 }
 
 /// Check on start and every few hours, while this run of ProofPoll lasts.
@@ -310,7 +320,10 @@ pub fn spawn(app: tauri::AppHandle, data_dir: std::path::PathBuf) {
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(FIRST_CHECK_AFTER).await;
         loop {
-            check_once(&app, &data_dir).await;
+            match check_once(&app, &data_dir).await {
+                Ok(said) => log::info!("[update] checked: {}", said),
+                Err(said) => log::warn!("[update] checked: {}", said),
+            }
             tokio::time::sleep(CHECK_EVERY).await;
         }
     });
