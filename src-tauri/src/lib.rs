@@ -58,6 +58,30 @@ fn test_data_dir() -> Option<std::path::PathBuf> {
     None
 }
 
+/// Where proofpoll.log is written: Tauri's log folder, except on macOS.
+/// There Finder shows a folder whose name ends in `.app` as an application,
+/// and Tauri names the log folder after the identifier (`com.proofpoll.app`):
+/// the logs showed as an app called "com.proofpoll" (0.6.0-beta.1,
+/// 2026-11-04). So they go to ~/Library/Logs/ProofPoll, the older ones moved
+/// there once. The identifier stays: it names the data folder too.
+/// Returns the target and, when the older logs were moved, a line saying so.
+fn log_target(app: &tauri::App) -> (tauri_plugin_log::TargetKind, Option<String>) {
+    let file_name = Some("proofpoll".to_string());
+    #[cfg(target_os = "macos")]
+    if let Some((old, new)) = app.path().app_log_dir().ok().and_then(|old| {
+        let new = old.parent()?.join("ProofPoll");
+        Some((old, new))
+    }) {
+        let moved = (old.is_dir() && !new.exists()).then(|| match std::fs::rename(&old, &new) {
+            Ok(()) => format!("[log] the older logs moved from {:?} to {:?}", old, new),
+            Err(e) => format!("[log] the older logs stay in {:?}: {}", old, e),
+        });
+        return (tauri_plugin_log::TargetKind::Folder { path: new, file_name }, moved);
+    }
+    let _ = app;
+    (tauri_plugin_log::TargetKind::LogDir { file_name }, None)
+}
+
 static WEBVIEW_FIX: std::sync::OnceLock<webview_fix::Outcome> = std::sync::OnceLock::new();
 
 pub fn run() {
@@ -85,6 +109,7 @@ pub fn run() {
             // release builds. Release-build silence would make any startup
             // failure invisible to users (and to us); the cost of a small
             // rolling log file is worth the diagnosability.
+            let (log_file, log_moved) = log_target(app);
             app.handle().plugin(
                 tauri_plugin_log::Builder::default()
                     .level(log::LevelFilter::Info)
@@ -97,15 +122,16 @@ pub fn run() {
                     .max_file_size(2_000_000)
                     .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepSome(2))
                     .targets([
-                        tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir {
-                            file_name: Some("proofpoll".to_string()),
-                        }),
+                        tauri_plugin_log::Target::new(log_file),
                         tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout),
                     ])
                     .build(),
             )?;
 
-            log::info!("ProofPoll starting up...");
+            log::info!("ProofPoll starting up (v{})", env!("CARGO_PKG_VERSION"));
+            if let Some(moved) = log_moved {
+                log::info!("{}", moved);
+            }
             log::info!("Data dir: {:?}", data_dir);
 
             // Identity profiles: pick (or create) the profile for the Flowsta
