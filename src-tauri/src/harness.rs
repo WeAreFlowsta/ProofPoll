@@ -141,6 +141,89 @@ async fn chain07() -> Reply {
     }))
 }
 
+/// The carrier's first question (`planning/PROOFPOLL_CARRIER.md`, to prove
+/// 1): can 0.7-side code check a v1.3 record's author with no 0.6 network?
+/// For each app entry this install wrote on v1.3:
+/// 1. the action as Holochain 0.6.1 signs it (`encode`, the bytes lair signs);
+/// 2. the author's signature over those bytes;
+/// 3. those bytes read back with a mirror of the 0.6 action shape built from
+///    0.7 types only (0.7 changed the action shape, so a v1.5 validator has
+///    no 0.6 `Action` to decode into);
+/// 4. the entry hashed with 0.7's hashing, against the hash the action names.
+async fn proof_check() -> Reply {
+    use holochain_client::{AdminWebsocket, CellInfo};
+    use holochain_types::prelude::{encode, SerializedBytes, UnsafeBytes};
+
+    /// The 0.6 action, as far as a check needs it, in 0.7 types.
+    #[derive(serde::Deserialize)]
+    #[serde(tag = "type")]
+    enum Action06 {
+        Create(Create06),
+        #[serde(other)]
+        Other,
+    }
+    #[derive(serde::Deserialize)]
+    struct Create06 {
+        author: holochain_types_07::prelude::AgentPubKey,
+        entry_hash: holochain_types_07::prelude::EntryHash,
+    }
+
+    let admin = match AdminWebsocket::connect(format!("localhost:{}", crate::conductor::admin_port()), Some(crate::conductor::node_origin())).await {
+        Ok(a) => a,
+        Err(e) => return failed(format!("0.6 admin: {}", e)),
+    };
+    let apps = match admin.list_apps(None).await {
+        Ok(a) => a,
+        Err(e) => return failed(format!("list_apps: {}", e)),
+    };
+    let Some(cell_id) = apps
+        .iter()
+        .find(|a| a.installed_app_id == crate::dna::APP_ID_V1_3)
+        .and_then(|app| app.cell_info.values().flat_map(|c| c.iter()).find_map(|c| match c {
+            CellInfo::Provisioned(p) => Some(p.cell_id.clone()),
+            _ => None,
+        }))
+    else {
+        return failed("no v1.3 cell");
+    };
+    let dump = match admin.dump_full_state(cell_id, None).await {
+        Ok(d) => d,
+        Err(e) => return failed(format!("dump_full_state: {}", e)),
+    };
+    let mut checked = Vec::new();
+    for rec in &dump.source_chain_dump.records {
+        let Some(entry) = rec.entry.as_ref().and_then(|e| e.as_app_entry()) else { continue };
+        let entry_bytes = entry.as_ref().bytes().to_vec();
+        let signed = match encode(&rec.action) {
+            Ok(b) => b,
+            Err(e) => return failed(format!("encode: {}", e)),
+        };
+        let author: [u8; 32] = rec.action.author().get_raw_32().try_into().unwrap_or([0u8; 32]);
+        let signature_verifies = ed25519_dalek::VerifyingKey::from_bytes(&author)
+            .map(|key| key.verify_strict(&signed, &ed25519_dalek::Signature::from_bytes(&rec.signature.0)).is_ok())
+            .unwrap_or(false);
+        let (mirror, author_matches, entry_hash_matches) = match rmp_serde::from_slice::<Action06>(&signed) {
+            Ok(Action06::Create(c)) => {
+                use holochain_integrity_types_07::entry::{AppEntryBytes, Entry};
+                let hash = holochain_types_07::prelude::EntryHash::with_data_sync(&Entry::App(AppEntryBytes(SerializedBytes::from(UnsafeBytes::from(entry_bytes.clone())))));
+                ("Create".to_string(), c.author.get_raw_32() == author, hash == c.entry_hash)
+            }
+            Ok(Action06::Other) => ("not a Create".to_string(), false, false),
+            Err(e) => (format!("did not decode: {}", e), false, false),
+        };
+        checked.push(json!({
+            "action_hash": rec.action_address.to_string(),
+            "signature_verifies": signature_verifies,
+            "mirror": mirror,
+            "mirror_author_matches": author_matches,
+            "entry_hash_matches": entry_hash_matches,
+            "signed_bytes": signed.len(),
+            "entry_bytes": entry_bytes.len(),
+        }));
+    }
+    ok(json!({ "records": checked }))
+}
+
 fn s(body: &Value, key: &str) -> String {
     body.get(key).and_then(|v| v.as_str()).unwrap_or_default().to_string()
 }
@@ -224,6 +307,7 @@ async fn op(Ax(app): Ax<tauri::AppHandle>, Json(body): Json<Value>) -> Reply {
         // posts it (it carries this install's escrowed seed).
         "backup" => backup(state, s(&body, "client_id")).await,
         "chain07" => chain07().await,
+        "proof_check" => proof_check().await,
         // What the Vault backup holds for this app: the escrowed seed or none.
         "escrow" => {
             use crate::seed_adopt::EscrowProbe;

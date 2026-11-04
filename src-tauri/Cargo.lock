@@ -5262,6 +5262,7 @@ version = "0.6.0-beta.1"
 dependencies = [
  "axum 0.7.9",
  "base64 0.22.1",
+ "ed25519-dalek",
  "flowsta-hc-lines",
  "flowsta-update-check",
  "hex",
