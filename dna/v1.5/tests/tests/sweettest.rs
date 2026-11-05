@@ -533,6 +533,8 @@ struct VoteV13 {
 /// for a copy already there). The list shows one poll, the first carried;
 /// the old hash opens it; a vote carried onto either copy counts on both,
 /// once; and a voter who voted on one copy cannot vote again on the other.
+/// The local reads (the app's fallback when the network is slow) read the
+/// same.
 #[tokio::test(flavor = "multi_thread")]
 async fn two_copies_of_one_poll_read_as_one() {
     let mut conductor = SweetConductor::standard().await;
@@ -575,8 +577,10 @@ async fn two_copies_of_one_poll_read_as_one() {
     let again: ActionHash = conductor.call(&zome, "carry_vote", CarryInput { carried: v }).await;
     assert_eq!(again, carried_vote, "one vote per voter across both copies");
     for copy in [&first, &second] {
-        let votes: Vec<Record> = conductor.call(&zome, "get_poll_votes", copy.clone()).await;
-        assert_eq!(votes.iter().map(|r| r.action_address().clone()).collect::<Vec<_>>(), vec![carried_vote.clone()]);
+        for read in ["get_poll_votes", "get_poll_votes_local"] {
+            let votes: Vec<Record> = conductor.call(&zome, read, copy.clone()).await;
+            assert_eq!(votes.iter().map(|r| r.action_address().clone()).collect::<Vec<_>>(), vec![carried_vote.clone()], "{read}");
+        }
     }
 
     // A native vote on the first copy; then none on the second.
@@ -587,8 +591,17 @@ async fn two_copies_of_one_poll_read_as_one() {
         .call_fallible(&zome, "cast_vote", CastVoteInput { poll_action_hash: second.clone(), option_index: 1, display_name: None, profile_picture: None })
         .await;
     assert!(format!("{:?}", twice.expect_err("a second vote")).contains("already voted"));
-    let votes: Vec<Record> = conductor.call(&zome, "get_poll_votes", second.clone()).await;
-    assert_eq!(votes.len(), 2, "the carried vote and the native one");
+    for read in ["get_poll_votes", "get_poll_votes_local"] {
+        let votes: Vec<Record> = conductor.call(&zome, read, second.clone()).await;
+        assert_eq!(votes.len(), 2, "the carried vote and the native one ({read})");
+    }
+
+    // A flag on the first copy reads on the second, locally too.
+    let flag: ActionHash = conductor.call(&zome, "flag_poll", FlagPollInput { poll_action_hash: first.clone(), reason: FlagReason::Spam }).await;
+    for read in ["get_poll_flags", "get_poll_flags_local"] {
+        let flags: Vec<Record> = conductor.call(&zome, read, second.clone()).await;
+        assert_eq!(flags.iter().map(|r| r.action_address().clone()).collect::<Vec<_>>(), vec![flag.clone()], "{read}");
+    }
 }
 
 /// Two conductors on a local rendezvous: a poll authored on one is read and

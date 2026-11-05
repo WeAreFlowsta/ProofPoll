@@ -156,7 +156,7 @@ Bundle checksums (sha256 of the committed `.happ`; a rebuilt bundle is a differe
 |---|---|---|
 | v1.3 | | `7cac687ab376a5dbdad453a8b77768edec30c5bd656adb57f7dad5ad69eeb197` |
 | v1.4 | `uhC0kOv01Xt3g5hkRz7dq8SEaw8qD2WzwW8Z6HMJPdL-o0v9ZU52W` | `160f768b90a5e5ae27252af472ea95166782c0949f9df137ad3fd96507928dac` |
-| v1.5 | `uhC0krqNgTCTdT3btM653pAqdnUVRqoVat-VfRTzpXdU92O33UKAh` | `4b0c0e3fc0a80204dde60fc13ee84d517ec448fdd222cb7f94d40d784b5d678c` |
+| v1.5 | `uhC0krqNgTCTdT3btM653pAqdnUVRqoVat-VfRTzpXdU92O33UKAh` | `5966ce50b950439ce386849e1c6ad3a23d270cbd845997f296a261102b812751` |
 
 ## Encrypted Private Data (v1.3)
 

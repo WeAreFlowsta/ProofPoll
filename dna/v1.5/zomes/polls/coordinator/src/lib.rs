@@ -330,7 +330,18 @@ pub fn cast_vote(input: CastVoteInput) -> ExternResult<ActionHash> {
 /// The votes on a poll, from every copy of it here, each original once.
 #[hdk_extern]
 pub fn get_poll_votes(poll_action_hash: ActionHash) -> ExternResult<Vec<Record>> {
-    filed_records(&poll_action_hash, LinkTypes::PollToVotes, |r| {
+    poll_votes(&poll_action_hash, GetStrategy::default())
+}
+
+/// The votes on a poll this cell holds, without asking the network (as
+/// `get_all_polls_local`).
+#[hdk_extern]
+pub fn get_poll_votes_local(poll_action_hash: ActionHash) -> ExternResult<Vec<Record>> {
+    poll_votes(&poll_action_hash, GetStrategy::Local)
+}
+
+fn poll_votes(poll: &ActionHash, strategy: GetStrategy) -> ExternResult<Vec<Record>> {
+    filed_records(poll, LinkTypes::PollToVotes, strategy, |r| {
         r.entry().to_app_option::<Vote>().ok().flatten().and_then(|v| v.carried_from).map(|c| c.original_action_hash)
     })
 }
@@ -373,7 +384,18 @@ pub fn flag_poll(input: FlagPollInput) -> ExternResult<ActionHash> {
 /// The flags on a poll, from every copy of it here, each original once.
 #[hdk_extern]
 pub fn get_poll_flags(poll_action_hash: ActionHash) -> ExternResult<Vec<Record>> {
-    filed_records(&poll_action_hash, LinkTypes::PollToFlags, |r| {
+    poll_flags(&poll_action_hash, GetStrategy::default())
+}
+
+/// The flags on a poll this cell holds, without asking the network (as
+/// `get_all_polls_local`).
+#[hdk_extern]
+pub fn get_poll_flags_local(poll_action_hash: ActionHash) -> ExternResult<Vec<Record>> {
+    poll_flags(&poll_action_hash, GetStrategy::Local)
+}
+
+fn poll_flags(poll: &ActionHash, strategy: GetStrategy) -> ExternResult<Vec<Record>> {
+    filed_records(poll, LinkTypes::PollToFlags, strategy, |r| {
         r.entry().to_app_option::<Flag>().ok().flatten().and_then(|f| f.carried_from).map(|c| c.original_action_hash)
     })
 }
@@ -823,24 +845,29 @@ impl Copies {
 
 /// The `link_type` links from `poll` and from every other copy of it.
 fn links_on_every_copy(poll: &ActionHash, link_type: LinkTypes) -> ExternResult<Vec<Link>> {
+    links_on_every_copy_with(poll, link_type, GetStrategy::default())
+}
+
+/// [`links_on_every_copy`], or from this cell's own store alone for `GetStrategy::Local`.
+fn links_on_every_copy_with(poll: &ActionHash, link_type: LinkTypes, strategy: GetStrategy) -> ExternResult<Vec<Link>> {
     let mut links = Vec::new();
-    for copy in Copies::read()?.siblings(poll) {
-        links.extend(get_links(LinkQuery::try_new(copy, link_type.clone())?, GetStrategy::default())?);
+    for copy in Copies::read_with(strategy)?.siblings(poll) {
+        links.extend(get_links(LinkQuery::try_new(copy, link_type.clone())?, strategy)?);
     }
     Ok(links)
 }
 
 /// The records filed under `poll` and every other copy of it, each carried
 /// original once (`original_of` names a carried record's original).
-fn filed_records(poll: &ActionHash, link_type: LinkTypes, original_of: impl Fn(&Record) -> Option<ActionHash>) -> ExternResult<Vec<Record>> {
+fn filed_records(poll: &ActionHash, link_type: LinkTypes, strategy: GetStrategy, original_of: impl Fn(&Record) -> Option<ActionHash>) -> ExternResult<Vec<Record>> {
     let mut records: Vec<Record> = Vec::new();
     let mut originals = BTreeSet::new();
-    for link in links_on_every_copy(poll, link_type)? {
+    for link in links_on_every_copy_with(poll, link_type, strategy)? {
         let Ok(hash) = ActionHash::try_from(link.target) else { continue };
         if records.iter().any(|r| r.action_address() == &hash) {
             continue;
         }
-        if let Some(record) = get_record(hash)? {
+        if let Some(record) = get_record_with(hash, strategy)? {
             if original_of(&record).is_some_and(|o| !originals.insert(o)) {
                 continue;
             }

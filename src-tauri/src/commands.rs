@@ -395,6 +395,19 @@ pub(crate) async fn call_zome_within(
 /// How long a list waits on the network before it shows what this device holds.
 const LIST_WAIT_SECS: u64 = 15;
 
+/// A read of `fn_name` on the active line that waits at most
+/// [`LIST_WAIT_SECS`] on the network, then shows what this device holds
+/// (the coordinator's `<fn_name>_local`).
+async fn read_or_local(client: &crate::hc::AppClient, fn_name: &str, payload: Vec<u8>) -> Result<Vec<u8>, String> {
+    match call_zome_within(client, POLLS_ZOME, fn_name, payload.clone(), LIST_WAIT_SECS).await {
+        Ok(r) => Ok(r),
+        Err(e) => {
+            log::warn!("[polls] {} did not come from the network ({}): showing what this device holds", fn_name, e);
+            call_zome(client, POLLS_ZOME, &format!("{}_local", fn_name), payload).await
+        }
+    }
+}
+
 /// For forking: you don't need to change this function — just call it
 /// with your zome name and function name from your Tauri commands.
 /// Call a zome function on either line. `payload` and the result are the
@@ -1030,14 +1043,21 @@ fn client_for<'a>(state: &'a AppState, dna_version: &str) -> &'a tokio::sync::Mu
     }
 }
 
-/// A poll's flag records on one network.
+/// A poll's flag records on one network (on the active one, what this
+/// device holds when the network does not answer in time).
 async fn flag_records(
     slot: &tokio::sync::Mutex<Option<crate::hc::AppClient>>,
     poll: &ActionHash,
+    active: bool,
 ) -> Result<Vec<crate::hc::RecordView>, String> {
     let client = slot.lock().await;
     let client = client.as_ref().ok_or("This poll's network is not available")?;
-    let result = call_zome(client, POLLS_ZOME, "get_poll_flags", crate::hc::encode(poll)?).await?;
+    let payload = crate::hc::encode(poll)?;
+    let result = if active {
+        read_or_local(client, "get_poll_flags", payload).await?
+    } else {
+        call_zome(client, POLLS_ZOME, "get_poll_flags", payload).await?
+    };
     crate::hc::records(client.line(), &result)
 }
 
@@ -1051,7 +1071,7 @@ async fn olds_of(state: &AppState, new_hash: &str) -> Vec<ActionHash> {
             let client = state.app_client.lock().await;
             let Some(client) = client.as_ref() else { return Vec::new() };
             let Ok(payload) = crate::hc::encode(&()) else { return Vec::new() };
-            let Ok(r) = call_zome(client, POLLS_ZOME, "get_all_migration_mappings", payload).await else { return Vec::new() };
+            let Ok(r) = read_or_local(client, "get_all_migration_mappings", payload).await else { return Vec::new() };
             let mut from = std::collections::HashMap::<String, Vec<String>>::new();
             for rec in crate::hc::records(client.line(), &r).unwrap_or_default() {
                 if let Ok(entry) = decode_entry::<MigratedPollEntry>(&rec) {
@@ -1067,7 +1087,8 @@ async fn olds_of(state: &AppState, new_hash: &str) -> Vec<ActionHash> {
 }
 
 /// The records `fn_name` (votes or flags) returns for `poll` on every older
-/// line that may hold some under one of its older hashes (v1.4, v1.3).
+/// line that may hold some under one of its older hashes (v1.4, v1.3), each
+/// read waiting at most [`LIST_WAIT_SECS`].
 async fn on_older_lines(state: &AppState, olds: &[ActionHash], fn_name: &str) -> Vec<crate::hc::RecordView> {
     let mut out = Vec::new();
     for slot in [&state.app_client_v1_4, &state.app_client_v1_3] {
@@ -1075,7 +1096,7 @@ async fn on_older_lines(state: &AppState, olds: &[ActionHash], fn_name: &str) ->
         let Some(client) = client.as_ref() else { continue };
         for old in olds {
             let Ok(payload) = crate::hc::encode(old) else { continue };
-            match call_zome(client, POLLS_ZOME, fn_name, payload).await {
+            match call_zome_within(client, POLLS_ZOME, fn_name, payload, LIST_WAIT_SECS).await {
                 Ok(r) => out.extend(crate::hc::records(client.line(), &r).unwrap_or_default()),
                 Err(e) => log::debug!("[{}] an older copy was not read: {}", fn_name, e),
             }
@@ -1090,21 +1111,30 @@ static IDENTITIES: Mutex<Option<std::collections::HashMap<String, (std::time::In
 
 async fn identities_of(state: &std::sync::Arc<AppState>, key: &str) -> Vec<String> {
     let cached = IDENTITIES.lock().unwrap().as_ref().and_then(|m| m.get(key).cloned());
-    if let Some((at, ids)) = cached {
+    if let Some((at, ids)) = &cached {
         if at.elapsed() < std::time::Duration::from_secs(600) {
-            return ids;
+            return ids.clone();
         }
     }
     let Ok(agent) = AgentPubKey::try_from(key.to_string()) else { return Vec::new() };
-    let mut ids: Vec<String> = Vec::new();
-    for network in LINK_NETWORKS {
-        for h in hubs_on(state, &agent, network).await {
-            let h = h.to_string();
-            if !ids.contains(&h) {
-                ids.push(h);
+    let lookup = async {
+        let mut ids: Vec<String> = Vec::new();
+        for network in LINK_NETWORKS {
+            for h in hubs_on(state, &agent, network).await {
+                let h = h.to_string();
+                if !ids.contains(&h) {
+                    ids.push(h);
+                }
             }
         }
-    }
+        ids
+    };
+    // At most LIST_WAIT_SECS, as the reads it counts: then the last answer
+    // kept, or the key alone, and asked again next time.
+    let Ok(ids) = tokio::time::timeout(std::time::Duration::from_secs(LIST_WAIT_SECS), lookup).await else {
+        log::debug!("[identity] {}'s linked identities did not come in {} s", key, LIST_WAIT_SECS);
+        return cached.map(|(_, ids)| ids).unwrap_or_default();
+    };
     IDENTITIES.lock().unwrap().get_or_insert_with(Default::default).insert(key.to_string(), (std::time::Instant::now(), ids.clone()));
     ids
 }
@@ -1162,7 +1192,11 @@ pub async fn get_poll_votes(
     let mut records: Vec<crate::hc::RecordView> = {
         let client = client_for(&state, &dna_version).lock().await;
         let client = client.as_ref().ok_or(format!("The v{} network is not available", dna_version))?;
-        let result = call_zome(client, POLLS_ZOME, "get_poll_votes", payload).await?;
+        let result = if active {
+            read_or_local(client, "get_poll_votes", payload).await?
+        } else {
+            call_zome(client, POLLS_ZOME, "get_poll_votes", payload).await?
+        };
         crate::hc::records(client.line(), &result)?
     };
     // A poll on the active network: add the votes still on an older line
@@ -2091,10 +2125,10 @@ pub async fn get_poll_flags(
     let hash = ActionHash::try_from(poll_action_hash)
         .map_err(|e| format!("Invalid action hash: {:?}", e))?;
     let version = dna_version.unwrap_or_default();
-    let mut records = flag_records(client_for(&state, &version), &hash).await?;
+    let active = !matches!(version.as_str(), "1.0" | "1.1" | "1.2" | "1.3" | "1.4");
+    let mut records = flag_records(client_for(&state, &version), &hash, active).await?;
     // A poll on the active network: add the flags still on an older line
     // under one of its older hashes, by anyone with no flag here.
-    let active = !matches!(version.as_str(), "1.0" | "1.1" | "1.2" | "1.3" | "1.4");
     if active {
         let olds = olds_of(&state, &hash.to_string()).await;
         if !olds.is_empty() {
