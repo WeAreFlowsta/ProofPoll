@@ -260,8 +260,12 @@ export default component$(() => {
             } catch {
               // Marker unreadable — the identity page still offers the flow
             }
-            if (s.agent_pub_key) {
-              const state = await computeLinkState(s.agent_pub_key);
+            // The key the active network (v1.5) runs as: its link is made
+            // for that key (the 0.7 line's, when the 0.6 one was
+            // conductor-born).
+            const linkKey = s.agent_pub_key_07 ?? s.agent_pub_key;
+            if (linkKey) {
+              const state = await computeLinkState(linkKey);
               linkState.value = state;
               // Basic writes need a signed-in install, not a live Vault -
               // `offline` (linked, Vault locked or closed) is writable.
@@ -290,21 +294,15 @@ export default component$(() => {
               // background so peers can verify. Safe against account
               // switches: commit_identity_link hard-refuses binding any
               // identity other than the one already linked AND live.
-              // The check reads the active network only: counting v1.3 links
-              // too, it never re-created a link the move left on v1.3. An
-              // install whose v1.4 key differs from its 0.6 one (a
-              // conductor-born 0.6 agent) is skipped: the link the Vault
-              // signs names the 0.6 key, which v1.4 refuses.
-              const keysDiffer = !!s.agent_pub_key_07 && s.agent_pub_key_07 !== s.agent_pub_key;
-              if (state === "linked" && keysDiffer) {
-                console.log("[ProofPoll] identity link on v1.4 not re-created: this install's v1.4 key differs from its 0.6 key");
-              }
-              if (state === "linked" && !keysDiffer) {
-                const dhtLinked = await getLinkedAgentsActive(s.agent_pub_key)
+              // The check reads the active network only, and its own links
+              // only: counting older networks' or carried links, it never
+              // linked this key there.
+              if (state === "linked") {
+                const dhtLinked = await getLinkedAgentsActive(linkKey)
                   .then((a) => a.length > 0)
                   .catch(() => true);
                 if (!dhtLinked) {
-                  const agentPubKey = s.agent_pub_key;
+                  const agentPubKey = linkKey;
                   import("@flowsta/holochain")
                     .then(async ({ linkFlowstaIdentity }) => {
                       try {
@@ -403,14 +401,15 @@ export default component$(() => {
     // Poll link status so header updates after link/unlink on identity page
     const linkPoll = setInterval(async () => {
       const s = status.value;
-      if (!s?.ready || !s.agent_pub_key) return;
+      const linkKey = s?.agent_pub_key_07 ?? s?.agent_pub_key;
+      if (!s?.ready || !linkKey) return;
       try {
         // Same state-machine as the initial poll — recompute on every tick.
         // The user could have locked / unlocked Vault, switched accounts,
         // or unlinked from the Vault UI at any moment, and the layout
         // banner needs to reflect it within the polling cadence.
         const wasLinked = linked.value;
-        const nextState = await computeLinkState(s.agent_pub_key);
+        const nextState = await computeLinkState(linkKey);
 
         linkState.value = nextState;
         const nowLinked = nextState === "linked";

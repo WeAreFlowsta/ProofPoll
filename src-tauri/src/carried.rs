@@ -1,5 +1,5 @@
 //! Carried records: a v1.3 or v1.4 record written again on v1.5 with its
-//! original record attached (`planning/PROOFPOLL_CARRIER.md`). The v1.5
+//! original record attached. The v1.5
 //! integrity zome checks that proof; this module builds it from a record
 //! read on the older DNA, and runs the same checks first, so nothing is
 //! submitted that the network would refuse.
@@ -76,6 +76,52 @@ pub fn from_v14(
     })
 }
 
+/// The records a v1.3 or v1.4 zome call returned (`Vec<Record>`), each as a
+/// carried one; records with no app entry are left out.
+pub fn from_records(dna: &str, bytes: &[u8]) -> Result<Vec<Carried>, String> {
+    match dna {
+        "1.3" => {
+            let recs: Vec<holochain_types::prelude::Record> = crate::hc::decode(bytes)?;
+            Ok(recs.iter().filter_map(|r| from_record_06(r).transpose()).collect::<Result<_, _>>()?)
+        }
+        "1.4" => {
+            let recs: Vec<holochain_types_07::prelude::Record> = holochain_types_07::prelude::ExternIO::from(bytes.to_vec())
+                .decode()
+                .map_err(|e| format!("Failed to decode records: {}", e))?;
+            Ok(recs.iter().filter_map(|r| from_record_07(r).transpose()).collect::<Result<_, _>>()?)
+        }
+        other => Err(format!("records are not carried from DNA {other}")),
+    }
+}
+
+/// The record a v1.3 or v1.4 zome call returned (`Option<Record>`), as a
+/// carried one.
+pub fn from_record(dna: &str, bytes: &[u8]) -> Result<Option<Carried>, String> {
+    match dna {
+        "1.3" => {
+            let rec: Option<holochain_types::prelude::Record> = crate::hc::decode(bytes)?;
+            rec.as_ref().map_or(Ok(None), from_record_06)
+        }
+        "1.4" => {
+            let rec: Option<holochain_types_07::prelude::Record> = holochain_types_07::prelude::ExternIO::from(bytes.to_vec())
+                .decode()
+                .map_err(|e| format!("Failed to decode record: {}", e))?;
+            rec.as_ref().map_or(Ok(None), from_record_07)
+        }
+        other => Err(format!("records are not carried from DNA {other}")),
+    }
+}
+
+fn from_record_06(r: &holochain_types::prelude::Record) -> Result<Option<Carried>, String> {
+    let Some(entry) = r.entry().as_option().and_then(|e| e.as_app_entry()) else { return Ok(None) };
+    from_v13(r.action(), r.signature(), entry.as_ref().bytes(), None).map(Some)
+}
+
+fn from_record_07(r: &holochain_types_07::prelude::Record) -> Result<Option<Carried>, String> {
+    let Some(entry) = r.entry().as_option().and_then(|e| e.as_app_entry()) else { return Ok(None) };
+    from_v14(r.action(), r.signature(), entry.as_ref().bytes(), None).map(Some)
+}
+
 /// An action's hash on its network: blake2b-256 of its encoded bytes.
 fn action_hash_of(encoded: &[u8]) -> ActionHash {
     ActionHash::from_raw_32(holo_hash_07::encode::blake2b_256(encoded))
@@ -117,11 +163,7 @@ pub fn check(c: &Carried) -> Result<(u8, u8), String> {
     if action_hash_of(&c.original_action) != c.original_action_hash {
         return Err("the original action does not hash to the carried action hash".to_string());
     }
-    let key: [u8; 32] = c.original_author.get_raw_32().try_into().map_err(|_| "an agent key is 32 bytes".to_string())?;
-    let verifies = ed25519_dalek::VerifyingKey::from_bytes(&key)
-        .map(|k| k.verify_strict(&c.original_action, &ed25519_dalek::Signature::from_bytes(&c.original_signature.0)).is_ok())
-        .unwrap_or(false);
-    if !verifies {
+    if !verifies(&c.original_author, &c.original_signature, &c.original_action) {
         return Err("the original author's signature does not verify".to_string());
     }
     use holochain_integrity_types_07::entry::{AppEntryBytes, Entry};
@@ -139,6 +181,27 @@ pub fn check(c: &Carried) -> Result<(u8, u8), String> {
 pub struct LaterCopy {
     pub poll: Carried,
     pub mapping: Carried,
+    /// When the later copy is under another key of the first record's
+    /// author: that author's signature over `key_vouch_payload` of the later
+    /// key.
+    #[serde(default)]
+    pub vouch: Option<Signature>,
+}
+
+/// What a key signs to vouch that `other` is also its holder's (the v1.5
+/// integrity zome's `key_vouch_payload`).
+pub fn key_vouch_payload(other: &AgentPubKey) -> Vec<u8> {
+    let mut payload = b"ProofPoll: this key is also mine\n".to_vec();
+    payload.extend_from_slice(other.get_raw_39());
+    payload
+}
+
+/// Whether `signature` by `key` verifies over `message`.
+fn verifies(key: &AgentPubKey, signature: &Signature, message: &[u8]) -> bool {
+    let Ok(key) = <[u8; 32]>::try_from(key.get_raw_32()) else { return false };
+    ed25519_dalek::VerifyingKey::from_bytes(&key)
+        .map(|k| k.verify_strict(message, &ed25519_dalek::Signature::from_bytes(&signature.0)).is_ok())
+        .unwrap_or(false)
 }
 
 /// The input of v1.5's `map_later_copy`: the poll's one copy there.
@@ -160,8 +223,9 @@ struct MappingFields {
 }
 
 /// The v1.5 integrity zome's check of a later copy of `first` (the record
-/// the poll's copy there carries), run first so a mapping the network would
-/// refuse is never submitted.
+/// the poll's copy there carries): by one person, one key or the first
+/// record's key vouching for the later one. Run first so a mapping the
+/// network would refuse is never submitted.
 pub fn check_later_copy(first: &Carried, later: &LaterCopy) -> Result<(), String> {
     if later.poll.poll_mapping.is_some() || later.mapping.poll_mapping.is_some() {
         return Err("a later copy's records name no poll mapping".to_string());
@@ -172,8 +236,12 @@ pub fn check_later_copy(first: &Carried, later: &LaterCopy) -> Result<(), String
     if !(first.original_dna == "1.3" && later.poll.original_dna == "1.4") {
         return Err("a later copy is on a later DNA than the first record".to_string());
     }
-    if later.poll.original_author != first.original_author || later.mapping.original_author != first.original_author {
-        return Err("a later copy and its mapping are by the first record's author".to_string());
+    if later.mapping.original_author != later.poll.original_author {
+        return Err("a later copy and its mapping are by one author".to_string());
+    }
+    let vouched = || later.vouch.as_ref().is_some_and(|v| verifies(&first.original_author, v, &key_vouch_payload(&later.poll.original_author)));
+    if later.poll.original_author != first.original_author && !vouched() {
+        return Err("a later copy is by the first record's author or a key it vouches for".to_string());
     }
     if check(&later.poll).map_err(|e| format!("the later copy: {e}"))? != POLL_KIND {
         return Err("the later copy: the original is another kind of entry".to_string());
@@ -263,7 +331,7 @@ mod tests {
                 let m: MappingFields = holochain_types_07::prelude::decode(&mapping.original_entry).unwrap();
                 let first = polls13.iter().find(|p| p.original_action_hash == m.old_action_hash).unwrap().clone();
                 let poll = polls14.iter().find(|p| p.original_action_hash == m.new_action_hash).unwrap().clone();
-                (first, LaterCopy { poll, mapping })
+                (first, LaterCopy { poll, mapping, vouch: None })
             })
             .collect()
     }
@@ -278,14 +346,20 @@ mod tests {
         }
         let (first_a, later_a) = &moved[0];
         let (_, later_b) = &moved[1];
-        let swapped = LaterCopy { poll: later_a.poll.clone(), mapping: later_b.mapping.clone() };
+        let swapped = LaterCopy { poll: later_a.poll.clone(), mapping: later_b.mapping.clone(), vouch: None };
         assert!(check_later_copy(first_a, &swapped).unwrap_err().contains("maps the first record"));
-        let wrong_dna = LaterCopy { poll: first_a.clone(), mapping: later_a.mapping.clone() };
+        let wrong_dna = LaterCopy { poll: first_a.clone(), mapping: later_a.mapping.clone(), vouch: None };
         assert!(check_later_copy(first_a, &wrong_dna).unwrap_err().contains("different DNAs"));
         let mut other_author = later_a.clone();
         other_author.mapping.original_author = AgentPubKey::from_raw_32(vec![7u8; 32]);
-        assert!(check_later_copy(first_a, &other_author).unwrap_err().contains("first record's author"));
-        let poll_as_mapping = LaterCopy { poll: later_a.poll.clone(), mapping: later_a.poll.clone() };
+        assert!(check_later_copy(first_a, &other_author).unwrap_err().contains("by one author"));
+        let mut other_key = later_a.clone();
+        other_key.poll.original_author = AgentPubKey::from_raw_32(vec![7u8; 32]);
+        other_key.mapping.original_author = other_key.poll.original_author.clone();
+        assert!(check_later_copy(first_a, &other_key).unwrap_err().contains("a key it vouches for"));
+        other_key.vouch = Some(Signature([7u8; 64]));
+        assert!(check_later_copy(first_a, &other_key).unwrap_err().contains("a key it vouches for"));
+        let poll_as_mapping = LaterCopy { poll: later_a.poll.clone(), mapping: later_a.poll.clone(), vouch: None };
         assert!(check_later_copy(first_a, &poll_as_mapping).unwrap_err().contains("another kind of entry"));
     }
 

@@ -31,6 +31,7 @@ import {
   type VoteData,
   type FlagData,
   type FlagReason,
+  type DnaVersion,
 } from "~/lib/holochain";
 
 export default component$(() => {
@@ -43,7 +44,7 @@ export default component$(() => {
   const pollHashSig = useSignal<string>("");
   const poll = useSignal<Poll | null>(null);
   const pollAuthor = useSignal<string | null>(null);
-  const pollDnaVersion = useSignal<"1.0" | "1.1" | "1.2" | "1.3" | "1.4">("1.4");
+  const pollDnaVersion = useSignal<DnaVersion>("1.5");
   const votes = useSignal<VoteData[]>([]);
   const myAgent = useSignal<string | null>(null);
   // All agent keys belonging to this user (recognition only). See loadMyAgentSet.
@@ -80,10 +81,13 @@ export default component$(() => {
       return;
     }
     try {
-      const status = await invoke<{ agent_pub_key: string | null }>(
+      const status = await invoke<{ agent_pub_key: string | null; agent_pub_key_07?: string | null }>(
         "get_app_status",
       );
       myAgent.value = status.agent_pub_key;
+      // This install's own keys: the 0.7 line's differs when the 0.6 one
+      // was conductor-born.
+      const mine = new Set([status.agent_pub_key, status.agent_pub_key_07].filter((k): k is string => !!k));
       myAgentSet.value = await loadMyAgentSet(status.agent_pub_key);
 
       // Get the poll first so we know which DHT it lives on (dna_version).
@@ -98,12 +102,16 @@ export default component$(() => {
       poll.value = pollResult.poll;
       pollAuthor.value = pollResult.author;
       pollDnaVersion.value = pollResult.dna_version;
+      // An older hash opens its copy on the active network: everything
+      // after this is about that copy.
+      const thisPoll = pollResult.hash ?? pollHash;
+      pollHashSig.value = thisPoll;
 
       // Fetch votes and flags from the poll's own cell (v1.0 has no flags).
       const [votesResult, flagsResult] = await Promise.all([
-        getPollVotes(pollHash, pollResult.dna_version),
+        getPollVotes(thisPoll, pollResult.dna_version),
         pollResult.dna_version !== "1.0"
-          ? getPollFlags(pollHash, pollResult.dna_version).catch(() => [] as FlagData[])
+          ? getPollFlags(thisPoll, pollResult.dna_version).catch(() => [] as FlagData[])
           : Promise.resolve([] as FlagData[]),
       ]);
 
@@ -120,10 +128,10 @@ export default component$(() => {
         // can only be read/written by it, and unflag can only remove this
         // agent's flag. So these stay bound to the current local agent, not the
         // wider set.
-        const myCurrentVote = votesResult.find((v) => v.author === myAgent.value);
+        const myCurrentVote = votesResult.find((v) => mine.has(v.author));
         myVoteHash.value = myCurrentVote?.vote.hash ?? null;
         myFlag.value = flagsResult.find(
-          (f) => f.author === myAgent.value,
+          (f) => mine.has(f.author),
         ) ?? null;
 
         // Load existing rationale if this agent voted (its own encrypted note).

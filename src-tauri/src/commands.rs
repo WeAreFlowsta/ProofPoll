@@ -40,6 +40,26 @@ struct MigratedPollEntry {
     migrated_at: i64,
 }
 
+/// What the app reads of a carried record's proof (v1.5's `Carried`): who
+/// wrote the original and its hash. Never sent to the frontend.
+#[derive(serde::Deserialize, Clone, Debug)]
+pub struct Origin {
+    pub original_action_hash: ActionHash,
+    pub original_author: AgentPubKey,
+}
+
+/// Two polls that ask the same question: the same title, description,
+/// options and closing time (a copy made by the 0.5 move keeps all four).
+fn same_question(a: &Poll, b: &Poll) -> bool {
+    a.title == b.title && a.description == b.description && a.options == b.options && a.closes_at == b.closes_at
+}
+
+/// The author a record counts for: the original author its proof names
+/// when it was carried, else its writer.
+fn counted_author(record: &crate::hc::RecordView, origin: &Option<Origin>) -> String {
+    origin.as_ref().map(|o| o.original_author.to_string()).unwrap_or_else(|| record.author.clone())
+}
+
 /// Mirrors PollType in the v1.2 integrity zome.
 ///
 /// Must use the same serde representation so `decode_entry` works: rmp_serde
@@ -63,6 +83,9 @@ pub struct Poll {
     /// None for v1.0/v1.1 polls (no poll_type field — treated as Anonymous).
     #[serde(default)]
     pub poll_type: Option<PollType>,
+    /// v1.5: where a carried poll came from.
+    #[serde(default, skip_serializing)]
+    pub carried_from: Option<Origin>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
@@ -75,6 +98,9 @@ pub struct Vote {
     /// Only present on v1.2 public poll votes.
     #[serde(default)]
     pub profile_picture: Option<String>,
+    /// v1.5: where a carried vote came from.
+    #[serde(default, skip_serializing)]
+    pub carried_from: Option<Origin>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug)]
@@ -119,6 +145,9 @@ pub struct PollListItem {
 
 #[derive(serde::Serialize)]
 pub struct PollDetail {
+    /// The poll this detail is of: the hash asked for, or the copy on the
+    /// active network an older hash opens.
+    pub hash: String,
     pub poll: Poll,
     pub author: String,
     /// Which DHT this poll lives on: "1.0", "1.1", or "1.2".
@@ -158,8 +187,11 @@ pub struct AppState {
     /// The key the 0.7 line (v1.4) runs as: the same as `agent_pub_key`
     /// unless the 0.6 agent was conductor-born, before the app-held seed.
     pub agent_pub_key_07: Mutex<Option<String>>,
-    /// Active (v1.4, Holochain 0.7.1) app client for all reads and writes.
+    /// Active (v1.5, Holochain 0.7.1) app client for all reads and writes.
     pub app_client: tokio::sync::Mutex<Option<crate::hc::AppClient>>,
+    /// v1.4 app client (the same conductor): the move's source, and reads of
+    /// what is not carried yet.
+    pub app_client_v1_4: tokio::sync::Mutex<Option<crate::hc::AppClient>>,
     /// v1.3 app client (Holochain 0.6.1): the migration source, and reads and
     /// votes for polls not yet migrated.
     pub app_client_v1_3: tokio::sync::Mutex<Option<crate::hc::AppClient>>,
@@ -177,11 +209,12 @@ pub struct AppState {
     /// proofpoll.log. The SDK and the write trigger only ever said it in the
     /// webview console, so a stale backup date had no explanation (P6).
     pub last_backup_outcome: Mutex<Option<BackupOutcome>>,
-    /// Migrated poll (its v1.4 hash) -> the v1.3 poll it came from, from the
-    /// active line's mappings; `None` until first read. Votes cast on the
-    /// old copy (an install still on 0.4.x, or a vote that could not move)
-    /// are read from there as well, or they vanished from the count.
-    pub migrated_from: Mutex<Option<std::collections::HashMap<String, String>>>,
+    /// A poll on the active network (its hash) -> the older hashes it came
+    /// from (its first record's, and each later copy's), from the active
+    /// line's mappings; `None` until first read. Votes and flags still on an
+    /// older line under one of those hashes (not carried yet) are read from
+    /// there as well.
+    pub migrated_from: Mutex<Option<std::collections::HashMap<String, Vec<String>>>>,
 }
 
 impl AppState {
@@ -249,6 +282,7 @@ impl AppState {
             agent_pub_key: Mutex::new(None),
             agent_pub_key_07: Mutex::new(None),
             app_client: tokio::sync::Mutex::new(None),
+            app_client_v1_4: tokio::sync::Mutex::new(None),
             app_client_v1_3: tokio::sync::Mutex::new(None),
             app_client_v1_2: tokio::sync::Mutex::new(None),
             app_client_v1_1: tokio::sync::Mutex::new(None),
@@ -590,91 +624,60 @@ pub async fn get_poll(
     let hash = ActionHash::try_from(action_hash)
         .map_err(|e| format!("Invalid action hash: {:?}", e))?;
 
-    // Try v1.3 first — most polls will be here for current users.
+    // The active version first; an older hash it has carried opens its copy.
     {
         let client = state.app_client.lock().await;
         if let Some(client) = client.as_ref() {
-            let payload = crate::hc::encode(&hash.clone())?;
-            let result = call_zome(client, POLLS_ZOME, "get_poll", payload).await?;
-            let record = crate::hc::record_opt(client.line(), &result)?;
+            let mut target = hash.clone();
+            let payload = crate::hc::encode(&hash)?;
+            let mut record = crate::hc::record_opt(client.line(), &call_zome(client, POLLS_ZOME, "get_poll", payload).await?)?;
+            if record.is_none() {
+                let mut mapped: Option<ActionHash> = crate::hc::decode(&call_zome(client, POLLS_ZOME, "get_migration_mapping", crate::hc::encode(&hash)?).await?)?;
+                if mapped.is_none() {
+                    // A v1.4 copy the list shows as its first record's copy.
+                    let merged = state.migrated_from.lock().unwrap().as_ref().and_then(|m| {
+                        m.iter().find(|(_, olds)| olds.contains(&hash.to_string())).map(|(copy, _)| copy.clone())
+                    });
+                    mapped = merged.and_then(|c| ActionHash::try_from(c).ok());
+                }
+                if let Some(copy) = mapped {
+                    record = crate::hc::record_opt(client.line(), &call_zome(client, POLLS_ZOME, "get_poll", crate::hc::encode(&copy)?).await?)?;
+                    target = copy;
+                }
+            }
             if let Some(record) = record {
                 let poll: Poll = decode_entry(&record)?;
                 return Ok(Some(PollDetail {
+                    hash: target.to_string(),
+                    author: counted_author(&record, &poll.carried_from),
                     poll,
-                    author: record.author.clone(),
-                    dna_version: "1.4".to_string(),
+                    dna_version: "1.5".to_string(),
                 }));
             }
         }
-    } // v1.4 lock released
+    }
 
-    // Fall back to v1.3 (the 0.6 line).
-    {
-        let client = state.app_client_v1_3.lock().await;
+    // Then each older version, newest first.
+    for (slot, version) in [
+        (&state.app_client_v1_4, "1.4"),
+        (&state.app_client_v1_3, "1.3"),
+        (&state.app_client_v1_2, "1.2"),
+        (&state.app_client_v1_1, "1.1"),
+        (&state.app_client_v1_0, "1.0"),
+    ] {
+        let client = slot.lock().await;
         if let Some(client) = client.as_ref() {
             let payload = crate::hc::encode(&hash.clone())?;
             let result = call_zome(client, POLLS_ZOME, "get_poll", payload).await?;
-            let record = crate::hc::record_opt(client.line(), &result)?;
-            if let Some(record) = record {
+            if let Some(record) = crate::hc::record_opt(client.line(), &result)? {
                 let poll: Poll = decode_entry(&record)?;
                 return Ok(Some(PollDetail {
+                    hash: hash.to_string(),
                     poll,
                     author: record.author.clone(),
-                    dna_version: "1.3".to_string(),
+                    dna_version: version.to_string(),
                 }));
             }
-        }
-    } // v1.3 lock released
-
-    // Fall back to v1.2.
-    {
-        let client = state.app_client_v1_2.lock().await;
-        if let Some(client) = client.as_ref() {
-            let payload = crate::hc::encode(&hash.clone())?;
-            let result = call_zome(client, POLLS_ZOME, "get_poll", payload).await?;
-            let record = crate::hc::record_opt(client.line(), &result)?;
-            if let Some(record) = record {
-                let poll: Poll = decode_entry(&record)?;
-                return Ok(Some(PollDetail {
-                    poll,
-                    author: record.author.clone(),
-                    dna_version: "1.2".to_string(),
-                }));
-            }
-        }
-    } // v1.2 lock released
-
-    // Fall back to v1.1.
-    {
-        let client = state.app_client_v1_1.lock().await;
-        if let Some(client) = client.as_ref() {
-            let payload = crate::hc::encode(&hash.clone())?;
-            let result = call_zome(client, POLLS_ZOME, "get_poll", payload).await?;
-            let record = crate::hc::record_opt(client.line(), &result)?;
-            if let Some(record) = record {
-                let poll: Poll = decode_entry(&record)?;
-                return Ok(Some(PollDetail {
-                    poll,
-                    author: record.author.clone(),
-                    dna_version: "1.1".to_string(),
-                }));
-            }
-        }
-    } // v1.1 lock released
-
-    // Fall back to v1.0 — legacy poll.
-    let client = state.app_client_v1_0.lock().await;
-    if let Some(client) = client.as_ref() {
-        let payload = crate::hc::encode(&hash)?;
-        let result = call_zome(client, POLLS_ZOME, "get_poll", payload).await?;
-        let record = crate::hc::record_opt(client.line(), &result)?;
-        if let Some(record) = record {
-            let poll: Poll = decode_entry(&record)?;
-            return Ok(Some(PollDetail {
-                poll,
-                author: record.author.clone(),
-                dna_version: "1.0".to_string(),
-            }));
         }
     }
 
@@ -685,8 +688,11 @@ pub async fn get_poll(
 pub async fn get_all_polls(
     state: tauri::State<'_, std::sync::Arc<AppState>>,
 ) -> Result<Vec<PollListItem>, String> {
-    // Step 1: Fetch polls from the active version (always available).
+    // Step 1: polls on the active version (v1.5), one per original: a
+    // carried poll is listed for the author its proof names.
     let mut polls = Vec::new();
+    // Each carried poll's original (its hash) -> the poll as asked there.
+    let mut firsts = std::collections::HashMap::<String, Poll>::new();
     {
         let client = state.app_client.lock().await;
         let client = client.as_ref().ok_or("Conductor not ready")?;
@@ -695,42 +701,76 @@ pub async fn get_all_polls(
         let records = crate::hc::records(client.line(), &result)?;
         for record in &records {
             if let Ok(poll) = decode_entry::<Poll>(record) {
+                if let Some(o) = &poll.carried_from {
+                    firsts.insert(o.original_action_hash.to_string(), poll.clone());
+                }
                 polls.push(PollListItem {
                     hash: record.action_hash.clone(),
+                    author: counted_author(record, &poll.carried_from),
                     poll,
-                    author: record.author.clone(),
-                    dna_version: "1.4".to_string(),
+                    dna_version: "1.5".to_string(),
                 });
             }
         }
     }
 
-    // Step 2: Collect ALL migrated hashes from every version that has
-    // migration mappings. A hash in this set means the poll was migrated
-    // to a newer version — don't show it from the older version.
+    // Step 2: every older hash some newer version maps (it is shown there),
+    // and for each active poll the older hashes it came from.
     let mut migrated_hashes = std::collections::HashSet::<String>::new();
-
-    // Collect from active version (maps previous→active)
+    let mut from = std::collections::HashMap::<String, Vec<String>>::new();
     {
         let client = state.app_client.lock().await;
         if let Some(client) = client.as_ref() {
             let payload = crate::hc::encode(&())?;
             if let Ok(r) = call_zome(client, POLLS_ZOME, "get_all_migration_mappings", payload).await {
-                let records = crate::hc::records(client.line(), &r).unwrap_or_default();
-                let mut from = std::collections::HashMap::new();
-                for rec in &records {
-                    if let Ok(entry) = decode_entry::<MigratedPollEntry>(rec) {
+                for rec in crate::hc::records(client.line(), &r).unwrap_or_default() {
+                    if let Ok(entry) = decode_entry::<MigratedPollEntry>(&rec) {
                         migrated_hashes.insert(entry.old_action_hash.to_string());
-                        from.insert(entry.new_action_hash.to_string(), entry.old_action_hash.to_string());
+                        from.entry(entry.new_action_hash.to_string()).or_default().push(entry.old_action_hash.to_string());
                     }
                 }
-                *state.migrated_from.lock().unwrap() = Some(from);
             }
         }
     }
+    // The 0.5 move's v1.4 copy of a v1.3 poll whose copy is here: shown as
+    // that copy, its votes read with it, until its own author's app maps it
+    // on v1.5 (only that app can vouch for an author whose two keys differ).
+    // It counts when its mapping is by the copy's own author and it asks
+    // the same question (title, description, options, closing time): no
+    // one can fold a different poll into another's.
+    {
+        let client = state.app_client_v1_4.lock().await;
+        if let Some(client) = client.as_ref() {
+            let payload = crate::hc::encode(&())?;
+            let mut polls_14 = std::collections::HashMap::<String, (String, Poll)>::new();
+            if let Ok(r) = call_zome(client, POLLS_ZOME, "get_all_polls", crate::hc::encode(&())?).await {
+                for rec in crate::hc::records(client.line(), &r).unwrap_or_default() {
+                    if let Ok(poll) = decode_entry::<Poll>(&rec) {
+                        polls_14.insert(rec.action_hash.clone(), (rec.author.clone(), poll));
+                    }
+                }
+            }
+            if let Ok(r) = call_zome(client, POLLS_ZOME, "get_all_migration_mappings", payload).await {
+                for rec in crate::hc::records(client.line(), &r).unwrap_or_default() {
+                    let Ok(entry) = decode_entry::<MigratedPollEntry>(&rec) else { continue };
+                    let (old, later) = (entry.old_action_hash.to_string(), entry.new_action_hash.to_string());
+                    let (Some(first), Some((later_author, later_poll))) = (firsts.get(&old), polls_14.get(&later)) else { continue };
+                    if *later_author != rec.author || !same_question(first, later_poll) {
+                        continue;
+                    }
+                    if let Some((copy, _)) = from.iter().find(|(_, olds)| olds.contains(&old)) {
+                        let copy = copy.clone();
+                        migrated_hashes.insert(later.clone());
+                        from.entry(copy).or_default().push(later);
+                    }
+                }
+            }
+        }
+    }
+    *state.migrated_from.lock().unwrap() = Some(from);
 
-    // Collect from each older version (chains the dedup across all hops)
-    for older_client_mutex in [&state.app_client_v1_3, &state.app_client_v1_2, &state.app_client_v1_1] {
+    // Each older version's own mappings (chains the dedup across all hops).
+    for older_client_mutex in [&state.app_client_v1_4, &state.app_client_v1_3, &state.app_client_v1_2, &state.app_client_v1_1] {
         let client = older_client_mutex.lock().await;
         if let Some(client) = client.as_ref() {
             let payload = crate::hc::encode(&())?;
@@ -745,10 +785,9 @@ pub async fn get_all_polls(
         }
     }
 
-    // Step 3: Fetch polls from older versions, skipping any that have been migrated.
-    // Each version is checked independently — order doesn't matter since we
-    // have the complete set of migrated hashes.
+    // Step 3: polls from older versions not carried or migrated yet.
     let older_versions: Vec<(&tokio::sync::Mutex<Option<crate::hc::AppClient>>, &str)> = vec![
+        (&state.app_client_v1_4, "1.4"),
         (&state.app_client_v1_3, "1.3"),
         (&state.app_client_v1_2, "1.2"),
         (&state.app_client_v1_1, "1.1"),
@@ -765,7 +804,7 @@ pub async fn get_all_polls(
                     for record in &records {
                         let hash = record.action_hash.clone();
                         if migrated_hashes.contains(&hash) {
-                            continue; // already migrated to a newer version
+                            continue; // shown from a newer version
                         }
                         if let Ok(poll) = decode_entry::<Poll>(record) {
                             polls.push(PollListItem {
@@ -791,13 +830,28 @@ pub async fn delete_poll(
     action_hash: String,
 ) -> Result<String, String> {
     require_identity_link(&state).await?;
-    let client = state.app_client.lock().await;
-    let client = client.as_ref().ok_or("Conductor not ready")?;
-
     let hash =
         ActionHash::try_from(action_hash).map_err(|e| format!("Invalid action hash: {:?}", e))?;
     let payload = crate::hc::encode(&hash)?;
-    let result = call_zome(client, POLLS_ZOME, "delete_poll", payload).await?;
+    let result = {
+        let client = state.app_client.lock().await;
+        let client = client.as_ref().ok_or("Conductor not ready")?;
+        call_zome(client, POLLS_ZOME, "delete_poll", payload).await?
+    };
+
+    // The originals it was carried from, where this install wrote them, so
+    // installs still on an older line stop showing it too. Best effort: the
+    // copy here is gone either way, and its mapping keeps it from coming back.
+    for old in olds_of(&state, &hash.to_string()).await {
+        for slot in [&state.app_client_v1_4, &state.app_client_v1_3] {
+            let older = slot.lock().await;
+            let Some(older) = older.as_ref() else { continue };
+            let Ok(payload) = crate::hc::encode(&old) else { continue };
+            if call_zome(older, POLLS_ZOME, "delete_poll", payload).await.is_ok() {
+                log::info!("[delete] its original {} deleted on an older line too", old);
+            }
+        }
+    }
 
     let delete_hash: ActionHash = crate::hc::decode(&result)?;
     Ok(delete_hash.to_string())
@@ -881,9 +935,9 @@ pub async fn cast_vote(
         let client = client.as_ref().ok_or("v1.2 conductor not available")?;
         let result = call_zome(client, POLLS_ZOME, "cast_vote", payload).await?;
         crate::hc::decode(&result)?
-    } else if dna_version == "1.3" {
-        // Vote on a poll not yet migrated off the 0.6 line: it lands where
-        // its author (still on v1.3) will see it.
+    } else if dna_version == "1.3" || dna_version == "1.4" {
+        // Vote on a poll not carried to v1.5 yet: it lands on the poll's own
+        // network, and the move carries it once the poll can come.
         let (display_name, profile_picture) = if poll_type.as_deref() == Some("Public") {
             let profile = load_cached_profile(&state.data_dir);
             let dn = profile.as_ref().and_then(|p| p.display_name.clone());
@@ -899,12 +953,13 @@ pub async fn cast_vote(
             profile_picture,
         };
         let payload = crate::hc::encode(&input)?;
-        let client = state.app_client_v1_3.lock().await;
-        let client = client.as_ref().ok_or("v1.3 conductor not available")?;
+        let client = client_for(&state, &dna_version).lock().await;
+        let client = client.as_ref().ok_or(format!("The v{} network is not available", dna_version))?;
         let result = call_zome(client, POLLS_ZOME, "cast_vote", payload).await?;
+        crate::carry_move::reopen(&state.data_dir);
         crate::hc::decode(&result)?
     } else {
-        // v1.4 poll — include profile for public polls.
+        // A poll on the active network (v1.5) — include profile for public polls.
         let (display_name, profile_picture) = if poll_type.as_deref() == Some("Public") {
             let profile = load_cached_profile(&state.data_dir);
             let dn = profile.as_ref().and_then(|p| p.display_name.clone());
@@ -931,7 +986,7 @@ pub async fn cast_vote(
 
 /// The v1.3 poll a v1.4 poll was migrated from: from the map `get_all_polls`
 /// keeps, read once from the active line when it is not loaded yet.
-/// The client of the network a poll of `dna_version` lives on ("1.4" and
+/// The client of the network a poll of `dna_version` lives on ("1.5" and
 /// unknown versions: the active one).
 fn client_for<'a>(state: &'a AppState, dna_version: &str) -> &'a tokio::sync::Mutex<Option<crate::hc::AppClient>> {
     match dna_version {
@@ -939,6 +994,7 @@ fn client_for<'a>(state: &'a AppState, dna_version: &str) -> &'a tokio::sync::Mu
         "1.1" => &state.app_client_v1_1,
         "1.2" => &state.app_client_v1_2,
         "1.3" => &state.app_client_v1_3,
+        "1.4" => &state.app_client_v1_4,
         _ => &state.app_client,
     }
 }
@@ -954,88 +1010,149 @@ async fn flag_records(
     crate::hc::records(client.line(), &result)
 }
 
-async fn migrated_from_of(state: &AppState, new_hash: &str) -> Option<String> {
-    let cached = state.migrated_from.lock().unwrap().as_ref().map(|m| m.get(new_hash).cloned());
-    if let Some(found) = cached {
-        return found;
-    }
-    let client = state.app_client.lock().await;
-    let client = client.as_ref()?;
-    let payload = crate::hc::encode(&()).ok()?;
-    let r = call_zome(client, POLLS_ZOME, "get_all_migration_mappings", payload).await.ok()?;
-    let mut from = std::collections::HashMap::new();
-    for rec in crate::hc::records(client.line(), &r).unwrap_or_default() {
-        if let Ok(entry) = decode_entry::<MigratedPollEntry>(&rec) {
-            from.insert(entry.new_action_hash.to_string(), entry.old_action_hash.to_string());
+/// The older hashes a poll on the active network came from, from the map
+/// `get_all_polls` keeps (read once from the active line when not loaded).
+async fn olds_of(state: &AppState, new_hash: &str) -> Vec<ActionHash> {
+    let cached = state.migrated_from.lock().unwrap().as_ref().map(|m| m.get(new_hash).cloned().unwrap_or_default());
+    let olds = match cached {
+        Some(found) => found,
+        None => {
+            let client = state.app_client.lock().await;
+            let Some(client) = client.as_ref() else { return Vec::new() };
+            let Ok(payload) = crate::hc::encode(&()) else { return Vec::new() };
+            let Ok(r) = call_zome(client, POLLS_ZOME, "get_all_migration_mappings", payload).await else { return Vec::new() };
+            let mut from = std::collections::HashMap::<String, Vec<String>>::new();
+            for rec in crate::hc::records(client.line(), &r).unwrap_or_default() {
+                if let Ok(entry) = decode_entry::<MigratedPollEntry>(&rec) {
+                    from.entry(entry.new_action_hash.to_string()).or_default().push(entry.old_action_hash.to_string());
+                }
+            }
+            let found = from.get(new_hash).cloned().unwrap_or_default();
+            *state.migrated_from.lock().unwrap() = Some(from);
+            found
+        }
+    };
+    olds.into_iter().filter_map(|o| ActionHash::try_from(o).ok()).collect()
+}
+
+/// The records `fn_name` (votes or flags) returns for `poll` on every older
+/// line that may hold some under one of its older hashes (v1.4, v1.3).
+async fn on_older_lines(state: &AppState, olds: &[ActionHash], fn_name: &str) -> Vec<crate::hc::RecordView> {
+    let mut out = Vec::new();
+    for slot in [&state.app_client_v1_4, &state.app_client_v1_3] {
+        let client = slot.lock().await;
+        let Some(client) = client.as_ref() else { continue };
+        for old in olds {
+            let Ok(payload) = crate::hc::encode(old) else { continue };
+            match call_zome(client, POLLS_ZOME, fn_name, payload).await {
+                Ok(r) => out.extend(crate::hc::records(client.line(), &r).unwrap_or_default()),
+                Err(e) => log::debug!("[{}] an older copy was not read: {}", fn_name, e),
+            }
         }
     }
-    let found = from.get(new_hash).cloned();
-    *state.migrated_from.lock().unwrap() = Some(from);
-    found
+    out
+}
+
+/// Each voter key's linked identities (the Vault keys it links to on any
+/// network), kept ten minutes: a person's keys share their identity.
+static IDENTITIES: Mutex<Option<std::collections::HashMap<String, (std::time::Instant, Vec<String>)>>> = Mutex::new(None);
+
+async fn identities_of(state: &std::sync::Arc<AppState>, key: &str) -> Vec<String> {
+    let cached = IDENTITIES.lock().unwrap().as_ref().and_then(|m| m.get(key).cloned());
+    if let Some((at, ids)) = cached {
+        if at.elapsed() < std::time::Duration::from_secs(600) {
+            return ids;
+        }
+    }
+    let Ok(agent) = AgentPubKey::try_from(key.to_string()) else { return Vec::new() };
+    let mut ids: Vec<String> = Vec::new();
+    for network in LINK_NETWORKS {
+        for h in hubs_on(state, &agent, network).await {
+            let h = h.to_string();
+            if !ids.contains(&h) {
+                ids.push(h);
+            }
+        }
+    }
+    IDENTITIES.lock().unwrap().get_or_insert_with(Default::default).insert(key.to_string(), (std::time::Instant::now(), ids.clone()));
+    ids
+}
+
+/// One record per person: keys linked to one identity are one person (two
+/// installs, or one install's two keys), and the first record of each is
+/// kept (the active network's come first). `voter` is whom a record counts
+/// for.
+async fn once_per_person(
+    state: &std::sync::Arc<AppState>,
+    records: Vec<crate::hc::RecordView>,
+    voter: impl Fn(&crate::hc::RecordView) -> String,
+) -> Vec<crate::hc::RecordView> {
+    // Each distinct voter's identities, looked up side by side.
+    let keys: Vec<String> = records.iter().map(&voter).collect();
+    let mut lookups = tokio::task::JoinSet::new();
+    for key in keys.iter().cloned().collect::<std::collections::HashSet<_>>() {
+        let state = state.clone();
+        lookups.spawn(async move {
+            let ids = identities_of(&state, &key).await;
+            (key, ids)
+        });
+    }
+    let mut identities = std::collections::HashMap::<String, Vec<String>>::new();
+    while let Some(Ok((key, ids))) = lookups.join_next().await {
+        identities.insert(key, ids);
+    }
+    let mut seen = std::collections::HashSet::<String>::new();
+    let mut out = Vec::new();
+    for (rec, key) in records.into_iter().zip(keys) {
+        let mut person = identities.get(&key).cloned().unwrap_or_default();
+        person.push(key);
+        if person.iter().any(|p| seen.contains(p)) {
+            continue;
+        }
+        seen.extend(person);
+        out.push(rec);
+    }
+    out
 }
 
 #[tauri::command]
 pub async fn get_poll_votes(
     state: tauri::State<'_, std::sync::Arc<AppState>>,
     poll_action_hash: String,
-    // "1.0", "1.1", or "1.2" — reads votes from the correct DHT cell.
-    // Obtained from dna_version on PollListItem or PollDetail.
+    // The poll's dna_version (from PollListItem or PollDetail): votes are
+    // read from its network.
     dna_version: String,
 ) -> Result<Vec<VoteData>, String> {
     let hash = ActionHash::try_from(poll_action_hash)
         .map_err(|e| format!("Invalid action hash: {:?}", e))?;
     let payload = crate::hc::encode(&hash)?;
+    let active = !matches!(dna_version.as_str(), "1.0" | "1.1" | "1.2" | "1.3" | "1.4");
 
-    let records: Vec<crate::hc::RecordView> = if dna_version == "1.0" {
-        let client = state.app_client_v1_0.lock().await;
-        let client = client.as_ref().ok_or("v1.0 conductor not available")?;
-        let result = call_zome(client, POLLS_ZOME, "get_poll_votes", payload.clone()).await?;
+    let mut records: Vec<crate::hc::RecordView> = {
+        let client = client_for(&state, &dna_version).lock().await;
+        let client = client.as_ref().ok_or(format!("The v{} network is not available", dna_version))?;
+        let result = call_zome(client, POLLS_ZOME, "get_poll_votes", payload).await?;
         crate::hc::records(client.line(), &result)?
-    } else if dna_version == "1.1" {
-        let client = state.app_client_v1_1.lock().await;
-        let client = client.as_ref().ok_or("v1.1 conductor not available")?;
-        let result = call_zome(client, POLLS_ZOME, "get_poll_votes", payload.clone()).await?;
-        crate::hc::records(client.line(), &result)?
-    } else if dna_version == "1.2" {
-        let client = state.app_client_v1_2.lock().await;
-        let client = client.as_ref().ok_or("v1.2 conductor not available")?;
-        let result = call_zome(client, POLLS_ZOME, "get_poll_votes", payload.clone()).await?;
-        crate::hc::records(client.line(), &result)?
-    } else if dna_version == "1.3" {
-        let client = state.app_client_v1_3.lock().await;
-        let client = client.as_ref().ok_or("v1.3 conductor not available")?;
-        let result = call_zome(client, POLLS_ZOME, "get_poll_votes", payload.clone()).await?;
-        crate::hc::records(client.line(), &result)?
-    } else {
-        let mut records = {
-            let client = state.app_client.lock().await;
-            let client = client.as_ref().ok_or("Conductor not ready")?;
-            let result = call_zome(client, POLLS_ZOME, "get_poll_votes", payload.clone()).await?;
-            crate::hc::records(client.line(), &result)?
-        };
-        // A migrated poll: add the votes cast on the copy it came from, by
-        // anyone with no vote here (a migrated vote keeps its author's key).
-        if let Some(old) = migrated_from_of(&state, &hash.to_string()).await {
-            if let Ok(old_hash) = ActionHash::try_from(old) {
-                let client = state.app_client_v1_3.lock().await;
-                if let Some(client) = client.as_ref() {
-                    let old_payload = crate::hc::encode(&old_hash)?;
-                    match call_zome(client, POLLS_ZOME, "get_poll_votes", old_payload).await {
-                        Ok(r) => {
-                            let here: std::collections::HashSet<_> = records.iter().map(|v| v.author.clone()).collect();
-                            for rec in crate::hc::records(client.line(), &r).unwrap_or_default() {
-                                if !here.contains(&rec.author) {
-                                    records.push(rec);
-                                }
-                            }
-                        }
-                        Err(e) => log::warn!("Votes on the poll's original copy not read: {}", e),
-                    }
+    };
+    // A poll on the active network: add the votes still on an older line
+    // under one of its older hashes (not carried yet), by anyone with no
+    // vote here. A carried vote counts for the voter its proof names.
+    if active {
+        let olds = olds_of(&state, &hash.to_string()).await;
+        if !olds.is_empty() {
+            let mut here: std::collections::HashSet<String> = records
+                .iter()
+                .map(|r| counted_author(r, &decode_entry::<Vote>(r).ok().and_then(|v| v.carried_from)))
+                .collect();
+            for rec in on_older_lines(&state, &olds, "get_poll_votes").await {
+                if here.insert(rec.author.clone()) {
+                    records.push(rec);
                 }
             }
         }
-        records
-    };
+    }
+    // Once per person.
+    let records = once_per_person(state.inner(), records, |r| counted_author(r, &decode_entry::<Vote>(r).ok().and_then(|v| v.carried_from))).await;
 
     let mut votes = Vec::new();
     for record in &records {
@@ -1046,7 +1163,7 @@ pub async fn get_poll_votes(
                 poll_action_hash: vote.poll_action_hash.to_string(),
                 option_index: vote.option_index,
             },
-            author: record.author.clone(),
+            author: counted_author(record, &vote.carried_from),
             display_name: vote.display_name,
             profile_picture: vote.profile_picture,
         });
@@ -1633,22 +1750,38 @@ async fn linked_agent_keys_with(
     crate::hc::decode(&result)
 }
 
-/// The same question on the previous generation's network (v1.3). Links are
-/// per network: an install that linked on v1.3 and never upgraded exists
-/// only there, so during the two-line window the identity's agent set is the
-/// UNION of both answers. Without this, every vote cast by an older install
-/// of the same person stopped reading as theirs the moment they upgraded
-/// (beta.1 gate, Windows, 2026-10-25). `None` when the 0.6 line is not
-/// running (post-window builds, or a fresh install with nothing to carry).
-async fn linked_agent_keys_previous(
+/// The networks an identity's links can be on. Links are per network: an
+/// install that linked on v1.3 or v1.4 and never upgraded exists only there,
+/// so while those lines run the identity's agent set is the UNION of every
+/// answer. Without it, every vote cast by an older install of the same
+/// person stopped reading as theirs the moment they upgraded (beta.1 gate,
+/// Windows, 2026-10-25).
+const LINK_NETWORKS: [&str; 3] = ["active", "v1.4", "v1.3"];
+
+/// The agents linked to `agent` on one network (on the active one, its own
+/// links and those carried there); `None` when that line is not running.
+async fn linked_on(
     state: &std::sync::Arc<AppState>,
+    network: &str,
     agent: &AgentPubKey,
 ) -> Result<Option<Vec<AgentPubKey>>, String> {
-    let client = state.app_client_v1_3.lock().await;
-    match client.as_ref() {
-        None => Ok(None),
-        Some(c) => linked_agent_keys_with(c, agent).await.map(Some),
+    let slot = match network {
+        "v1.4" => &state.app_client_v1_4,
+        "v1.3" => &state.app_client_v1_3,
+        _ => &state.app_client,
+    };
+    let client = slot.lock().await;
+    let Some(c) = client.as_ref() else { return Ok(None) };
+    let mut keys = linked_agent_keys_with(c, agent).await?;
+    if network == "active" {
+        let carried: Vec<AgentPubKey> = crate::hc::decode(&call_zome(c, POLLS_ZOME, "get_carried_links", crate::hc::encode(agent)?).await?)?;
+        for k in carried {
+            if !keys.contains(&k) {
+                keys.push(k);
+            }
+        }
     }
+    Ok(Some(keys))
 }
 
 /// The hubs (Vault identities) this agent is linked to on one network, or
@@ -1657,18 +1790,12 @@ async fn linked_agent_keys_previous(
 async fn hubs_on(
     state: &std::sync::Arc<AppState>,
     local: &AgentPubKey,
-    previous: bool,
+    network: &str,
 ) -> Vec<AgentPubKey> {
-    let line = if previous { "v1.3" } else { "active" };
-    let r = if previous {
-        linked_agent_keys_previous(state, local).await.map(|o| o.unwrap_or_default())
-    } else {
-        linked_agent_keys(state, local).await
-    };
-    match r {
-        Ok(h) => h,
+    match linked_on(state, network, local).await {
+        Ok(h) => h.unwrap_or_default(),
         Err(e) => {
-            log::warn!("[identity] get_my_agent_set ({}): local lookup failed: {}", line, e);
+            log::warn!("[identity] get_my_agent_set ({}): local lookup failed: {}", network, e);
             Vec::new()
         }
     }
@@ -1676,37 +1803,32 @@ async fn hubs_on(
 
 /// Every agent linked to `hub` on one network, folded into `set`. A hub is
 /// a Vault identity key, the same on every network: a new install links on
-/// the active network only, so its hub must be expanded on the previous
-/// network too, or the identity's older installs (linked there before the
+/// the active network only, so its hub must be expanded on the older
+/// networks too, or the identity's older installs (linked there before the
 /// upgrade) never read as the same person on the new device (seen on a Mac
 /// on 0.5.0-beta.3, 2026-10-25).
 async fn fold_siblings_on(
     state: &std::sync::Arc<AppState>,
     hub: &AgentPubKey,
-    previous: bool,
+    network: &str,
     set: &mut Vec<AgentPubKey>,
 ) {
-    let line = if previous { "v1.3" } else { "active" };
-    let siblings = if previous {
-        linked_agent_keys_previous(state, hub).await.map(|o| o.unwrap_or_default())
-    } else {
-        linked_agent_keys(state, hub).await
-    };
-    match siblings {
+    match linked_on(state, network, hub).await {
         Ok(siblings) => {
-            for s in siblings {
+            for s in siblings.unwrap_or_default() {
                 if !set.contains(&s) {
                     set.push(s);
                 }
             }
         }
-        Err(e) => log::warn!("[identity] get_my_agent_set ({}): hub lookup failed: {}", line, e),
+        Err(e) => log::warn!("[identity] get_my_agent_set ({}): hub lookup failed: {}", network, e),
     }
 }
 
-/// The agents linked to `agent_pub_key` on the active network (v1.4) only,
-/// for the launch check that re-creates a link the move left on v1.3.
-/// `get_linked_agents` also counts v1.3, so that check never ran.
+/// The agents linked to `agent_pub_key` on the active network (v1.5) only,
+/// natively (a carried link does not count), for the launch check that
+/// links this install's key there. `get_linked_agents` also counts the older
+/// networks, so that check never ran.
 #[tauri::command]
 pub async fn get_linked_agents_active(
     state: tauri::State<'_, std::sync::Arc<AppState>>,
@@ -1724,10 +1846,12 @@ pub async fn get_linked_agents(
     let agent = AgentPubKey::try_from(agent_pub_key.clone())
         .map_err(|e| format!("Invalid agent key: {:?}", e))?;
     let mut keys = linked_agent_keys(state.inner(), &agent).await?;
-    if let Ok(Some(prev)) = linked_agent_keys_previous(state.inner(), &agent).await {
-        for k in prev {
-            if !keys.contains(&k) {
-                keys.push(k);
+    for network in &LINK_NETWORKS[1..] {
+        if let Ok(Some(older)) = linked_on(state.inner(), network, &agent).await {
+            for k in older {
+                if !keys.contains(&k) {
+                    keys.push(k);
+                }
             }
         }
     }
@@ -1778,6 +1902,13 @@ pub async fn get_my_agent_set(
     };
 
     let mut set: Vec<AgentPubKey> = vec![local.clone()];
+    // The key the 0.7 line runs as, when the 0.6 one was conductor-born.
+    let key_07 = state.agent_pub_key_07.lock().unwrap().clone();
+    if let Some(k) = key_07.and_then(|k| AgentPubKey::try_from(k).ok()) {
+        if !set.contains(&k) {
+            set.push(k);
+        }
+    }
 
     // Hop 1: which identity hub(s) is this local agent linked to (the Vault).
     // Hop 2: every agent linked to that hub = all of the user's installs.
@@ -1787,16 +1918,19 @@ pub async fn get_my_agent_set(
     // BOTH: the hub key is the identity's, identical on every network, while
     // the links to it are per network.
     let mut hubs: Vec<AgentPubKey> = Vec::new();
-    for previous in [false, true] {
-        for h in hubs_on(state.inner(), &local, previous).await {
-            if !hubs.contains(&h) {
-                hubs.push(h);
+    for own in set.clone() {
+        for network in LINK_NETWORKS {
+            for h in hubs_on(state.inner(), &own, network).await {
+                if !hubs.contains(&h) {
+                    hubs.push(h);
+                }
             }
         }
     }
     for hub in &hubs {
-        fold_siblings_on(state.inner(), hub, false, &mut set).await;
-        fold_siblings_on(state.inner(), hub, true, &mut set).await;
+        for network in LINK_NETWORKS {
+            fold_siblings_on(state.inner(), hub, network, &mut set).await;
+        }
     }
 
     let mut out: Vec<String> = set.iter().map(|a| a.to_string()).collect();
@@ -1844,6 +1978,9 @@ struct FlagEntry {
     poll_action_hash: ActionHash,
     reason: FlagReason,
     created_at: i64,
+    /// v1.5: where a carried flag came from.
+    #[serde(default)]
+    carried_from: Option<Origin>,
 }
 
 #[derive(serde::Deserialize, Debug)]
@@ -1903,6 +2040,10 @@ pub async fn flag_poll(
 
     let payload = crate::hc::encode(&zome_input)?;
     let result = call_zome(client, POLLS_ZOME, "flag_poll", payload).await?;
+    if matches!(dna_version.as_deref(), Some("1.3" | "1.4")) {
+        // The move carries it once the poll can come.
+        crate::carry_move::reopen(&state.data_dir);
+    }
 
     let action_hash: ActionHash = crate::hc::decode(&result)?;
     Ok(action_hash.to_string())
@@ -1920,20 +2061,25 @@ pub async fn get_poll_flags(
         .map_err(|e| format!("Invalid action hash: {:?}", e))?;
     let version = dna_version.unwrap_or_default();
     let mut records = flag_records(client_for(&state, &version), &hash).await?;
-    // A migrated poll: add the flags on the copy it came from, by anyone
-    // with no flag here (flags were never migrated).
-    let active = !matches!(version.as_str(), "1.0" | "1.1" | "1.2" | "1.3");
+    // A poll on the active network: add the flags still on an older line
+    // under one of its older hashes, by anyone with no flag here.
+    let active = !matches!(version.as_str(), "1.0" | "1.1" | "1.2" | "1.3" | "1.4");
     if active {
-        if let Some(old) = migrated_from_of(&state, &hash.to_string()).await.and_then(|o| ActionHash::try_from(o).ok()) {
-            match flag_records(&state.app_client_v1_3, &old).await {
-                Ok(older) => {
-                    let here: Vec<String> = records.iter().map(|r| r.author.clone()).collect();
-                    records.extend(older.into_iter().filter(|r| !here.contains(&r.author)));
+        let olds = olds_of(&state, &hash.to_string()).await;
+        if !olds.is_empty() {
+            let mut here: std::collections::HashSet<String> = records
+                .iter()
+                .map(|r| counted_author(r, &decode_entry::<FlagEntry>(r).ok().and_then(|f| f.carried_from)))
+                .collect();
+            for rec in on_older_lines(&state, &olds, "get_poll_flags").await {
+                if here.insert(rec.author.clone()) {
+                    records.push(rec);
                 }
-                Err(e) => log::debug!("[flags] the old copy's flags were not read: {}", e),
             }
         }
     }
+    // Once per person (the hide threshold counts people).
+    let records = once_per_person(state.inner(), records, |r| counted_author(r, &decode_entry::<FlagEntry>(r).ok().and_then(|f| f.carried_from))).await;
     let mut flags = Vec::new();
     for record in &records {
         let flag: FlagEntry = decode_entry(record)?;
@@ -1944,7 +2090,7 @@ pub async fn get_poll_flags(
                 reason: format!("{}", flag.reason),
                 created_at: flag.created_at,
             },
-            author: record.author.clone(),
+            author: counted_author(record, &flag.carried_from),
         });
     }
     Ok(flags)
@@ -2105,30 +2251,31 @@ pub async fn get_vote_rationale(
         let result = call_zome(client, POLLS_ZOME, "get_vote_rationale", payload.clone()).await?;
         crate::hc::record_opt(client.line(), &result)?
     };
-    // A vote still on the v1.3 network (shown beside its migrated poll) keeps
-    // its reason there.
-    let record = match record {
-        Some(r) => Some(r),
-        None => {
-            let client = state.app_client_v1_3.lock().await;
-            match client.as_ref() {
-                Some(c) => match call_zome(c, POLLS_ZOME, "get_vote_rationale", payload).await {
-                    Ok(result) => crate::hc::record_opt(c.line(), &result).unwrap_or(None),
-                    Err(_) => None,
-                },
-                None => None,
+    // A vote still on an older network (not carried yet) keeps its reason
+    // there.
+    let mut record = record;
+    for slot in [&state.app_client_v1_4, &state.app_client_v1_3] {
+        if record.is_some() {
+            break;
+        }
+        let client = slot.lock().await;
+        if let Some(c) = client.as_ref() {
+            if let Ok(result) = call_zome(c, POLLS_ZOME, "get_vote_rationale", payload.clone()).await {
+                record = crate::hc::record_opt(c.line(), &result).unwrap_or(None);
             }
         }
-    };
+    }
 
     let record = match record {
         Some(r) => r,
         None => return Ok(None),
     };
 
-    // Only decrypt if we're the author
-    let my_agent = state.agent_pub_key.lock().unwrap().clone();
-    if my_agent.as_deref() != Some(&record.author.clone()) {
+    // Only decrypt if this install wrote it (under either of its keys: the
+    // 0.7 line's differs when the 0.6 one was conductor-born; the ciphertext
+    // is to the 0.6 key either way).
+    let mine = [state.agent_pub_key.lock().unwrap().clone(), state.agent_pub_key_07.lock().unwrap().clone()];
+    if !mine.iter().any(|k| k.as_deref() == Some(record.author.as_str())) {
         return Ok(None);
     }
 
@@ -2521,7 +2668,7 @@ pub async fn build_canonical_backup(
                 })
         })
     };
-    let cell_id = cell_of(crate::dna::ACTIVE_APP_ID).ok_or("Active app cell not found for backup")?;
+    let cell_id = cell_of(crate::dna::APP_ID_V1_4).ok_or("The v1.4 cell was not found for the backup")?;
     let cell_id_15 = cell_of(crate::dna::APP_ID_V1_5);
 
     // 3. Dump the full source chain (every action authored by this agent).
@@ -2534,11 +2681,17 @@ pub async fn build_canonical_backup(
     let mut records: Vec<serde_json::Value> = Vec::new();
     let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
 
+    // Drafts and reasons on v1.4, by ciphertext: the move to v1.5 writes
+    // them again there, and each counts once.
+    let mut private_14: std::collections::HashSet<(Vec<u8>, Vec<u8>)> = std::collections::HashSet::new();
     for rec in &dump.source_chain_dump.records {
         let action_hash = rec.action_address.to_string();
         let created_ms = rec.action.timestamp().as_millis();
 
         let (entry_type_name, human_readable) = classify_dump_record(rec);
+        if let Some(p) = private_of(rec) {
+            private_14.insert(p);
+        }
 
         // Count only the decodable user-data entry types (those with a
         // non-null human_readable view). Infrastructure records keep their
@@ -2612,8 +2765,9 @@ pub async fn build_canonical_backup(
     // 4c. The v1.5 chain, once installed. It must be in the backup: a key
     // whose v1.5 chain exists (from its genesis on) restores it on a new
     // device instead of starting a second one (seed_adopt::backup_chain), so
-    // a backup that cannot list it is not made. Its records are not counted:
-    // they are carried copies of records counted above.
+    // a backup that cannot list it is not made. Its carried copies are not
+    // counted (their originals are, above), nor drafts and reasons written
+    // again from v1.4; what was written there first is.
     let cell_15 = match cell_id_15 {
         Some(cell_id_15) => {
             let dump_15 = admin_ws
@@ -2622,6 +2776,21 @@ pub async fn build_canonical_backup(
                 .map_err(|e| format!("dump_full_state (v1.5): {}", e))?;
             let mut records_15: Vec<serde_json::Value> = Vec::new();
             for rec in &dump_15.source_chain_dump.records {
+                let (entry_type_name, human_readable) = classify_dump_record(rec);
+                // Only polls, votes, flags, drafts and reasons count (a
+                // mapping or a carried link is the move's own bookkeeping).
+                let kind = match rec.action.entry_type() {
+                    Some(holochain_integrity_types_07::action::EntryType::App(def)) => Some((def.zome_index.0, def.entry_index.0)),
+                    _ => None,
+                };
+                let again = match kind {
+                    Some((1, 4)) => private_of(rec).is_some_and(|p| private_14.contains(&p)),
+                    Some((1, 0 | 1 | 2)) => is_carried(rec),
+                    _ => true,
+                };
+                if !human_readable.is_null() && !again {
+                    *counts.entry(entry_type_name).or_insert(0) += 1;
+                }
                 let raw_record = serde_json::to_value(rec)
                     .map_err(|e| format!("serialize SourceChainDumpRecord (v1.5): {}", e))?;
                 records_15.push(serde_json::json!({
@@ -2634,7 +2803,7 @@ pub async fn build_canonical_backup(
                 "role_name": "polls",
                 "line": "holochain-0.7",
                 "dna_version": "1.5",
-                "_readme": "Your chain on ProofPoll's newer network on the same Holochain line: copies of your polls and votes that carry the original signed record. They are counted once, in the chain above.",
+                "_readme": "Your chain on ProofPoll's newer network on the same Holochain line: what you wrote there, and copies of your polls and votes that carry the original signed record (those are counted once, in the chain above).",
                 "records": records_15,
             }))
         }
@@ -2719,6 +2888,36 @@ pub async fn build_canonical_backup(
 /// ProofPoll v1.3 (`dna/v1.3/workdir/dna.yaml`):
 ///   integrity zomes: [0] agent_linking_integrity, [1] polls_integrity
 ///   polls_integrity EntryTypes: [0] Poll [1] Vote [2] Flag [3] MigratedPoll [4] EncryptedEntry
+/// A draft's or reason's (cipher, nonce), for a v1.4 or v1.5 record.
+fn private_of(rec: &holochain_state_types_07::SourceChainDumpRecord) -> Option<(Vec<u8>, Vec<u8>)> {
+    use holochain_integrity_types_07::action::EntryType;
+    #[derive(serde::Deserialize)]
+    struct Private {
+        cipher: Vec<u8>,
+        nonce: Vec<u8>,
+    }
+    let Some(EntryType::App(def)) = rec.action.entry_type() else { return None };
+    if (def.zome_index.0, def.entry_index.0) != (1, 4) {
+        return None;
+    }
+    let bytes = rec.entry.as_ref().and_then(|e| e.as_app_entry())?.as_ref().bytes().clone();
+    rmp_serde::from_slice::<Private>(&bytes).ok().map(|p| (p.cipher, p.nonce))
+}
+
+/// A v1.5 poll, vote or flag carried from an older line.
+fn is_carried(rec: &holochain_state_types_07::SourceChainDumpRecord) -> bool {
+    #[derive(serde::Deserialize)]
+    struct Carried {
+        #[serde(default)]
+        carried_from: Option<serde::de::IgnoredAny>,
+    }
+    rec.entry
+        .as_ref()
+        .and_then(|e| e.as_app_entry())
+        .and_then(|a| rmp_serde::from_slice::<Carried>(a.as_ref().bytes()).ok())
+        .is_some_and(|c| c.carried_from.is_some())
+}
+
 fn classify_dump_record(
     rec: &holochain_state_types_07::SourceChainDumpRecord,
 ) -> (String, serde_json::Value) {
@@ -2796,7 +2995,7 @@ fn action_variant_label(action: &holochain_integrity_types_07::action::Action) -
 
 /// The v1.3 source chain on the 0.6 conductor, for the backup. None when the
 /// 0.6 line is not running (post-window builds) or v1.3 is not installed.
-async fn dump_chain_06(state: &AppState) -> Result<Option<holochain_state_types::SourceChainDump>, String> {
+pub(crate) async fn dump_chain_06(state: &AppState) -> Result<Option<holochain_state_types::SourceChainDump>, String> {
     use holochain_client::{AdminWebsocket, CellInfo};
     if state.app_client_v1_3.lock().await.is_none() {
         return Ok(None);

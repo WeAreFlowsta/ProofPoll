@@ -514,8 +514,10 @@ pub struct StartupResult {
     pub agent_key: String,
     /// The key v1.4 runs as (differs from `agent_key` for a conductor-born 0.6 agent).
     pub agent_key_07: String,
-    /// The active client: v1.4 on the 0.7.1 conductor.
+    /// The active client: v1.5 on the 0.7.1 conductor.
     pub app_client: crate::hc::AppClient,
+    /// v1.4 on the same conductor: the move's source, and reads.
+    pub app_client_v1_4: Option<crate::hc::AppClient>,
     /// v1.3 client on the 0.6.1 conductor: the migration source, and reads
     /// and votes for polls not yet migrated.
     pub app_client_v1_3: Option<crate::hc::AppClient>,
@@ -526,7 +528,6 @@ pub struct StartupResult {
     /// v1.0 client for legacy reads.
     pub app_client_v1_0: Option<crate::hc::AppClient>,
     pub lair_client: lair_keystore_api::prelude::LairClient,
-    pub needs_migration: bool,
 }
 
 /// Public entry point. Runs one full startup; on failure, performs the
@@ -953,7 +954,7 @@ async fn start_holochain_attempt(
             fail_with_full_cleanup!(e);
         }
     }
-    let (app_port_07, app_client) = match crate::dna::setup_app_interface_07(admin_port_07()).await {
+    let (app_port_07, app_client, app_client_v1_4) = match crate::dna::setup_app_interface_07(admin_port_07()).await {
         Ok(r) => r,
         Err(e) => fail_with_full_cleanup!(format!("App interface setup (0.7) failed: {}", e)),
     };
@@ -1002,12 +1003,12 @@ async fn start_holochain_attempt(
         agent_key: agent_key_str,
         agent_key_07: agent_07.to_string(),
         app_client,
+        app_client_v1_4,
         app_client_v1_3,
         app_client_v1_2,
         app_client_v1_1,
         app_client_v1_0,
         lair_client,
-        needs_migration: install_result.needs_migration,
     })
 }
 
@@ -1162,7 +1163,7 @@ async fn restart_conductors_with_auth(
     }
     .await;
     // The handle goes back either way, so quitting still stops what runs.
-    let ((app_port, client_v1_3, client_v1_2, client_v1_1, client_v1_0), (app_port_07, client)) = match started {
+    let ((app_port, client_v1_3, client_v1_2, client_v1_1, client_v1_0), (app_port_07, client, client_v1_4)) = match started {
         Ok(r) => r,
         Err(e) => {
             *state.conductor_handle.lock().unwrap() = Some(handle);
@@ -1176,6 +1177,7 @@ async fn restart_conductors_with_auth(
     handle.conductor_pid_07 = handle.conductor_child_07.id();
     let (pid, pid_07) = (handle.conductor_pid, handle.conductor_pid_07);
     *state.app_client.lock().await = Some(client);
+    *state.app_client_v1_4.lock().await = client_v1_4;
     *state.app_client_v1_3.lock().await = client_v1_3;
     *state.app_client_v1_2.lock().await = client_v1_2;
     *state.app_client_v1_1.lock().await = client_v1_1;
@@ -1542,7 +1544,8 @@ mod tests {
             crate::dna::install_dnas_07(admin_port_07(), &resource_dir, agent_07.get_raw_39(), &[]).await?;
             let (_p06, v1_3, _v2, _v1, _v0) = crate::dna::setup_app_interface(admin_port(), false, false, false).await?;
             let v1_3 = v1_3.ok_or("no v1.3 client")?;
-            let (_p07, v1_4) = crate::dna::setup_app_interface_07(admin_port_07()).await?;
+            let (_p07, _v1_5, v1_4) = crate::dna::setup_app_interface_07(admin_port_07()).await?;
+            let v1_4 = v1_4.ok_or("no v1.4 client")?;
             assert_eq!(v1_3.line(), crate::hc::Line::V06);
             assert_eq!(v1_4.line(), crate::hc::Line::V07);
 

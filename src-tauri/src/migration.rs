@@ -20,7 +20,6 @@
 //! and the state file name is derived from `ACTIVE_APP_ID` automatically.
 
 use crate::commands::AppState;
-use crate::dna::ACTIVE_APP_ID;
 use holochain_types::prelude::ActionHash;
 use std::path::Path;
 use std::sync::Arc;
@@ -31,10 +30,11 @@ const ROLE_NAME: &str = "proofpoll";
 
 // ── Migration state (persisted to disk) ───────────────────────────────
 
-/// State file name derived from the active DNA version.
-/// Each version gets its own state file so previous migrations don't interfere.
+/// State file name of the move this module runs (v1.3 to v1.4). v1.5 carries
+/// records instead (`carry_move.rs`); this state stays readable for the
+/// backup, which counts what this move already copied.
 fn state_file_name() -> String {
-    format!("migration-{}-state.json", ACTIVE_APP_ID)
+    format!("migration-{}-state.json", crate::dna::APP_ID_V1_4)
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
@@ -257,7 +257,9 @@ async fn call_zome_on(
 ///
 /// Update `SOURCE_CLIENT` below to point to your previous version's
 /// AppWebsocket field in AppState. The destination is always the active
-/// client (`state.app_client`). Everything else is version-agnostic.
+/// client (`state.app_client_v1_4`: this module is the v1.3 to v1.4 move;
+/// v1.5 carries records instead, `carry_move.rs`). Everything else is
+/// version-agnostic.
 pub async fn run_migration(
     state: &Arc<AppState>,
     app_handle: &tauri::AppHandle,
@@ -315,7 +317,7 @@ pub async fn run_migration(
         }
     };
 
-    let dest_guard = state.app_client.lock().await;
+    let dest_guard = state.app_client_v1_4.lock().await;
     let dest = match dest_guard.as_ref() {
         Some(c) => c,
         None => return Err("Active client not available".to_string()),
@@ -633,7 +635,7 @@ pub async fn carry_private(state: &Arc<AppState>) -> Result<(usize, usize), Stri
     let my_agent = state.agent_pub_key.lock().unwrap().clone().ok_or("Agent key not available")?;
     let source_guard = state.app_client_v1_3.lock().await;
     let Some(source) = source_guard.as_ref() else { return Ok((0, 0)) };
-    let dest_guard = state.app_client.lock().await;
+    let dest_guard = state.app_client_v1_4.lock().await;
     let dest = dest_guard.as_ref().ok_or("Active client not available")?;
 
     let mut failed = 0usize;
@@ -737,7 +739,7 @@ pub fn spawn_migration_retry_loop(
             }
 
             // Use the active (destination) client for retries
-            let dest_client = state.app_client.lock().await;
+            let dest_client = state.app_client_v1_4.lock().await;
             let dest = match dest_client.as_ref() {
                 Some(c) => c,
                 None => continue,

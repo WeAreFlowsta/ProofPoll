@@ -50,7 +50,8 @@ const HAPP_FILE_V1_4: &str = "proofpoll_v1_4_happ.happ";
 const HAPP_FILE_V1_5: &str = "proofpoll_v1_5_happ.happ";
 
 /// The active version for all new reads and writes (on the 0.7.1 conductor).
-pub const ACTIVE_APP_ID: &str = APP_ID_V1_4;
+/// v1.4 beside it is read until its records are carried (`carry_move.rs`).
+pub const ACTIVE_APP_ID: &str = APP_ID_V1_5;
 /// The newest version on the 0.6.1 conductor: the migration source, and the
 /// home of polls whose authors have not upgraded yet.
 pub const ACTIVE_APP_ID_06: &str = APP_ID_V1_3;
@@ -835,7 +836,9 @@ pub async fn wait_for_restore_07(
 
 /// Attach the 0.7 conductor's app interface, authorize signing for the v1.4
 /// cell and connect the v1.4 app websocket.
-pub async fn setup_app_interface_07(admin_port: u16) -> Result<(u16, crate::hc::AppClient), String> {
+/// The 0.7 app interface: the port, the active (v1.5) client, and the v1.4
+/// client when v1.4 is installed.
+pub async fn setup_app_interface_07(admin_port: u16) -> Result<(u16, crate::hc::AppClient, Option<crate::hc::AppClient>), String> {
     use holochain_client_07::{
         AdminWebsocket, AllowedOrigins, AppStatusFilter, AppWebsocket,
         AuthorizeSigningCredentialsPayload, CellInfo, ClientAgentSigner,
@@ -900,22 +903,36 @@ pub async fn setup_app_interface_07(admin_port: u16) -> Result<(u16, crate::hc::
         }
     }
     let signer_arc: std::sync::Arc<dyn holochain_client_07::AgentSigner + Send + Sync> = signer.into();
-    let token = admin_ws
-        .issue_app_auth_token(
-            IssueAppAuthenticationTokenPayload::for_installed_app_id(APP_ID_V1_4.into())
-                .expiry_seconds(0)
-                .single_use(false),
-        )
-        .await
-        .map_err(|e| format!("Failed to issue the v1.4 auth token: {}", e))?;
-    let ws = AppWebsocket::connect(
-        format!("localhost:{}", app_port),
-        token.token,
-        signer_arc,
-        Some(crate::conductor::node_origin()),
-    )
-    .await
-    .map_err(|e| format!("Failed to connect the v1.4 app WebSocket: {}", e))?;
-    log::info!("v1.4 App WebSocket connected on port {} (0.7)", app_port);
-    Ok((app_port, crate::hc::AppClient::V07(ws)))
+    // One app websocket per app: a token names one installed app.
+    let connect = |app_id: &'static str| {
+        let (admin_ws, signer) = (&admin_ws, signer_arc.clone());
+        async move {
+            let token = admin_ws
+                .issue_app_auth_token(
+                    IssueAppAuthenticationTokenPayload::for_installed_app_id(app_id.into())
+                        .expiry_seconds(0)
+                        .single_use(false),
+                )
+                .await
+                .map_err(|e| format!("Failed to issue the {} auth token: {}", app_id, e))?;
+            let ws = AppWebsocket::connect(format!("localhost:{}", app_port), token.token, signer, Some(crate::conductor::node_origin()))
+                .await
+                .map_err(|e| format!("Failed to connect the {} app WebSocket: {}", app_id, e))?;
+            log::info!("{} App WebSocket connected on port {} (0.7)", app_id, app_port);
+            Ok::<_, String>(crate::hc::AppClient::V07(ws))
+        }
+    };
+    let active = connect(ACTIVE_APP_ID).await?;
+    let v1_4 = if apps.iter().any(|a| a.installed_app_id == APP_ID_V1_4) {
+        match connect(APP_ID_V1_4).await {
+            Ok(c) => Some(c),
+            Err(e) => {
+                log::warn!("v1.4 is not read this start: {}", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+    Ok((app_port, active, v1_4))
 }

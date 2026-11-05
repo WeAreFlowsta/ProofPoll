@@ -23,7 +23,8 @@ pub enum Line {
     V07,
 }
 
-/// An app websocket on one of the two lines.
+/// An app websocket on one of the two lines (a handle: clones share it).
+#[derive(Clone)]
 pub enum AppClient {
     V06(holochain_client::AppWebsocket),
     V07(holochain_client_07::AppWebsocket),

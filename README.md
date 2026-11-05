@@ -145,9 +145,10 @@ cargo tauri dev
 | v1.1 | `proofpoll-network-v1.1` | + Community flagging, migration support |
 | v1.2 | `proofpoll-network-v1.2` | + Public/anonymous poll types, voter profiles |
 | v1.3 | `proofpoll-network-v1.3` | + Encrypted private data (vote rationale, draft polls) |
-| v1.4 | `proofpoll-network-v1.4` | Holochain 0.7.1 generation of v1.3 (same types; validation on the 0.7 action model; `MigratedPoll` carries the original author, time and signed action). Ships with ProofPoll 0.5.0 |
+| v1.4 | `proofpoll-network-v1.4` | Holochain 0.7.1 generation of v1.3 (same types; validation on the 0.7 action model; `MigratedPoll` carries the original author and time). Ships with ProofPoll 0.5.0 |
+| v1.5 | `proofpoll-network-v1.5` | v1.4 plus carried records: a poll, vote, flag or agent link written on v1.3 or v1.4 is written again here with its original signed record, and validation checks it against its author's signature, so it counts for its author. One poll per original, whichever older hash its votes name. Validation also checks who may change what: nothing is updated, a record is deleted and a link removed by its author, and each link is filed by the author of the record it points at. Ships with ProofPoll 0.6.0 |
 
-All versions are installed side-by-side during migration. All new reads and writes go to the newest version (v1.4 from ProofPoll 0.5.0; v1.0 to v1.3 run on a Holochain 0.6.1 conductor, v1.4 on 0.7.1, both inside the app during the transition).
+All versions are installed side-by-side during migration. All new reads and writes go to the newest version (v1.5 from ProofPoll 0.6.0; v1.0 to v1.3 run on a Holochain 0.6.1 conductor, v1.4 and v1.5 on 0.7.1, both inside the app during the transition). From v1.5 the app carries what it wrote on v1.3 and v1.4 to v1.5 in the background (`src-tauri/src/carry_move.rs`), and reads the older versions for what is not carried yet.
 
 Bundle checksums (sha256 of the committed `.happ`; a rebuilt bundle is a different network):
 
@@ -155,6 +156,7 @@ Bundle checksums (sha256 of the committed `.happ`; a rebuilt bundle is a differe
 |---|---|---|
 | v1.3 | | `7cac687ab376a5dbdad453a8b77768edec30c5bd656adb57f7dad5ad69eeb197` |
 | v1.4 | `uhC0kOv01Xt3g5hkRz7dq8SEaw8qD2WzwW8Z6HMJPdL-o0v9ZU52W` | `160f768b90a5e5ae27252af472ea95166782c0949f9df137ad3fd96507928dac` |
+| v1.5 | `uhC0krqNgTCTdT3btM653pAqdnUVRqoVat-VfRTzpXdU92O33UKAh` | `d0c4437004a194acdc49e7de1d7cba239b2a84c494f495ae73d27edce1f65437` |
 
 ## Encrypted Private Data (v1.3)
 
@@ -385,8 +387,8 @@ cleaner point to fork from).
 
 **Why keep the two-line release tagged:** it is the worked example for the
 upgrade your own app will face at the next breaking Holochain release -
-migrating records across two conductors with the original author, time and
-signed action carried, one app-held seed imported into two key stores so
+migrating records across two conductors with the original author and time
+carried, one app-held seed imported into two key stores so
 both lines run as the same agent, and the identity's agent set read from
 both networks while they overlap (hubs collected on each, expanded on each).
 `git log` between the `0.4.2` and `0.5.0` tags is that story in commits.

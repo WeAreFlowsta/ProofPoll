@@ -199,8 +199,10 @@ export default component$(() => {
     try {
       const status = await invoke<{
         agent_pub_key: string | null;
+        agent_pub_key_07?: string | null;
       }>("get_app_status");
-      agentKey.value = status.agent_pub_key;
+      // The key the active network runs as: the link is made for it.
+      agentKey.value = status.agent_pub_key_07 ?? status.agent_pub_key;
 
       // Check if already linked on DHT, then ask Vault for the canonical
       // state. We never auto-revoke from here — the layout banner gives the

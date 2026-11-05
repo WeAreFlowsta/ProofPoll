@@ -141,8 +141,8 @@ async fn chain07() -> Reply {
     }))
 }
 
-/// The carrier's first question (`planning/PROOFPOLL_CARRIER.md`, to prove
-/// 1): can 0.7-side code check a v1.3 record's author with no 0.6 network?
+/// Whether 0.7-side code can check a v1.3 record's author with no 0.6
+/// network:
 /// For each app entry this install wrote on v1.3:
 /// 1. the action as Holochain 0.6.1 signs it (`encode`, the bytes lair signs);
 /// 2. the author's signature over those bytes;
@@ -332,17 +332,18 @@ async fn op(Ax(app): Ax<tauri::AppHandle>, Json(body): Json<Value>) -> Reply {
             commands::create_poll(state, s(&body, "title"), s(&body, "description"), options(), closes_at, opt_s(&body, "poll_type")).await,
         ),
         "polls" => to_value(commands::get_all_polls(state).await),
+        "poll" => to_value(commands::get_poll(state, s(&body, "poll")).await),
         "vote" => to_value(
             commands::cast_vote(
                 state,
                 s(&body, "poll"),
                 body.get("option").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-                opt_s(&body, "dna_version").unwrap_or_else(|| "1.4".into()),
+                opt_s(&body, "dna_version").unwrap_or_else(|| "1.5".into()),
                 opt_s(&body, "poll_type"),
             )
             .await,
         ),
-        "votes" => to_value(commands::get_poll_votes(state, s(&body, "poll"), opt_s(&body, "dna_version").unwrap_or_else(|| "1.4".into())).await),
+        "votes" => to_value(commands::get_poll_votes(state, s(&body, "poll"), opt_s(&body, "dna_version").unwrap_or_else(|| "1.5".into())).await),
         "save_draft" => to_value(
             commands::save_draft_poll(state, s(&body, "title"), s(&body, "description"), options(), closes_at, opt_s(&body, "poll_type")).await,
         ),
@@ -388,6 +389,12 @@ async fn op(Ax(app): Ax<tauri::AppHandle>, Json(body): Json<Value>) -> Reply {
             let carried = crate::migration::carry_private(&arc).await;
             let after = serde_json::to_value(&*arc.migration_state.lock().await).unwrap_or(Value::Null);
             to_value(carried.map(|(drafts, reasons)| json!({ "drafts": drafts, "reasons": reasons, "state": after })))
+        }
+        // One run of the move to v1.5 (carry_move.rs), as if left open.
+        "move15" => {
+            let arc = state.inner().clone();
+            crate::carry_move::reopen(&arc.data_dir);
+            to_value(crate::carry_move::run(&arc).await.map(|r| json!({ "report": r, "complete": crate::carry_move::MoveState::load(&arc.data_dir).complete })))
         }
         // The canonical backup into the pinned Vault, as the SDK's backup
         // posts it (it carries this install's escrowed seed).

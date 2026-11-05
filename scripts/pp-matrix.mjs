@@ -97,7 +97,7 @@ async function signin(base = A, who = 'A') {
   return linked.data?.vault_agent_pub_key;
 }
 
-/** Polls, votes, drafts and reasons on v1.4. */
+/** Polls, votes, drafts and reasons on the active network (v1.5). */
 async function polls() {
   console.log('\n── Polls');
   const title = `matrix poll ${nowS()}`;
@@ -105,9 +105,9 @@ async function polls() {
   record('A: creates a poll', created.ok && typeof created.data === 'string', created.error || created.data);
   const hash = created.data;
   record('A: lists it', await until(async () => ((await op(A, { op: 'polls' })).data || []).some((p) => p.hash === hash || p.poll?.title === title), 60));
-  const voted = await op(A, { op: 'vote', poll: hash, option: 1, dna_version: '1.4' });
+  const voted = await op(A, { op: 'vote', poll: hash, option: 1, dna_version: '1.5' });
   record('A: votes', voted.ok, voted.error || voted.data);
-  record('A: reads its vote', await until(async () => ((await op(A, { op: 'votes', poll: hash, dna_version: '1.4' })).data || []).length >= 1, 60));
+  record('A: reads its vote', await until(async () => ((await op(A, { op: 'votes', poll: hash, dna_version: '1.5' })).data || []).length >= 1, 60));
   const reason = await op(A, { op: 'save_rationale', vote: voted.data, text: 'because the matrix said so' });
   record('A: saves a reason for the vote', reason.ok, reason.error);
   const readReason = await op(A, { op: 'rationale', vote: voted.data });
@@ -130,7 +130,7 @@ async function devices(state) {
   record("B: its agent set holds A's key", await until(async () => ((await op(B, { op: 'agent_set' })).data || []).includes(aKey), 300, 10000), JSON.stringify(set.data));
   if (state?.hash) {
     record("B: sees A's poll", await until(async () => ((await op(B, { op: 'polls' })).data || []).some((p) => p.hash === state.hash || p.poll?.title === state.title), 300, 10000));
-    record("B: sees A's vote", await until(async () => ((await op(B, { op: 'votes', poll: state.hash, dna_version: '1.4' })).data || []).length >= 1, 300, 10000));
+    record("B: sees A's vote", await until(async () => ((await op(B, { op: 'votes', poll: state.hash, dna_version: '1.5' })).data || []).length >= 1, 300, 10000));
   }
 }
 
@@ -165,6 +165,37 @@ async function migration() {
   record('A: the old draft lists', drafts.some((d) => JSON.stringify(d).includes('v13 draft')), JSON.stringify(drafts).slice(0, 200));
   const reasonNow = await op(A, { op: 'rationale', vote: vote13.data });
   record('A: the old reason reads', reasonNow.ok && reasonNow.data === 'an old reason', reasonNow.error || JSON.stringify(reasonNow.data));
+
+  // The move to v1.5: the v1.3 records and the 0.5 move's v1.4 copies
+  // carried with their proofs, each poll once.
+  console.log('\n── The move to v1.5 (carried with their proofs)');
+  const t1 = Date.now();
+  const mv = await op(A, { op: 'move15' }, 600);
+  const rep = mv.data?.report || {};
+  record('A: the move to v1.5 runs to the end', mv.ok && mv.data?.complete === true && rep.failed === 0 && rep.waiting === 0, mv.error || JSON.stringify(rep));
+  console.log(`  (took ${Math.round((Date.now() - t1) / 1000)} s)`);
+  record('A: both v1.3 polls carried, the open one\'s v1.4 copy mapped to its copy', rep.polls >= 2 && rep.later >= 1, JSON.stringify(rep));
+  const after = (await op(A, { op: 'polls' })).data || [];
+  const titled = (t) => after.filter((p) => p.poll?.title?.startsWith(t));
+  record('A: each poll lists once, from v1.5', titled('v13 open').length === 1 && titled('v13 closing').length === 1 && [...titled('v13 open'), ...titled('v13 closing')].every((p) => p.dna_version === '1.5'),
+    JSON.stringify(after.map((p) => [p.poll?.title, p.dna_version])).slice(0, 300));
+  const copy = titled('v13 open')[0]?.hash;
+  const later = st.polls_migrated?.[0]?.new_hash;
+  const viaOld = await op(A, { op: 'poll', poll: open.data });
+  const viaLater = later ? await op(A, { op: 'poll', poll: later }) : { ok: false };
+  record('A: the v1.3 hash and its v1.4 copy\'s both open the v1.5 copy', viaOld.data?.hash === copy && viaLater.data?.hash === copy && viaOld.data?.dna_version === '1.5',
+    JSON.stringify({ copy, old: viaOld.data?.hash, later: viaLater.data?.hash }));
+  const votes15 = (await op(A, { op: 'votes', poll: copy, dna_version: '1.5' })).data || [];
+  const aKey = (await status(A)).app?.agent_pub_key;
+  record('A: its vote counts once there, as its own', votes15.length === 1 && votes15[0].author === aKey, JSON.stringify(votes15.map((v) => [v.author?.slice(0, 12), v.vote?.hash?.slice(0, 12)])));
+  const reason15 = votes15[0] ? await op(A, { op: 'rationale', vote: votes15[0].vote.hash }) : { ok: false };
+  record('A: its old reason reads on the carried vote', reason15.ok && reason15.data === 'an old reason', reason15.error || JSON.stringify(reason15.data));
+  const drafts15 = (await op(A, { op: 'drafts' })).data || [];
+  record('A: the old draft lists once', drafts15.filter((d) => JSON.stringify(d).includes('v13 draft')).length === 1, JSON.stringify(drafts15).slice(0, 200));
+  const again = await op(A, { op: 'move15' }, 600);
+  const rep2 = again.data?.report || {};
+  record('A: a second run writes nothing new', again.ok && rep2.failed === 0 && (await op(A, { op: 'polls' })).data?.length === after.length && ((await op(A, { op: 'drafts' })).data || []).length === drafts15.length,
+    again.error || JSON.stringify(rep2));
 }
 
 /** A restarted with every rendezvous check failing for ~90 s (debug switch):
@@ -199,7 +230,7 @@ async function adopt(state) {
     record(`${name}: ready`, await waitReady(base, 300));
     if (state?.hash) {
       record(`${name}: holds A's poll before A goes`, await until(async () => ((await op(base, { op: 'polls' })).data || []).some((p) => p.hash === state.hash), 300, 10000));
-      record(`${name}: holds A's vote`, await until(async () => ((await op(base, { op: 'votes', poll: state.hash, dna_version: '1.4' })).data || []).length >= 1, 300, 10000));
+      record(`${name}: holds A's vote`, await until(async () => ((await op(base, { op: 'votes', poll: state.hash, dna_version: '1.5' })).data || []).length >= 1, 300, 10000));
     }
     // A's last public write: a restore soon after authoring elsewhere can pin
     // a stale head (upstream's caution), so the peers hold it first.

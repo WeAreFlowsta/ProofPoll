@@ -40,10 +40,9 @@ use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 mod profiles;
-// The move to v1.5 and the node's carrier use it (in progress: the slices
-// in planning/PROOFPOLL_CARRIER.md); until then only its tests do.
-#[allow(dead_code)]
+// Carried records: the move to v1.5 builds and checks them.
 mod carried;
+mod carry_move;
 mod vault_probe;
 mod webview_fix;
 mod kits;
@@ -237,7 +236,6 @@ pub fn run() {
                 let data_dir = startup_state.data_dir.clone();
 
                 let monitor_handle = app_handle.clone();
-                let migration_handle = app_handle.clone();
                 match conductor::start_holochain(
                     app_handle,
                     startup_state.clone(),
@@ -275,13 +273,12 @@ pub fn run() {
                         let app_port = result.handle.app_port_07;
                         let conductor_pid = result.handle.conductor_pid;
                         let conductor_pid_07 = result.handle.conductor_pid_07;
-                        let needs_migration = result.needs_migration;
-                        let v1_3_available = result.app_client_v1_3.is_some();
 
                         *startup_state.conductor_handle.lock().unwrap() = Some(result.handle);
                         *startup_state.agent_pub_key.lock().unwrap() = Some(result.agent_key);
                         *startup_state.agent_pub_key_07.lock().unwrap() = Some(result.agent_key_07);
                         *startup_state.app_client.lock().await = Some(result.app_client);
+                        *startup_state.app_client_v1_4.lock().await = result.app_client_v1_4;
                         *startup_state.app_client_v1_3.lock().await = result.app_client_v1_3;
                         *startup_state.app_client_v1_2.lock().await = result.app_client_v1_2;
                         *startup_state.app_client_v1_1.lock().await = result.app_client_v1_1;
@@ -312,71 +309,11 @@ pub fn run() {
                             monitor_handle,
                         );
 
-                        // Run migration if the previous version is installed and
-                        // migration hasn't completed yet.
-                        let should_migrate = needs_migration || {
-                            let ms = startup_state.migration_state.lock().await;
-                            v1_3_available
-                                && ms.status != migration::MigrationStatus::Complete
-                        };
-                        if should_migrate {
-                            let migration_state = startup_state.clone();
-                            tauri::async_runtime::spawn(async move {
-                                log::info!("Starting migration to {}...", dna::ACTIVE_APP_ID);
-                                match migration::run_migration(
-                                    &migration_state,
-                                    &migration_handle,
-                                )
-                                .await
-                                {
-                                    Ok(()) => {
-                                        log::info!("Migration completed successfully");
-                                        if let Err(e) = migration::carry_private(&migration_state).await {
-                                            log::warn!("Drafts and vote reasons not copied this run: {}", e);
-                                        }
-                                        // Start retry loop for pending votes
-                                        migration::spawn_migration_retry_loop(
-                                            migration_state,
-                                            migration_handle,
-                                        );
-                                    }
-                                    Err(e) => {
-                                        log::error!("Migration failed: {}", e);
-                                        let mut ms = migration_state.migration_state.lock().await;
-                                        ms.status = migration::MigrationStatus::Error(e);
-                                        ms.save(&migration_state.data_dir);
-                                    }
-                                }
-                            });
-                        } else {
-                            // Installs that migrated on 0.5.0 left their 0.4.x
-                            // drafts and vote reasons on v1.3: copy them once.
-                            let carry_needed = {
-                                let ms = startup_state.migration_state.lock().await;
-                                v1_3_available && !ms.private_carried
-                            };
-                            if carry_needed {
-                                let carry_state = startup_state.clone();
-                                tauri::async_runtime::spawn(async move {
-                                    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-                                    if let Err(e) = migration::carry_private(&carry_state).await {
-                                        log::warn!("Drafts and vote reasons not copied this run: {}", e);
-                                    }
-                                });
-                            }
-                            // Check if there are pending votes from a previous run
-                            let has_pending = {
-                                let ms = startup_state.migration_state.lock().await;
-                                !ms.votes_pending.is_empty()
-                            };
-                            if has_pending {
-                                let retry_state = startup_state.clone();
-                                migration::spawn_migration_retry_loop(
-                                    retry_state,
-                                    migration_handle,
-                                );
-                            }
-                        }
+                        // What this install wrote on v1.3 and v1.4 is carried
+                        // to v1.5 with its proofs, in the background, until
+                        // nothing is left (carry_move.rs). It replaces the
+                        // v1.3 to v1.4 move, which wrote records again.
+                        carry_move::spawn(startup_state.clone());
                     }
                     Err(e) => {
                         log::error!("Failed to start conductor: {}", e);

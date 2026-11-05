@@ -34,19 +34,25 @@ export interface Poll {
   poll_type: PollType | null;
 }
 
+/** The ProofPoll network a poll lives on. */
+export type DnaVersion = "1.0" | "1.1" | "1.2" | "1.3" | "1.4" | "1.5";
+
 export interface PollListItem {
   hash: string;
   poll: Poll;
   author: string;
   /** Which DHT this poll lives on. Pass back to castVote and getPollVotes. */
-  dna_version: "1.0" | "1.1" | "1.2" | "1.3" | "1.4";
+  dna_version: DnaVersion;
 }
 
 export interface PollDetail {
+  /** The poll this is: the hash asked for, or the copy on the active
+   *  network an older hash opens. Use it for votes, flags and delete. */
+  hash: string;
   poll: Poll;
   author: string;
   /** Which DHT this poll lives on. Pass back to castVote and getPollVotes. */
-  dna_version: "1.0" | "1.1" | "1.2" | "1.3" | "1.4";
+  dna_version: DnaVersion;
 }
 
 export interface VoteData {
@@ -106,7 +112,7 @@ export async function deletePoll(actionHash: string): Promise<string> {
 export async function castVote(
   pollActionHash: string,
   optionIndex: number,
-  dnaVersion: "1.0" | "1.1" | "1.2" | "1.3" | "1.4",
+  dnaVersion: DnaVersion,
   pollType?: PollType,
 ): Promise<string> {
   return backedUp(
@@ -121,7 +127,7 @@ export async function castVote(
 
 export async function getPollVotes(
   pollActionHash: string,
-  dnaVersion: "1.0" | "1.1" | "1.2" | "1.3" | "1.4",
+  dnaVersion: DnaVersion,
 ): Promise<VoteData[]> {
   return invoke<VoteData[]>("get_poll_votes", {
     pollActionHash,
