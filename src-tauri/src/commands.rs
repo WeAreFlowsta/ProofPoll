@@ -2505,15 +2505,13 @@ pub async fn build_canonical_backup(
     .await
     .map_err(|e| format!("Failed to connect to admin WS for backup: {}", e))?;
 
-    // 2. Find the active (v1.4) provisioned cell.
+    // 2. Find the active (v1.4) provisioned cell, and v1.5's when installed.
     let apps = admin_ws
         .list_apps(None)
         .await
         .map_err(|e| format!("list_apps: {}", e))?;
-    let cell_id = apps
-        .iter()
-        .find(|a| a.installed_app_id == crate::dna::ACTIVE_APP_ID)
-        .and_then(|app| {
+    let cell_of = |app_id: &str| {
+        apps.iter().find(|a| a.installed_app_id == app_id).and_then(|app| {
             app.cell_info
                 .values()
                 .flat_map(|cells| cells.iter())
@@ -2522,7 +2520,9 @@ pub async fn build_canonical_backup(
                     _ => None,
                 })
         })
-        .ok_or("Active app cell not found for backup")?;
+    };
+    let cell_id = cell_of(crate::dna::ACTIVE_APP_ID).ok_or("Active app cell not found for backup")?;
+    let cell_id_15 = cell_of(crate::dna::APP_ID_V1_5);
 
     // 3. Dump the full source chain (every action authored by this agent).
     let dump = admin_ws
@@ -2609,6 +2609,38 @@ pub async fn build_canonical_backup(
         }
     };
 
+    // 4c. The v1.5 chain, once installed. It must be in the backup: a key
+    // whose v1.5 chain exists (from its genesis on) restores it on a new
+    // device instead of starting a second one (seed_adopt::backup_chain), so
+    // a backup that cannot list it is not made. Its records are not counted:
+    // they are carried copies of records counted above.
+    let cell_15 = match cell_id_15 {
+        Some(cell_id_15) => {
+            let dump_15 = admin_ws
+                .dump_full_state(cell_id_15, None, None)
+                .await
+                .map_err(|e| format!("dump_full_state (v1.5): {}", e))?;
+            let mut records_15: Vec<serde_json::Value> = Vec::new();
+            for rec in &dump_15.source_chain_dump.records {
+                let raw_record = serde_json::to_value(rec)
+                    .map_err(|e| format!("serialize SourceChainDumpRecord (v1.5): {}", e))?;
+                records_15.push(serde_json::json!({
+                    "actionHash": rec.action_address.to_string(),
+                    "createdAtMs": rec.action.timestamp().as_millis(),
+                    "raw_record": raw_record,
+                }));
+            }
+            Some(serde_json::json!({
+                "role_name": "polls",
+                "line": "holochain-0.7",
+                "dna_version": "1.5",
+                "_readme": "Your chain on ProofPoll's newer network on the same Holochain line: copies of your polls and votes that carry the original signed record. They are counted once, in the chain above.",
+                "records": records_15,
+            }))
+        }
+        None => None,
+    };
+
     let total_records: usize = counts.values().sum();
     let counts_json: serde_json::Map<String, serde_json::Value> = counts
         .into_iter()
@@ -2624,6 +2656,7 @@ pub async fn build_canonical_backup(
         "_readme": "Each record below is one action on your source chain. `human_readable` is the plain-English view (app entries only). `raw_record` is the signed record used to restore your chain onto a fresh install.",
         "records": records,
     })];
+    cells.extend(cell_15);
     cells.extend(cell_06);
 
     // 5. Assemble the canonical payload.

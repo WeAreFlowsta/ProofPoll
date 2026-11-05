@@ -56,12 +56,12 @@ pub(crate) fn clear_relink_marker(data_dir: &Path) {
     let _ = std::fs::remove_file(relink_marker_path(data_dir));
 }
 
-/// Written by an adopt whose Vault backup shows the key already has a chain
-/// on the Holochain 0.7 line (DNA v1.4). The next start rebuilds that chain
-/// from the network (`restore_from_dht`) instead of starting a second chain
-/// under the same key: in 0.7.1 the new chain and the old one, arriving from
-/// peers, share one store, so the new device's writes fail or fork the
-/// chain. Cleared once the restored app is enabled.
+/// Written by an adopt whose Vault backup shows the key already has chains
+/// on the Holochain 0.7 line (DNA v1.4, and v1.5 once installed). The next
+/// start rebuilds each from the network (`restore_from_dht`) instead of
+/// starting a second chain under the same key: in 0.7.1 the new chain and the
+/// old one, arriving from peers, share one store, so the new device's writes
+/// fail or fork the chain. Cleared once the restored apps are enabled.
 pub const RESTORE_MARKER: &str = "restore-chain-07";
 
 /// What the restore marker records.
@@ -72,6 +72,14 @@ pub struct RestoreMarker {
     /// The highest action seq the backup holds; the restored chain reaches
     /// at least this far.
     pub backup_head_seq: u32,
+    /// The DNA versions whose chain the key has (`dna::APPS_07`); a marker
+    /// from before v1.5 names v1.4 alone.
+    #[serde(default = "only_v1_4")]
+    pub dnas: Vec<String>,
+}
+
+fn only_v1_4() -> Vec<String> {
+    vec!["1.4".into()]
 }
 
 fn restore_marker_path(data_dir: &Path) -> PathBuf {
@@ -105,21 +113,24 @@ pub fn clear_restore_marker(data_dir: &Path) {
 /// action is `{header, data}`, a 0.6 dump's a tagged `{type, ..}`).
 #[derive(Debug, PartialEq)]
 pub(crate) enum BackupChain {
-    /// The key has a v1.4 chain; the highest seq the backup holds.
-    Line07 { head_seq: u32 },
+    /// The key has 0.7 chains: the highest seq the backup holds, and each
+    /// chain's DNA version (the cell's `dna_version`; before 0.6.0, v1.4).
+    /// A cell is a chain even with no records listed: the app was installed.
+    Line07 { head_seq: u32, dnas: Vec<String> },
     Line06,
     /// No records to tell from.
     Unknown,
 }
 
 pub(crate) fn backup_chain(data: &serde_json::Value) -> BackupChain {
-    let mut line07 = false;
     let mut line06 = false;
     let mut head_seq = 0u32;
+    let mut dnas: Vec<String> = Vec::new();
     let cells = data.get("cells").and_then(|c| c.as_array()).map(|c| c.as_slice()).unwrap_or(&[]);
     for cell in cells {
+        let mut cell07 = false;
         match cell.get("line").and_then(|l| l.as_str()) {
-            Some("holochain-0.7") => line07 = true,
+            Some("holochain-0.7") => cell07 = true,
             Some("holochain-0.6") => line06 = true,
             _ => {}
         }
@@ -127,16 +138,22 @@ pub(crate) fn backup_chain(data: &serde_json::Value) -> BackupChain {
         for rec in records {
             let action = &rec["raw_record"]["action"];
             if let Some(header) = action.get("header").filter(|h| h.is_object()) {
-                line07 = true;
+                cell07 = true;
                 let seq = header.get("action_seq").and_then(|s| s.as_u64()).unwrap_or(0);
                 head_seq = head_seq.max(u32::try_from(seq).unwrap_or(u32::MAX));
             } else if action.get("type").is_some() {
                 line06 = true;
             }
         }
+        if cell07 {
+            let dna = cell.get("dna_version").and_then(|v| v.as_str()).unwrap_or("1.4").to_string();
+            if !dnas.contains(&dna) {
+                dnas.push(dna);
+            }
+        }
     }
-    if line07 {
-        BackupChain::Line07 { head_seq }
+    if !dnas.is_empty() {
+        BackupChain::Line07 { head_seq, dnas }
     } else if line06 {
         BackupChain::Line06
     } else {
@@ -535,11 +552,11 @@ pub async fn adopt_escrowed_seed(
         }
     }
     let marker = match backup_chain(&backup) {
-        BackupChain::Line07 { head_seq } => {
+        BackupChain::Line07 { head_seq, dnas } => {
             let agent = backup["agent_pub_key"]
                 .as_str()
                 .ok_or("Your Vault backup does not name its key - nothing was changed.")?;
-            Some(RestoreMarker { agent: agent.to_string(), backup_head_seq: head_seq })
+            Some(RestoreMarker { agent: agent.to_string(), backup_head_seq: head_seq, dnas })
         }
         BackupChain::Line06 | BackupChain::Unknown => None,
     };
@@ -550,7 +567,11 @@ pub async fn adopt_escrowed_seed(
         Some(m) => {
             write_restore_marker(&state.data_dir, m)
                 .map_err(|e| format!("Could not prepare the restore ({}) - nothing was changed.", e))?;
-            log::info!("[adopt] the backup holds a 0.7 chain up to seq {}: the next start restores it from the network", m.backup_head_seq);
+            log::info!(
+                "[adopt] the backup holds 0.7 chains (v{}) up to seq {}: the next start restores them from the network",
+                m.dnas.join(", v"),
+                m.backup_head_seq
+            );
         }
         None => clear_restore_marker(&state.data_dir),
     }
@@ -898,15 +919,27 @@ mod tests {
     fn backup_chain_tells_the_lines_apart() {
         // 0.5.0's backups: v1.4 records, no `line`; the highest seq counts.
         let b050 = serde_json::json!({"cells": [{"role_name": "polls", "records": [rec07(0), rec07(31), rec07(7)]}]});
-        assert_eq!(backup_chain(&b050), BackupChain::Line07 { head_seq: 31 });
+        let v14 = || vec!["1.4".to_string()];
+        assert_eq!(backup_chain(&b050), BackupChain::Line07 { head_seq: 31, dnas: v14() });
         // 0.3/0.4's backups: v1.3 records from the 0.6 line.
         let b040 = serde_json::json!({"cells": [{"records": [rec06(0), rec06(12)]}]});
         assert_eq!(backup_chain(&b040), BackupChain::Line06);
         // From 0.6.0 the cell names its line.
         let b060 = serde_json::json!({"cells": [{"line": "holochain-0.7", "records": [rec07(4)]}]});
-        assert_eq!(backup_chain(&b060), BackupChain::Line07 { head_seq: 4 });
+        assert_eq!(backup_chain(&b060), BackupChain::Line07 { head_seq: 4, dnas: v14() });
         let named_only = serde_json::json!({"cells": [{"line": "holochain-0.7", "records": []}]});
-        assert_eq!(backup_chain(&named_only), BackupChain::Line07 { head_seq: 0 });
+        assert_eq!(backup_chain(&named_only), BackupChain::Line07 { head_seq: 0, dnas: v14() });
+        // From v1.5 each 0.7 cell names its DNA version; the 0.6 one does not count.
+        let b15 = serde_json::json!({"cells": [
+            {"line": "holochain-0.7", "dna_version": "1.4", "records": [rec07(9)]},
+            {"line": "holochain-0.7", "dna_version": "1.5", "records": [rec07(3)]},
+            {"line": "holochain-0.6", "dna_version": "1.3", "records": [rec06(40)]}]});
+        assert_eq!(backup_chain(&b15), BackupChain::Line07 { head_seq: 9, dnas: vec!["1.4".into(), "1.5".into()] });
+        // v1.5 installed with only its genesis listed is still a chain to restore.
+        let genesis_only = serde_json::json!({"cells": [
+            {"line": "holochain-0.7", "dna_version": "1.4", "records": [rec07(9)]},
+            {"line": "holochain-0.7", "dna_version": "1.5", "records": []}]});
+        assert_eq!(backup_chain(&genesis_only), BackupChain::Line07 { head_seq: 9, dnas: vec!["1.4".into(), "1.5".into()] });
         // Nothing to tell from.
         assert_eq!(backup_chain(&serde_json::json!({"cells": [{"records": []}]})), BackupChain::Unknown);
         assert_eq!(backup_chain(&serde_json::json!({"version": 1})), BackupChain::Unknown);
@@ -918,10 +951,21 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("pp-restore-marker-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         assert_eq!(read_restore_marker(&dir), None);
-        let m = RestoreMarker { agent: "uhCAkf5HNWEmQnKbf-3x-4i-Lmu9U1rC2XbcE0x8qVEKJLvODocb0".into(), backup_head_seq: 31 };
+        let m = RestoreMarker {
+            agent: "uhCAkf5HNWEmQnKbf-3x-4i-Lmu9U1rC2XbcE0x8qVEKJLvODocb0".into(),
+            backup_head_seq: 31,
+            dnas: vec!["1.4".into(), "1.5".into()],
+        };
         write_restore_marker(&dir, &m).unwrap();
         assert_eq!(read_restore_marker(&dir), Some(m));
         assert!(!dir.join(format!("{}.tmp", RESTORE_MARKER)).exists());
+        // A marker written before v1.5 names v1.4 alone.
+        std::fs::write(
+            dir.join(RESTORE_MARKER),
+            br#"{"agent":"uhCAkf5HNWEmQnKbf-3x-4i-Lmu9U1rC2XbcE0x8qVEKJLvODocb0","backup_head_seq":31}"#,
+        )
+        .unwrap();
+        assert_eq!(read_restore_marker(&dir).map(|m| m.dnas), Some(vec!["1.4".to_string()]));
         // A damaged marker is ignored, never trusted.
         std::fs::write(dir.join(RESTORE_MARKER), b"{not json").unwrap();
         assert_eq!(read_restore_marker(&dir), None);

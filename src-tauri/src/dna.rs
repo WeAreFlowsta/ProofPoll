@@ -38,12 +38,16 @@ pub const APP_ID_V1_2: &str = "proofpoll_v1_2";
 pub const APP_ID_V1_3: &str = "proofpoll_v1_3";
 /// v1.4: the Holochain 0.7 generation of v1.3, on the 0.7.1 conductor.
 pub const APP_ID_V1_4: &str = "proofpoll_v1_4";
+/// v1.5: v1.4 plus records carried from v1.3 and v1.4 that the network
+/// checks against their original signatures, on the same conductor.
+pub const APP_ID_V1_5: &str = "proofpoll_v1_5";
 
 const HAPP_FILE_V1_0: &str = "proofpoll_v1_0_happ.happ";
 const HAPP_FILE_V1_1: &str = "proofpoll_v1_1_happ.happ";
 const HAPP_FILE_V1_2: &str = "proofpoll_v1_2_happ.happ";
 const HAPP_FILE_V1_3: &str = "proofpoll_v1_3_happ.happ";
 const HAPP_FILE_V1_4: &str = "proofpoll_v1_4_happ.happ";
+const HAPP_FILE_V1_5: &str = "proofpoll_v1_5_happ.happ";
 
 /// The active version for all new reads and writes (on the 0.7.1 conductor).
 pub const ACTIVE_APP_ID: &str = APP_ID_V1_4;
@@ -614,39 +618,69 @@ pub async fn ensure_apps_enabled(admin_ws: &AdminWebsocket) {
 }
 
 
-// ── The Holochain 0.7 line (DNA v1.4) ──────────────────────────────────
+// ── The Holochain 0.7 line (DNA v1.4, and v1.5 beside it) ────────────
 
-/// What `install_dnas_07` did on this start.
+/// One app on the 0.7 conductor, with the version a backup's cell names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct App07 {
+    pub app_id: &'static str,
+    happ: &'static str,
+    pub dna_version: &'static str,
+}
+
+/// The apps on the 0.7 conductor, in install order: v1.4 (the active one),
+/// then v1.5 (carried records; installed beside v1.4, not called yet).
+pub const APPS_07: [App07; 2] = [
+    App07 { app_id: APP_ID_V1_4, happ: HAPP_FILE_V1_4, dna_version: "1.4" },
+    App07 { app_id: APP_ID_V1_5, happ: HAPP_FILE_V1_5, dna_version: "1.5" },
+];
+
+/// What `install_dnas_07` did with one app on this start.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Install07 {
-    /// v1.4 was installed before; it is enabled again.
+    /// Installed before; it is enabled again.
     Present,
-    /// v1.4 was installed now, with a new chain.
+    /// Installed now, with a new chain.
     Installed,
-    /// v1.4 is rebuilding this key's existing chain from the network
-    /// (installed now with `restore_from_dht`, or a restore still running
-    /// from an earlier start); `wait_for_restore_07` finishes it.
+    /// Rebuilding this key's existing chain from the network (installed now
+    /// with `restore_from_dht`, or a restore still running from an earlier
+    /// start); `wait_for_restore_07` finishes it.
     Restoring,
 }
 
-/// Install v1.4 on the 0.7.1 conductor under the same agent key the 0.6
+/// What `install_dnas_07` did with each of `APPS_07`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Installs07(pub Vec<(App07, Install07)>);
+
+impl Installs07 {
+    /// The apps still rebuilding their chain from the network.
+    pub fn restoring(&self) -> Vec<App07> {
+        self.0.iter().filter(|(_, i)| *i == Install07::Restoring).map(|(a, _)| *a).collect()
+    }
+
+    /// Whether anything was installed on this start (a restore included).
+    pub fn any_new(&self) -> bool {
+        self.0.iter().any(|(_, i)| *i != Install07::Present)
+    }
+}
+
+/// Install `APPS_07` on the 0.7.1 conductor under the same agent key the 0.6
 /// conductor uses (the key lives in the shared lair; the DNA hashes differ,
-/// so one key on two conductors is allowed). Re-enables an installed v1.4.
+/// so one key on two conductors is allowed). Re-enables an installed app.
 ///
-/// `restore`: the key already has a v1.4 chain on the network (an adopted
-/// key), so v1.4 installs without genesis and rebuilds that chain from peers.
-/// A fresh genesis under such a key starts a second chain: in 0.7.1 it shares
-/// one store with the old chain arriving from peers, and the device's writes
-/// fail or fork the chain.
+/// `restore`: the versions whose chain this key already has on the network
+/// (an adopted key, from its backup's cells); those install without genesis
+/// and rebuild that chain from peers. A fresh genesis under such a key starts
+/// a second chain: in 0.7.1 it shares one store with the old chain arriving
+/// from peers, and the device's writes fail or fork the chain. An installed
+/// v1.5 has a chain even before the app writes to it (its genesis).
 pub async fn install_dnas_07(
     admin_port: u16,
     resource_dir: &Path,
     agent_key_raw39: &[u8],
-    restore: bool,
-) -> Result<Install07, String> {
-    use holochain_client_07::{AdminWebsocket, InstallAppPayload};
-    use holochain_types_07::app::{AppBundleSource, AppStatus};
-    use holochain_types_07::prelude::AgentPubKey;
+    restore: &[String],
+) -> Result<Installs07, String> {
+    use holochain_client_07::AdminWebsocket;
 
     let admin_ws = AdminWebsocket::connect(
         format!("localhost:{}", admin_port),
@@ -658,11 +692,32 @@ pub async fn install_dnas_07(
         .list_apps(None)
         .await
         .map_err(|e| format!("Failed to list apps (0.7): {}", e))?;
-    if let Some(app) = existing.iter().find(|a| a.installed_app_id == APP_ID_V1_4) {
-        match &app.status {
+    let mut done = Vec::new();
+    for app in APPS_07 {
+        let restore = restore.iter().any(|v| v == app.dna_version);
+        done.push((app, install_one_07(&admin_ws, &existing, resource_dir, agent_key_raw39, app, restore).await?));
+    }
+    Ok(Installs07(done))
+}
+
+async fn install_one_07(
+    admin_ws: &holochain_client_07::AdminWebsocket,
+    existing: &[holochain_client_07::AppInfo],
+    resource_dir: &Path,
+    agent_key_raw39: &[u8],
+    app: App07,
+    restore: bool,
+) -> Result<Install07, String> {
+    use holochain_client_07::InstallAppPayload;
+    use holochain_types_07::app::{AppBundleSource, AppStatus};
+    use holochain_types_07::prelude::AgentPubKey;
+
+    let v = app.dna_version;
+    if let Some(info) = existing.iter().find(|a| a.installed_app_id == app.app_id) {
+        match &info.status {
             // The conductor resumes a restore by itself after a restart.
             AppStatus::AwaitingRestore => {
-                log::info!("ProofPoll v1.4 is still restoring its chain from the network (0.7)");
+                log::info!("ProofPoll v{} is still restoring its chain from the network (0.7)", v);
                 return Ok(Install07::Restoring);
             }
             AppStatus::Unrecoverable(_, reason) => {
@@ -671,25 +726,26 @@ pub async fn install_dnas_07(
             _ => {}
         }
         admin_ws
-            .enable_app(APP_ID_V1_4.to_string())
+            .enable_app(app.app_id.to_string())
             .await
-            .map_err(|e| format!("Failed to re-enable v1.4: {}", e))?;
-        log::info!("ProofPoll v1.4 DNA present and enabled (0.7)");
+            .map_err(|e| format!("Failed to re-enable v{}: {}", v, e))?;
+        log::info!("ProofPoll v{} DNA present and enabled (0.7)", v);
         return Ok(Install07::Present);
     }
-    let happ_path = resource_dir.join(HAPP_FILE_V1_4);
+    let happ_path = resource_dir.join(app.happ);
     if !happ_path.exists() {
-        return Err(format!("ProofPoll v1.4 hApp bundle not found at {:?}", happ_path));
+        return Err(format!("ProofPoll v{} hApp bundle not found at {:?}", v, happ_path));
     }
     log::info!(
-        "Installing ProofPoll v1.4 DNA from {:?} (0.7{})...",
+        "Installing ProofPoll v{} DNA from {:?} (0.7{})...",
+        v,
         happ_path,
         if restore { ", restoring this key's chain from the network" } else { "" }
     );
     let payload = InstallAppPayload {
         source: AppBundleSource::Path(happ_path),
         agent_key: Some(AgentPubKey::from_raw_39(agent_key_raw39.to_vec())),
-        installed_app_id: Some(APP_ID_V1_4.to_string()),
+        installed_app_id: Some(app.app_id.to_string()),
         network_seed: None,
         roles_settings: None,
         ignore_genesis_failure: false,
@@ -698,15 +754,15 @@ pub async fn install_dnas_07(
     admin_ws
         .install_app(payload)
         .await
-        .map_err(|e| format!("Failed to install v1.4 DNA: {}", e))?;
+        .map_err(|e| format!("Failed to install v{} DNA: {}", v, e))?;
     if restore {
         return Ok(Install07::Restoring);
     }
     admin_ws
-        .enable_app(APP_ID_V1_4.to_string())
+        .enable_app(app.app_id.to_string())
         .await
-        .map_err(|e| format!("Failed to enable v1.4 DNA: {}", e))?;
-    log::info!("ProofPoll v1.4 DNA installed and enabled (0.7)");
+        .map_err(|e| format!("Failed to enable v{} DNA: {}", v, e))?;
+    log::info!("ProofPoll v{} DNA installed and enabled (0.7)", v);
     Ok(Install07::Installed)
 }
 
@@ -721,12 +777,13 @@ fn unrecoverable_message(reason: &str) -> String {
     )
 }
 
-/// Wait for v1.4's restore to finish, then enable it. Holochain retries by
+/// Wait for `app`'s restore to finish, then enable it. Holochain retries by
 /// itself (no peers, too few peers agreeing on the chain head, a gap), so
 /// there is no time limit here: `progress` hears the seconds waited every
 /// few seconds, for the start screen.
 pub async fn wait_for_restore_07(
     admin_port: u16,
+    app: App07,
     progress: impl Fn(u64),
 ) -> Result<(), String> {
     use holochain_client_07::AdminWebsocket;
@@ -738,6 +795,7 @@ pub async fn wait_for_restore_07(
     )
     .await
     .map_err(|e| format!("Failed to connect to the 0.7 admin WebSocket: {}", e))?;
+    let v = app.dna_version;
     let started = std::time::Instant::now();
     loop {
         let apps = admin_ws
@@ -746,9 +804,9 @@ pub async fn wait_for_restore_07(
             .map_err(|e| format!("Failed to list apps (0.7): {}", e))?;
         let status = apps
             .iter()
-            .find(|a| a.installed_app_id == APP_ID_V1_4)
+            .find(|a| a.installed_app_id == app.app_id)
             .map(|a| a.status.clone())
-            .ok_or("v1.4 is not installed (0.7)")?;
+            .ok_or_else(|| format!("v{} is not installed (0.7)", v))?;
         match status {
             AppStatus::AwaitingRestore => {
                 progress(started.elapsed().as_secs());
@@ -761,11 +819,12 @@ pub async fn wait_for_restore_07(
             // Restored (Disabled(NeverStarted)), or a later disable.
             _ => {
                 admin_ws
-                    .enable_app(APP_ID_V1_4.to_string())
+                    .enable_app(app.app_id.to_string())
                     .await
-                    .map_err(|e| format!("Failed to enable the restored v1.4: {}", e))?;
+                    .map_err(|e| format!("Failed to enable the restored v{}: {}", v, e))?;
                 log::info!(
-                    "ProofPoll v1.4 chain restored from the network and enabled (0.7, {} s)",
+                    "ProofPoll v{} chain restored from the network and enabled (0.7, {} s)",
+                    v,
                     started.elapsed().as_secs()
                 );
                 return Ok(());

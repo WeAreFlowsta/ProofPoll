@@ -8,8 +8,10 @@
 #     and integrity checks it against the original author's signature
 #   - CarriedLink: an agent link carried the same way
 #
-# The app does not ship v1.5 yet: this script packs it, and the sweettests
-# in tests/ load it from workdir/.
+# The app bundles this pack as src-tauri/resources/proofpoll_v1_5_happ.happ
+# (copied by hand, its sha256 in src-tauri/src/kits.rs). Once a release has
+# shipped it, never rebuild it: a new build is a new DNA hash, a new network.
+# The sweettests in tests/ load it from workdir/.
 #
 # Prerequisites:
 #   - hc CLI 0.7.1 (cargo install holochain_cli --version 0.7.1), reachable
