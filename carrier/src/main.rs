@@ -6,20 +6,23 @@
 //!
 //! It writes on v1.5 only: the carries, and the removal of a copy it made
 //! when the original's author deleted the original. On each conductor it
-//! also adds what any client needs: a signing-credential grant on the
-//! node's own cell (an app interface is reused when one answers to its
-//! origin). It prints counts only, one JSON line.
+//! also adds what any client needs: a signing-credential grant on each of
+//! the node's own cells, listing only the functions it calls (an app
+//! interface is reused when one answers to its origin). With `--state` the
+//! credentials are kept in that file between runs, so a grant is added only
+//! when the kept one is gone. It prints counts only, one JSON line.
 //!
 //! ```text
 //! proofpoll-carrier [--admin-06 localhost:4444] [--admin-07 localhost:4445]
 //!   [--origin flowsta-agent] [--dry-run] [--max-writes 500]
-//!   [--pause-ms 200] [--min-free-mb 150] [--verbose]
+//!   [--pause-ms 200] [--min-free-mb 150] [--verbose] [--state <file>]
 //! ```
 //! `--dry-run` reads and counts and writes nothing on v1.5 (the signing
 //! grants are still added). `--verbose` prints each delete decision on
-//! stderr. Exit status: 0 when the pass ran (whatever it carried), 2 when it
-//! stopped early (memory, the write limit, a read that failed), 1 when it
-//! could not run.
+//! stderr. `--state <file>` keeps each cell's signing key and cap secret
+//! (written owner-readable only). Exit status: 0 when the pass ran
+//! (whatever it carried), 2 when it stopped early (memory, the write limit,
+//! a read that failed), 1 when it could not run.
 
 #[allow(dead_code)]
 #[path = "../../src-tauri/src/hc.rs"]
@@ -46,7 +49,7 @@ fn number(args: &[String], name: &str, default: u64) -> Result<u64, String> {
 fn options() -> Result<node::Options, String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--help" || a == "-h") {
-        println!("proofpoll-carrier [--admin-06 localhost:4444] [--admin-07 localhost:4445] [--origin flowsta-agent] [--dry-run] [--max-writes 500] [--pause-ms 200] [--min-free-mb 150] [--verbose]");
+        println!("proofpoll-carrier [--admin-06 localhost:4444] [--admin-07 localhost:4445] [--origin flowsta-agent] [--dry-run] [--max-writes 500] [--pause-ms 200] [--min-free-mb 150] [--verbose] [--state <file>]");
         std::process::exit(0);
     }
     Ok(node::Options {
@@ -58,6 +61,7 @@ fn options() -> Result<node::Options, String> {
         pause_ms: number(&args, "pause-ms", 200)?,
         min_free_mb: number(&args, "min-free-mb", 150)?,
         verbose: args.iter().any(|a| a == "--verbose"),
+        state: arg(&args, "state").map(std::path::PathBuf::from),
     })
 }
 
@@ -70,7 +74,11 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    match node::run(&opts).await {
+    let result = node::run(&opts).await;
+    // The connections were dropped with the pass; their close frames go
+    // out from tasks of this runtime, so give them a moment before exit.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    match result {
         Ok(report) => {
             println!("{}", serde_json::to_string(&report).unwrap_or_default());
             std::process::exit(if report.stopped.is_some() { 2 } else { 0 });

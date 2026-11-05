@@ -44,6 +44,10 @@ pub struct Options {
     pub min_free_mb: u64,
     /// Each delete decision on stderr (hashes only).
     pub verbose: bool,
+    /// Where the signing credentials are kept between runs (each cell's
+    /// key and cap secret, the file owner-readable only). Without it each
+    /// run adds a grant to each of the node's chains.
+    pub state: Option<std::path::PathBuf>,
 }
 
 /// What a pass saw and did: counts only.
@@ -63,6 +67,9 @@ pub struct Report {
     pub waiting: u64,
     /// Refused or failed; each reason is on stderr.
     pub failed: u64,
+    /// Signing grants added to the node's chains this run (none while the
+    /// kept credentials' grants are live).
+    pub grants: u64,
     /// Anything was written on v1.5 this pass.
     pub wrote: bool,
     /// Why the pass stopped before the end (memory, the write limit, a read
@@ -133,6 +140,186 @@ fn available_mb() -> Option<u64> {
     line.split_whitespace().nth(1)?.parse::<u64>().ok().map(|kb| kb / 1024)
 }
 
+// ── Signing credentials ──────────────────────────────────────────────
+
+/// What the carrier calls on v1.3 and v1.4: getters only.
+const OLDER_FUNCTIONS: &[&str] = &["get_all_polls", "get_all_migration_mappings", "get_poll_votes", "get_poll_flags"];
+
+/// What it calls on v1.5: the carries, its own copies' removal, and reads.
+const V15_FUNCTIONS: &[&str] = &[
+    "carry_link",
+    "carry_poll",
+    "map_later_copy",
+    "carry_vote",
+    "carry_flag",
+    "delete_poll",
+    "remove_flag",
+    "get_all_polls",
+    "get_poll",
+    "get_poll_votes",
+    "get_poll_flags",
+    "get_migration_mapping",
+    "get_migration_record",
+    "get_carried_links",
+];
+
+fn sorted(functions: &[&str]) -> Vec<String> {
+    let mut v: Vec<String> = functions.iter().map(|f| f.to_string()).collect();
+    v.sort();
+    v
+}
+
+/// One cell's kept credentials: the signing key and cap secret its grant
+/// was made for, and the functions it lists.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+struct Kept {
+    key: String,
+    secret: String,
+    functions: Vec<String>,
+}
+
+impl Kept {
+    fn new(key: &ed25519_dalek::SigningKey, secret: &[u8], functions: Vec<String>) -> Self {
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD;
+        Kept { key: b64.encode(key.to_bytes()), secret: b64.encode(secret), functions }
+    }
+
+    fn key_and_secret(&self) -> Result<(ed25519_dalek::SigningKey, [u8; 64]), String> {
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let key: [u8; 32] = b64.decode(&self.key).map_err(|e| e.to_string())?.try_into().map_err(|_| "a key of the wrong length")?;
+        let secret: [u8; 64] = b64.decode(&self.secret).map_err(|e| e.to_string())?.try_into().map_err(|_| "a secret of the wrong length")?;
+        Ok((ed25519_dalek::SigningKey::from_bytes(&key), secret))
+    }
+}
+
+/// The credentials file: one entry per cell ("<dna> <agent>").
+#[derive(Serialize, Deserialize, Default)]
+struct State {
+    #[serde(default)]
+    cells: std::collections::BTreeMap<String, Kept>,
+    #[serde(skip)]
+    path: Option<std::path::PathBuf>,
+    #[serde(skip)]
+    changed: bool,
+}
+
+impl State {
+    /// The kept file, or an empty state (no file yet, none asked for, or
+    /// one that does not read: then new grants replace it).
+    fn load(path: Option<&std::path::Path>) -> State {
+        let Some(path) = path else { return State::default() };
+        let mut state = match std::fs::read(path) {
+            Ok(bytes) => serde_json::from_slice::<State>(&bytes).unwrap_or_else(|e| {
+                eprintln!("carrier: the credentials file does not read ({e}); new grants replace it");
+                State::default()
+            }),
+            Err(_) => State::default(),
+        };
+        state.path = Some(path.to_path_buf());
+        state
+    }
+
+    fn keep(&mut self, cell: String, kept: Kept) {
+        if self.path.is_some() {
+            self.cells.insert(cell, kept);
+            self.changed = true;
+        }
+    }
+
+    /// Written whole to a file only its owner reads, then moved into place.
+    fn save(&self) -> Result<(), String> {
+        let (Some(path), true) = (&self.path, self.changed) else { return Ok(()) };
+        let tmp = path.with_extension("tmp");
+        let bytes = serde_json::to_vec(self).map_err(|e| e.to_string())?;
+        let mut open = std::fs::OpenOptions::new();
+        open.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut open, 0o600);
+        let mut f = open.open(&tmp).map_err(|e| format!("the credentials file: {e}"))?;
+        std::io::Write::write_all(&mut f, &bytes).map_err(|e| format!("the credentials file: {e}"))?;
+        f.sync_all().map_err(|e| format!("the credentials file: {e}"))?;
+        std::fs::rename(&tmp, path).map_err(|e| format!("the credentials file: {e}"))
+    }
+}
+
+/// Whether a listed grant (secrets removed) is assigned to `key`: the
+/// assignees sit under `access` on 0.6 and `constraint` on 0.7, both
+/// private fields, so they are read from the grant's serialized form.
+fn assigned_to<G: Serialize, K: Serialize>(grant: &G, key: &K) -> bool {
+    let (Ok(g), Ok(k)) = (serde_json::to_value(grant), serde_json::to_value(key)) else { return false };
+    g.get("access")
+        .or_else(|| g.get("constraint"))
+        .and_then(|a| a.get("assignees"))
+        .and_then(|a| a.as_array())
+        .is_some_and(|a| a.contains(&k))
+}
+
+/// A cell's signing credentials, the same on both lines: the kept ones
+/// while their grant is live and lists today's functions; otherwise a new
+/// grant (the kept one revoked first when it is live with other functions).
+macro_rules! credentials {
+    ($name:ident, $client:ident, $types:ident) => {
+        async fn $name(
+            admin: &$client::AdminWebsocket,
+            app_id: &str,
+            cell: &$client::CellId,
+            functions: &[&str],
+            state: &mut State,
+            grants: &mut u64,
+        ) -> Result<$client::SigningCredentials, String> {
+            use $client::{AuthorizeSigningCredentialsPayload, GrantedFunctions, SigningCredentials};
+            use $types::prelude::{AgentPubKey, CapSecret, FunctionName, ZomeName};
+            let id = format!("{} {}", cell.dna_hash(), cell.agent_pubkey());
+            let wanted = sorted(functions);
+            if let Some(kept) = state.cells.get(&id).cloned() {
+                match kept.key_and_secret() {
+                    Ok((keypair, secret)) => {
+                        let signing_agent_key = AgentPubKey::from_raw_32(keypair.verifying_key().as_bytes().to_vec());
+                        // Every grant, revoked ones too, filtered below: asked
+                        // without them, Holochain 0.6.1 lists none at all.
+                        let listed = admin
+                            .list_capability_grants(app_id.to_string(), true)
+                            .await
+                            .map_err(|e| format!("{app_id} grants: {e}"))?;
+                        let live = listed
+                            .0
+                            .iter()
+                            .filter(|(c, _)| c == cell)
+                            .flat_map(|(_, g)| g.iter())
+                            .find(|g| g.revoked_at.is_none() && assigned_to(&g.cap_grant, &signing_agent_key));
+                        match live {
+                            Some(_) if kept.functions == wanted => {
+                                return Ok(SigningCredentials { signing_agent_key, keypair, cap_secret: CapSecret::from(secret) });
+                            }
+                            Some(g) => {
+                                admin
+                                    .revoke_zome_call_capability(cell.clone(), g.action_hash.clone())
+                                    .await
+                                    .map_err(|e| format!("{app_id} revoke the old grant: {e}"))?;
+                            }
+                            None => eprintln!("carrier: the kept grant on {app_id} is gone; a new one"),
+                        }
+                    }
+                    Err(e) => eprintln!("carrier: the kept credentials for {app_id} do not read ({e}); a new grant"),
+                }
+            }
+            let listed = GrantedFunctions::Listed(functions.iter().map(|f| (ZomeName::from(POLLS), FunctionName::from(*f))).collect());
+            let creds = admin
+                .authorize_signing_credentials(AuthorizeSigningCredentialsPayload { cell_id: cell.clone(), functions: Some(listed) })
+                .await
+                .map_err(|e| format!("{app_id} signing credentials: {e}"))?;
+            *grants += 1;
+            state.keep(id, Kept::new(&creds.keypair, creds.cap_secret.as_ref(), wanted));
+            Ok(creds)
+        }
+    };
+}
+
+credentials!(credentials_06, holochain_client, holochain_types);
+credentials!(credentials_07, holochain_client_07, holochain_types_07);
+
 // ── Connections ──────────────────────────────────────────────────────
 
 /// The 0.6 conductor: v1.3.
@@ -156,11 +343,8 @@ fn host_of(addr: &str) -> &str {
     addr.rsplit_once(':').map_or(addr, |(h, _)| h)
 }
 
-async fn connect_06(o: &Options) -> Result<Option<Line06>, String> {
-    use holochain_client::{
-        AdminWebsocket, AllowedOrigins, AppWebsocket, AuthorizeSigningCredentialsPayload, CellInfo, ClientAgentSigner,
-        IssueAppAuthenticationTokenPayload,
-    };
+async fn connect_06(o: &Options, state: &mut State, grants: &mut u64) -> Result<Option<Line06>, String> {
+    use holochain_client::{AdminWebsocket, AllowedOrigins, AppWebsocket, CellInfo, ClientAgentSigner, IssueAppAuthenticationTokenPayload};
     let admin = match AdminWebsocket::connect(o.admin_06.clone(), Some(o.origin.clone())).await {
         Ok(a) => a,
         Err(e) => {
@@ -187,10 +371,7 @@ async fn connect_06(o: &Options) -> Result<Option<Line06>, String> {
             .map_err(|e| format!("0.6 attach_app_interface: {e}"))?,
     };
     let signer = ClientAgentSigner::default();
-    let creds = admin
-        .authorize_signing_credentials(AuthorizeSigningCredentialsPayload { cell_id: cell.clone(), functions: None })
-        .await
-        .map_err(|e| format!("0.6 signing credentials: {e}"))?;
+    let creds = credentials_06(&admin, APP_V13, &cell, OLDER_FUNCTIONS, state, grants).await?;
     signer.add_credentials(cell.clone(), creds);
     let signer: std::sync::Arc<dyn holochain_client::AgentSigner + Send + Sync> = signer.into();
     let token = admin
@@ -203,11 +384,8 @@ async fn connect_06(o: &Options) -> Result<Option<Line06>, String> {
     Ok(Some(Line06 { admin, cell, v13: AppClient::V06(ws) }))
 }
 
-async fn connect_07(o: &Options) -> Result<Line07, String> {
-    use holochain_client_07::{
-        AdminWebsocket, AllowedOrigins, AppWebsocket, AuthorizeSigningCredentialsPayload, CellInfo, ClientAgentSigner,
-        IssueAppAuthenticationTokenPayload,
-    };
+async fn connect_07(o: &Options, state: &mut State, grants: &mut u64) -> Result<Line07, String> {
+    use holochain_client_07::{AdminWebsocket, AllowedOrigins, AppWebsocket, CellInfo, ClientAgentSigner, IssueAppAuthenticationTokenPayload};
     let admin = AdminWebsocket::connect(o.admin_07.clone(), Some(o.origin.clone()))
         .await
         .map_err(|e| format!("the 0.7 conductor does not answer: {e}"))?;
@@ -231,12 +409,9 @@ async fn connect_07(o: &Options) -> Result<Line07, String> {
             .map_err(|e| format!("0.7 attach_app_interface: {e}"))?,
     };
     let signer = ClientAgentSigner::default();
-    for cell in std::iter::once(&cell15).chain(cell14.iter()) {
-        let creds = admin
-            .authorize_signing_credentials(AuthorizeSigningCredentialsPayload { cell_id: cell.clone(), functions: None })
-            .await
-            .map_err(|e| format!("0.7 signing credentials: {e}"))?;
-        signer.add_credentials(cell.clone(), creds);
+    signer.add_credentials(cell15.clone(), credentials_07(&admin, APP_V15, &cell15, V15_FUNCTIONS, state, grants).await?);
+    if let Some(cell) = &cell14 {
+        signer.add_credentials(cell.clone(), credentials_07(&admin, APP_V14, cell, OLDER_FUNCTIONS, state, grants).await?);
     }
     let signer: std::sync::Arc<dyn holochain_client_07::AgentSigner + Send + Sync> = signer.into();
     let connect = |app_id: &'static str| {
@@ -395,8 +570,20 @@ async fn on_copy(v15: &AppClient, f: &str, copy: &ActionHash) -> Result<OnCopy, 
 
 pub async fn run(o: &Options) -> Result<Report, String> {
     let mut r = Report { dry_run: o.dry_run, ..Default::default() };
-    let l07 = connect_07(o).await?;
-    let l06 = connect_06(o).await?;
+    let mut state = State::load(o.state.as_deref());
+    let connected = async {
+        let l07 = connect_07(o, &mut state, &mut r.grants).await?;
+        let l06 = connect_06(o, &mut state, &mut r.grants).await?;
+        Ok::<_, String>((l07, l06))
+    }
+    .await;
+    // Kept even when a connection failed after a grant was made. A file
+    // that cannot be written does not stop the pass: the next run adds
+    // grants again, which its report's `grants` shows.
+    if let Err(e) = state.save() {
+        eprintln!("carrier: the credentials were not kept ({e})");
+    }
+    let (l07, l06) = connected?;
     r.v13_read = l06.is_some();
     r.v14_read = l07.v14.is_some();
     let mut pace = Pace { o, writes: 0 };
@@ -705,4 +892,96 @@ async fn pass(o: &Options, l06: Option<&Line06>, l07: &Line07, pace: &mut Pace<'
         r.carried.deleted += 1;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every zome function this file names is in a grant's list, so no
+    /// call is refused for a function the grant leaves out.
+    #[test]
+    fn every_function_called_is_granted() {
+        let full = include_str!("node.rs");
+        let src = &full[..full.find("#[cfg(test)]").unwrap()];
+        let granted: HashSet<&str> = V15_FUNCTIONS.iter().chain(OLDER_FUNCTIONS).copied().collect();
+        let prefixes = ["get_", "carry_", "map_", "delete_", "remove_"];
+        // Each `"name"` token: a quote, lowercase letters and underscores, a quote.
+        let mut named = HashSet::new();
+        let bytes = src.as_bytes();
+        for (i, _) in src.match_indices('"') {
+            let rest = &src[i + 1..];
+            let len = rest.bytes().take_while(|b| b.is_ascii_lowercase() || *b == b'_').count();
+            let name = &rest[..len];
+            let closed = bytes.get(i + 1 + len) == Some(&b'"');
+            if closed && prefixes.iter().any(|p| name.starts_with(p) && name.len() > p.len()) {
+                named.insert(name);
+            }
+        }
+        assert!(named.len() >= 14, "the source scan found {named:?}");
+        for f in &named {
+            assert!(granted.contains(f), "{f} is called but in no grant");
+        }
+    }
+
+    /// The older DNAs are only read.
+    #[test]
+    fn the_older_grant_is_getters_only() {
+        assert!(OLDER_FUNCTIONS.iter().all(|f| f.starts_with("get_")));
+    }
+
+    /// Kept credentials read back to the same key and secret.
+    #[test]
+    fn kept_credentials_round_trip() {
+        let key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let secret = [9u8; 64];
+        let kept = Kept::new(&key, &secret, sorted(&["b", "a"]));
+        let json = serde_json::to_string(&kept).unwrap();
+        let back: Kept = serde_json::from_str(&json).unwrap();
+        let (key2, secret2) = back.key_and_secret().unwrap();
+        assert_eq!(key2.to_bytes(), key.to_bytes());
+        assert_eq!(secret2, secret);
+        assert_eq!(back.functions, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    /// A grant's assignees are found under either line's field name.
+    #[test]
+    fn assignees_found_on_both_shapes() {
+        #[derive(Serialize)]
+        struct Access {
+            access_type: String,
+            assignees: Option<Vec<u8>>,
+        }
+        #[derive(Serialize)]
+        struct G06 {
+            access: Access,
+        }
+        #[derive(Serialize)]
+        struct G07 {
+            constraint: Access,
+        }
+        let a = || Access { access_type: "assigned".into(), assignees: Some(vec![1, 2]) };
+        assert!(assigned_to(&G06 { access: a() }, &1u8));
+        assert!(assigned_to(&G07 { constraint: a() }, &2u8));
+        assert!(!assigned_to(&G07 { constraint: a() }, &3u8));
+    }
+
+    /// The file is written owner-readable only, and read back.
+    #[test]
+    fn state_file_is_private() {
+        let dir = std::env::temp_dir().join(format!("carrier-state-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("credentials.json");
+        let mut s = State::load(Some(&path));
+        s.keep("dna agent".into(), Kept::new(&ed25519_dalek::SigningKey::from_bytes(&[1u8; 32]), &[2u8; 64], vec![]));
+        s.save().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        let back = State::load(Some(&path));
+        assert_eq!(back.cells.len(), 1);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

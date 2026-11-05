@@ -345,12 +345,27 @@ async function carrier() {
 
   const node = (await op(D, { op: 'node_admin' })).data;
   record("D: its conductors' admin ports and origin", !!node?.origin, JSON.stringify(node && { admin_06: node.admin_06, admin_07: node.admin_07 }));
+  // The carrier keeps its signing credentials between runs in this file, as
+  // the node's job does; each run's new grants are noted.
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const dRoot = path.join(process.env.HOME, '.local/share', 'proofpoll-test-pp-d');
+  const stateFile = path.join(dRoot, 'carrier-credentials.json');
+  fs.rmSync(stateFile, { force: true });
+  const grants = [];
+  // A connection the carrier drops without a close frame is a warning in
+  // D's conductor logs (A, B and C's apps leave none).
+  const resets = () => fs.readdirSync(dRoot, { recursive: true }).map(String).filter((f) => /holochain-stderr\.log$/.test(f))
+    .reduce((n, f) => n + (fs.readFileSync(path.join(dRoot, f), 'utf8').match(/ResetWithoutClosingHandshake/g) || []).length, 0);
+  const resets0 = resets();
   const run = (extra = []) => new Promise((resolve) => execFile(CARRIER,
-    ['--admin-06', `localhost:${node.admin_06}`, '--admin-07', `localhost:${node.admin_07}`, '--origin', node.origin, '--pause-ms', '50', '--max-writes', '2000', '--verbose', ...extra],
+    ['--admin-06', `localhost:${node.admin_06}`, '--admin-07', `localhost:${node.admin_07}`, '--origin', node.origin, '--pause-ms', '50', '--max-writes', '2000', '--verbose', '--state', stateFile, ...extra],
     { timeout: 900_000, maxBuffer: 1 << 24 },
     (err, stdout, stderr) => {
       let report = null;
       try { report = JSON.parse(String(stdout).trim().split('\n').pop()); } catch { /* none */ }
+      grants.push(report?.grants ?? null);
+      for (const line of String(stderr).split('\n').filter((l) => /grant|credentials/.test(l))) console.log(`    ${line}`);
       resolve({ code: err ? (err.code ?? 1) : 0, report, stderr: String(stderr) });
     }));
   const show = (r) => JSON.stringify(r.report || { code: r.code, stderr: r.stderr.slice(-400) });
@@ -393,6 +408,10 @@ async function carrier() {
   record('the flag is on the copy, by C', flags.length === 1 && flags[0].carried_author === cKey, JSON.stringify(by(flags)));
   const second = await run();
   record('a second run writes nothing', second.code === 0 && second.report?.wrote === false && second.report?.failed === 0, show(second));
+  const cells = 2 + (first.report?.v14_read ? 1 : 0);
+  record('the credentials are kept: a grant per cell on the first run only', grants[0] === cells && grants.slice(1).every((g) => g === 0), JSON.stringify(grants));
+  const mode = fs.statSync(stateFile).mode & 0o777;
+  record('the credentials file is readable by its owner only', mode === 0o600, mode.toString(8));
 
   // B updates: its own move finds its votes carried; a second vote is refused.
   // The carrier's records reach B by gossip first, as they would a voter
@@ -425,6 +444,8 @@ async function carrier() {
   record("the deleted poll's copy no longer lists on v1.5", await until(async () => (listed = await v15(C, 'get_all_polls')) !== null && !listed.some((p) => p.hash === pubCopy), 300, 10000), listed === null ? 'the list did not read' : `${listed.length} listed`);
   let left = null;
   record('the removed flag is gone from v1.5', await until(async () => (left = await v15(C, 'get_poll_flags', anonCopy)) !== null && left.length === 0, 300, 10000), JSON.stringify(left && by(left)));
+  record('no run added a grant after the first', grants.slice(1).every((g) => g === 0), JSON.stringify(grants));
+  record("every run closed its connections (no reset in D's conductor logs)", resets() === resets0, `${resets() - resets0} new over ${grants.length} runs`);
 }
 
 // ───────────────────────── main ─────────────────────────
