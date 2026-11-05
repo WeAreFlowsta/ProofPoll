@@ -15,6 +15,7 @@
 
 use hdk::prelude::*;
 use polls_integrity::*;
+use std::collections::BTreeMap;
 
 #[hdk_dependent_entry_types]
 enum EntryZomes {
@@ -113,12 +114,21 @@ pub fn get_all_polls(_: ()) -> ExternResult<Vec<Record>> {
         GetStrategy::default(),
     )?;
 
+    // One poll per original: a carried poll is listed by the copy that counts.
+    let copies = Copies::read()?;
     let mut records = Vec::new();
     for link in links {
         let hash = ActionHash::try_from(link.target)
             .map_err(|_| wasm_error!("Invalid poll link target"))?;
-        if let Some(record) = get(hash, GetOptions::default())? {
-            records.push(record);
+        if let Some(record) = get(hash.clone(), GetOptions::default())? {
+            let carried = record.entry().to_app_option::<Poll>().ok().flatten().and_then(|p| p.carried_from);
+            let counts = match carried {
+                Some(c) => copies.copy_for(&c.original_action_hash).map_or(true, |first| first == hash),
+                None => true,
+            };
+            if counts && !records.iter().any(|r: &Record| r.action_address() == &hash) {
+                records.push(record);
+            }
         }
     }
 
@@ -130,10 +140,24 @@ pub fn delete_poll(action_hash: ActionHash) -> ExternResult<ActionHash> {
     let record = get(action_hash.clone(), GetOptions::default())?
         .ok_or(wasm_error!("Poll not found"))?;
     let my_agent = agent_info()?.agent_initial_pubkey;
-    if *record.action().author() != my_agent {
+    // Its writer, or for a carried poll the author its proof names.
+    let carried_for = record
+        .entry()
+        .to_app_option::<Poll>()
+        .ok()
+        .flatten()
+        .and_then(|p| p.carried_from)
+        .map(|c| c.original_author);
+    if *record.action().author() != my_agent && carried_for.as_ref() != Some(&my_agent) {
         return Err(wasm_error!("Only the poll creator can delete it"));
     }
 
+    // A carried poll goes with every copy of it here (each carried for the
+    // same author).
+    let targets = match carried_for {
+        Some(_) => Copies::read()?.siblings(&action_hash),
+        None => vec![action_hash.clone()],
+    };
     let anchor = all_polls_anchor()?;
     let links = get_links(
         LinkQuery::try_new(anchor, LinkTypes::AllPolls)?,
@@ -141,10 +165,13 @@ pub fn delete_poll(action_hash: ActionHash) -> ExternResult<ActionHash> {
     )?;
     for link in links {
         if let Ok(target) = ActionHash::try_from(link.target) {
-            if target == action_hash {
+            if targets.contains(&target) {
                 delete_link(link.create_link_hash, GetOptions::default())?;
             }
         }
+    }
+    for target in targets.iter().filter(|t| **t != action_hash) {
+        delete_entry(target.clone())?;
     }
 
     delete_entry(action_hash)
@@ -246,10 +273,7 @@ pub fn cast_vote(input: CastVoteInput) -> ExternResult<ActionHash> {
     // again. We dedup against the user's full linked-agent set instead.
     let my_agent = agent_info()?.agent_initial_pubkey;
     let my_agents = my_identity_agents(&my_agent);
-    let existing_links = get_links(
-        LinkQuery::try_new(input.poll_action_hash.clone(), LinkTypes::PollToVotes)?,
-        GetStrategy::default(),
-    )?;
+    let existing_links = links_on_every_copy(&input.poll_action_hash, LinkTypes::PollToVotes)?;
     for link in &existing_links {
         if my_agents.contains(&counted_for(link)) {
             return Err(wasm_error!("You have already voted on this poll"));
@@ -276,23 +300,12 @@ pub fn cast_vote(input: CastVoteInput) -> ExternResult<ActionHash> {
     Ok(vote_hash)
 }
 
+/// The votes on a poll, from every copy of it here, each original once.
 #[hdk_extern]
 pub fn get_poll_votes(poll_action_hash: ActionHash) -> ExternResult<Vec<Record>> {
-    let links = get_links(
-        LinkQuery::try_new(poll_action_hash, LinkTypes::PollToVotes)?,
-        GetStrategy::default(),
-    )?;
-
-    let mut records = Vec::new();
-    for link in links {
-        let hash = ActionHash::try_from(link.target)
-            .map_err(|_| wasm_error!("Invalid vote link target"))?;
-        if let Some(record) = get(hash, GetOptions::default())? {
-            records.push(record);
-        }
-    }
-
-    Ok(records)
+    filed_records(&poll_action_hash, LinkTypes::PollToVotes, |r| {
+        r.entry().to_app_option::<Vote>().ok().flatten().and_then(|v| v.carried_from).map(|c| c.original_action_hash)
+    })
 }
 
 // ── Flag functions (unchanged from v1.1) ──────────────────────────────
@@ -303,10 +316,7 @@ pub fn flag_poll(input: FlagPollInput) -> ExternResult<ActionHash> {
         .ok_or(wasm_error!("Poll not found"))?;
 
     let my_agent = agent_info()?.agent_initial_pubkey;
-    let existing_flags = get_links(
-        LinkQuery::try_new(input.poll_action_hash.clone(), LinkTypes::PollToFlags)?,
-        GetStrategy::default(),
-    )?;
+    let existing_flags = links_on_every_copy(&input.poll_action_hash, LinkTypes::PollToFlags)?;
     for link in &existing_flags {
         if counted_for(link) == my_agent {
             return Err(wasm_error!("You have already flagged this poll"));
@@ -333,23 +343,12 @@ pub fn flag_poll(input: FlagPollInput) -> ExternResult<ActionHash> {
     Ok(flag_hash)
 }
 
+/// The flags on a poll, from every copy of it here, each original once.
 #[hdk_extern]
 pub fn get_poll_flags(poll_action_hash: ActionHash) -> ExternResult<Vec<Record>> {
-    let links = get_links(
-        LinkQuery::try_new(poll_action_hash, LinkTypes::PollToFlags)?,
-        GetStrategy::default(),
-    )?;
-
-    let mut records = Vec::new();
-    for link in links {
-        let hash = ActionHash::try_from(link.target)
-            .map_err(|_| wasm_error!("Invalid flag link target"))?;
-        if let Some(record) = get(hash, GetOptions::default())? {
-            records.push(record);
-        }
-    }
-
-    Ok(records)
+    filed_records(&poll_action_hash, LinkTypes::PollToFlags, |r| {
+        r.entry().to_app_option::<Flag>().ok().flatten().and_then(|f| f.carried_from).map(|c| c.original_action_hash)
+    })
 }
 
 #[hdk_extern]
@@ -357,16 +356,18 @@ pub fn remove_flag(flag_action_hash: ActionHash) -> ExternResult<ActionHash> {
     let record = get(flag_action_hash.clone(), GetOptions::default())?
         .ok_or(wasm_error!("Flag not found"))?;
 
-    let my_agent = agent_info()?.agent_initial_pubkey;
-    if *record.action().author() != my_agent {
-        return Err(wasm_error!("Only the flag author can remove it"));
-    }
-
     let flag: Flag = record
         .entry()
         .to_app_option()
         .map_err(|_| wasm_error!("Could not deserialize flag"))?
         .ok_or(wasm_error!("Flag entry is None"))?;
+
+    // Its writer, or for a carried flag the author its proof names.
+    let my_agent = agent_info()?.agent_initial_pubkey;
+    let carried_for = flag.carried_from.as_ref().map(|c| &c.original_author);
+    if *record.action().author() != my_agent && carried_for != Some(&my_agent) {
+        return Err(wasm_error!("Only the flag author can remove it"));
+    }
 
     let links = get_links(
         LinkQuery::try_new(flag.poll_action_hash, LinkTypes::PollToFlags)?,
@@ -556,8 +557,11 @@ pub fn carry_poll(input: CarryInput) -> ExternResult<ActionHash> {
 #[hdk_extern]
 pub fn map_later_copy(input: MapLaterCopyInput) -> ExternResult<ActionHash> {
     let old_action_hash = input.later.poll.original_action_hash.clone();
-    if let Some(existing) = get_migration_mapping(old_action_hash.clone())? {
-        return Ok(existing);
+    let copies = Copies::read()?;
+    if copies.mappings.iter().any(|(_, _, m)| m.via.is_some() && m.old_action_hash == old_action_hash) {
+        if let Some(existing) = copies.copy_for(&old_action_hash) {
+            return Ok(existing);
+        }
     }
     let mapping = MigratedPoll {
         old_action_hash,
@@ -583,9 +587,10 @@ fn mapped_poll(c: &Carried) -> ExternResult<ActionHash> {
     Ok(mapping.new_action_hash)
 }
 
-/// The record a link of `link_type` from `poll` already files for `voter`.
+/// The record a link of `link_type` from `poll` (or another copy of it)
+/// already files for `voter`.
 fn filed_for(poll: &ActionHash, link_type: LinkTypes, voter: &AgentPubKey) -> ExternResult<Option<ActionHash>> {
-    let links = get_links(LinkQuery::try_new(poll.clone(), link_type)?, GetStrategy::default())?;
+    let links = links_on_every_copy(poll, link_type)?;
     Ok(links
         .iter()
         .find(|l| &counted_for(l) == voter)
@@ -687,48 +692,131 @@ pub fn get_carried_links(agent: AgentPubKey) -> ExternResult<Vec<AgentPubKey>> {
 }
 
 /// The mapping record for a poll's old hash: what a carried vote or flag
-/// names in `poll_mapping`.
+/// names in `poll_mapping` (the one to the copy that counts).
 #[hdk_extern]
 pub fn get_migration_record(old_action_hash: ActionHash) -> ExternResult<Option<ActionHash>> {
-    let links = get_links(LinkQuery::try_new(migration_anchor()?, LinkTypes::MigrationIndex)?, GetStrategy::default())?;
-    for link in links {
-        let Ok(hash) = ActionHash::try_from(link.target) else { continue };
-        if let Some(record) = get(hash.clone(), GetOptions::default())? {
+    Ok(Copies::read()?.mapping_for(&old_action_hash))
+}
+
+/// The copy here that counts for a poll's old hash (its first record's, or
+/// a later copy's).
+#[hdk_extern]
+pub fn get_migration_mapping(old_action_hash: ActionHash) -> ExternResult<Option<ActionHash>> {
+    Ok(Copies::read()?.copy_for(&old_action_hash))
+}
+
+// ── One poll per original ─────────────────────────────────────────────
+
+/// The copies here of each carried poll. Two carriers can each carry one
+/// original before either sees the other's copy (both copies are valid), so
+/// a poll can have more than one. The copy that counts is the first carried
+/// from the poll's first record (a later copy's own fields can differ: the
+/// 0.5.0 move made public polls anonymous), by mapping time then hash; every
+/// copy's votes and flags count toward it.
+struct Copies {
+    /// Each mapping: its record's hash, its time and what it maps, earliest
+    /// first.
+    mappings: Vec<(ActionHash, Timestamp, MigratedPoll)>,
+    /// Each later copy's hash -> the first record its proof names.
+    first_of_later: BTreeMap<ActionHash, ActionHash>,
+}
+
+impl Copies {
+    fn read() -> ExternResult<Self> {
+        let links = get_links(LinkQuery::try_new(migration_anchor()?, LinkTypes::MigrationIndex)?, GetStrategy::default())?;
+        let mut mappings = Vec::new();
+        for link in links {
+            let Ok(hash) = ActionHash::try_from(link.target) else { continue };
+            let Some(record) = get(hash.clone(), GetOptions::default())? else { continue };
             if let Ok(Some(m)) = record.entry().to_app_option::<MigratedPoll>() {
-                if m.old_action_hash == old_action_hash {
-                    return Ok(Some(hash));
+                if !mappings.iter().any(|(h, _, _)| *h == hash) {
+                    mappings.push((hash, record.action().timestamp(), m));
                 }
             }
         }
-    }
-    Ok(None)
-}
-
-#[hdk_extern]
-pub fn get_migration_mapping(old_action_hash: ActionHash) -> ExternResult<Option<ActionHash>> {
-    let anchor = migration_anchor()?;
-    let links = get_links(
-        LinkQuery::try_new(anchor, LinkTypes::MigrationIndex)?,
-        GetStrategy::default(),
-    )?;
-
-    for link in links {
-        let hash = ActionHash::try_from(link.target)
-            .map_err(|_| wasm_error!("Invalid migration link target"))?;
-        if let Some(record) = get(hash, GetOptions::default())? {
-            let migrated: MigratedPoll = record
-                .entry()
-                .to_app_option()
-                .map_err(|_| wasm_error!("Could not deserialize MigratedPoll"))?
-                .ok_or(wasm_error!("MigratedPoll entry is None"))?;
-
-            if migrated.old_action_hash == old_action_hash {
-                return Ok(Some(migrated.new_action_hash));
+        mappings.sort_by(|a, b| (a.1, &a.0).cmp(&(b.1, &b.0)));
+        let mut first_of_later = BTreeMap::new();
+        for (_, _, m) in &mappings {
+            if let Some(later) = &m.via {
+                if let Ok(f) = original_fields::<MigratedPollFields>(&later.mapping) {
+                    first_of_later.entry(m.old_action_hash.clone()).or_insert(f.old_action_hash);
+                }
             }
         }
+        Ok(Self { mappings, first_of_later })
     }
 
-    Ok(None)
+    /// The first record an older hash belongs to.
+    fn first_of(&self, old: &ActionHash) -> ActionHash {
+        self.first_of_later.get(old).cloned().unwrap_or_else(|| old.clone())
+    }
+
+    /// Every copy of the poll whose first record is `first` (carried from it
+    /// or from a later copy of it), the one that counts first.
+    fn copies_of(&self, first: &ActionHash) -> Vec<ActionHash> {
+        let mut found: Vec<(bool, &ActionHash)> = Vec::new();
+        for (_, _, m) in &self.mappings {
+            if m.via.is_none() && self.first_of(&m.old_action_hash) == *first && !found.iter().any(|(_, h)| *h == &m.new_action_hash) {
+                found.push((m.old_action_hash != *first, &m.new_action_hash));
+            }
+        }
+        // Stable: within each group, mapping order.
+        found.sort_by_key(|(later, _)| *later);
+        found.into_iter().map(|(_, h)| h.clone()).collect()
+    }
+
+    /// The copy that counts for an older hash.
+    fn copy_for(&self, old: &ActionHash) -> Option<ActionHash> {
+        self.copies_of(&self.first_of(old)).into_iter().next()
+    }
+
+    /// The mapping a carried vote or flag on `old` names: the one to the
+    /// copy that counts, else the earliest.
+    fn mapping_for(&self, old: &ActionHash) -> Option<ActionHash> {
+        let copy = self.copy_for(old);
+        let on_old = || self.mappings.iter().filter(|(_, _, m)| &m.old_action_hash == old);
+        on_old()
+            .find(|(_, _, m)| Some(&m.new_action_hash) == copy.as_ref())
+            .or_else(|| on_old().next())
+            .map(|(h, _, _)| h.clone())
+    }
+
+    /// Every copy of the poll `poll` is a copy of; itself when it is not one.
+    fn siblings(&self, poll: &ActionHash) -> Vec<ActionHash> {
+        match self.mappings.iter().find(|(_, _, m)| m.via.is_none() && &m.new_action_hash == poll) {
+            Some((_, _, m)) => self.copies_of(&self.first_of(&m.old_action_hash)),
+            None => vec![poll.clone()],
+        }
+    }
+}
+
+/// The `link_type` links from `poll` and from every other copy of it.
+fn links_on_every_copy(poll: &ActionHash, link_type: LinkTypes) -> ExternResult<Vec<Link>> {
+    let mut links = Vec::new();
+    for copy in Copies::read()?.siblings(poll) {
+        links.extend(get_links(LinkQuery::try_new(copy, link_type.clone())?, GetStrategy::default())?);
+    }
+    Ok(links)
+}
+
+/// The records filed under `poll` and every other copy of it, each carried
+/// original once (`original_of` names a carried record's original).
+fn filed_records(poll: &ActionHash, link_type: LinkTypes, original_of: impl Fn(&Record) -> Option<ActionHash>) -> ExternResult<Vec<Record>> {
+    let mut records: Vec<Record> = Vec::new();
+    let mut originals = BTreeSet::new();
+    for link in links_on_every_copy(poll, link_type)? {
+        let Ok(hash) = ActionHash::try_from(link.target) else { continue };
+        if records.iter().any(|r| r.action_address() == &hash) {
+            continue;
+        }
+        if let Some(record) = get(hash, GetOptions::default())? {
+            if original_of(&record).is_some_and(|o| !originals.insert(o)) {
+                continue;
+            }
+            records.push(record);
+        }
+    }
+    Ok(records)
 }
 
 #[hdk_extern]

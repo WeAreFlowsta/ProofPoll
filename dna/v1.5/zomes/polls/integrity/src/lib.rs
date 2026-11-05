@@ -146,11 +146,25 @@ pub struct MigratedPoll {
 
 /// A later copy of a poll, tied to its first record: the later poll record
 /// and the mapping its own DNA holds from the first record's hash to it,
-/// both carried with their proofs, both by the first record's author.
+/// both carried with their proofs, both by the first record's author or by
+/// a key that author vouches for.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub struct LaterCopy {
     pub poll: Carried,
     pub mapping: Carried,
+    /// When the later copy is by another key of the first record's author
+    /// (an install whose 0.6 key was made by its conductor runs v1.4 under a
+    /// new key): that author's signature over `key_vouch_payload` of the
+    /// later key.
+    #[serde(default)]
+    pub vouch: Option<Signature>,
+}
+
+/// What a key signs to vouch that `other` is also its holder's.
+pub fn key_vouch_payload(other: &AgentPubKey) -> Vec<u8> {
+    let mut payload = b"ProofPoll: this key is also mine\n".to_vec();
+    payload.extend_from_slice(other.get_raw_39());
+    payload
 }
 
 /// An encrypted blob stored on the public DHT.
@@ -401,43 +415,164 @@ fn invalid(reason: impl Into<String>) -> ExternResult<ValidateCallbackResult> {
     Ok(ValidateCallbackResult::Invalid(reason.into()))
 }
 
+/// Who may change what:
+///   - Nothing here is updated: no update is valid.
+///   - A poll or flag is deleted by its record's author or the author its
+///     proof names (a carrier mirrors a delete; a person deletes their own
+///     carried poll); an encrypted entry by its author; a carried link by
+///     its author or one of its two agents. Votes and mappings stay.
+///   - A link is created by the author of the record it points at (a draft
+///     or reason's link by the entry's author), from the base that record
+///     names, and removed by its author (or as its record is deleted);
+///     vote and mapping links are never removed.
 #[hdk_extern]
 pub fn validate(op: Op) -> ExternResult<ValidateCallbackResult> {
     match op.flattened::<EntryTypes, LinkTypes>()? {
         FlatOp::CreateEntry(op_entry) => match op_entry {
-            OpEntry::CreateEntry { app_entry, .. } | OpEntry::UpdateEntry { app_entry, .. } => {
-                match app_entry {
-                    EntryTypes::Poll(poll) => validate_poll(&poll),
-                    EntryTypes::Vote(vote) => validate_vote(&vote),
-                    EntryTypes::Flag(flag) => validate_flag(&flag),
-                    EntryTypes::MigratedPoll(mp) => validate_migrated_poll(&mp),
-                    EntryTypes::EncryptedEntry(ee) => validate_encrypted_entry(&ee),
-                    EntryTypes::CarriedLink(link) => validate_carried_link(&link),
-                }
-            }
+            OpEntry::CreateEntry { app_entry, .. } => match app_entry {
+                EntryTypes::Poll(poll) => validate_poll(&poll),
+                EntryTypes::Vote(vote) => validate_vote(&vote),
+                EntryTypes::Flag(flag) => validate_flag(&flag),
+                EntryTypes::MigratedPoll(mp) => validate_migrated_poll(&mp),
+                EntryTypes::EncryptedEntry(ee) => validate_encrypted_entry(&ee),
+                EntryTypes::CarriedLink(link) => validate_carried_link(&link),
+            },
+            OpEntry::UpdateEntry { .. } => invalid("Records here are never updated"),
             _ => Ok(ValidateCallbackResult::Valid),
         },
-        FlatOp::Link(OpLink::CreateLink { link_type, action }) => match link_type {
-            LinkTypes::AllPolls => {
-                if action.data.base_address != AnyLinkableHash::from(all_polls_anchor()?) {
-                    return invalid("AllPolls link must originate from the polls anchor");
+        FlatOp::CreateRecord(OpRecord::UpdateEntry { .. }) | FlatOp::Update(OpUpdate::Entry { .. }) => {
+            invalid("Records here are never updated")
+        }
+        FlatOp::CreateRecord(OpRecord::DeleteEntry { action }) | FlatOp::Delete(OpDelete { action }) => {
+            validate_delete(action.author(), &action.data.deletes_address)
+        }
+        FlatOp::Link(OpLink::CreateLink { link_type, action }) => {
+            let (base, target, author) = (&action.data.base_address, &action.data.target_address, action.author());
+            match link_type {
+                LinkTypes::AllPolls => {
+                    if *base != AnyLinkableHash::from(all_polls_anchor()?) {
+                        return invalid("AllPolls link must originate from the polls anchor");
+                    }
+                    validate_filed_by_author(target, author, |e| matches!(e, EntryTypes::Poll(_)))
                 }
-                Ok(ValidateCallbackResult::Valid)
-            }
-            LinkTypes::PollToVotes | LinkTypes::PollToFlags => validate_voter_tag(&action.data.target_address, &action.data.tag),
-            LinkTypes::VoteToRationale => Ok(ValidateCallbackResult::Valid),
-            LinkTypes::AgentDrafts => Ok(ValidateCallbackResult::Valid),
-            LinkTypes::MigrationIndex => {
-                if action.data.base_address != AnyLinkableHash::from(migration_anchor()?) {
-                    return invalid("MigrationIndex link must originate from the migration anchor");
+                LinkTypes::PollToVotes | LinkTypes::PollToFlags => validate_vote_link(&link_type, base, target, &action.data.tag, author),
+                LinkTypes::VoteToRationale => {
+                    // From the voter's own vote (native, or carried for them).
+                    let voters_own = match base.clone().into_action_hash() {
+                        Some(vote) => matches!(our_record(vote)?, Some((a, EntryTypes::Vote(v))) if a == *author || proven(&v.carried_from, author)),
+                        None => false,
+                    };
+                    if !voters_own {
+                        return invalid("A reason is filed under its author's own vote");
+                    }
+                    validate_private_link(target, author)
                 }
-                Ok(ValidateCallbackResult::Valid)
+                LinkTypes::AgentDrafts => {
+                    if *base != AnyLinkableHash::from(agent_drafts_anchor(author)?) {
+                        return invalid("A draft is filed under its own author's anchor");
+                    }
+                    validate_private_link(target, author)
+                }
+                LinkTypes::MigrationIndex => {
+                    if *base != AnyLinkableHash::from(migration_anchor()?) {
+                        return invalid("MigrationIndex link must originate from the migration anchor");
+                    }
+                    validate_filed_by_author(target, author, |e| matches!(e, EntryTypes::MigratedPoll(_)))
+                }
+                LinkTypes::AgentToCarriedLink => {
+                    if let ValidateCallbackResult::Invalid(e) = validate_filed_by_author(target, author, |e| matches!(e, EntryTypes::CarriedLink(_)))? {
+                        return invalid(e);
+                    }
+                    validate_carried_link_lookup(base, target)
+                }
             }
-            LinkTypes::AgentToCarriedLink => validate_carried_link_lookup(&action.data.base_address, &action.data.target_address),
-        },
-        FlatOp::Link(OpLink::DeleteLink { .. }) => Ok(ValidateCallbackResult::Valid),
+        }
+        FlatOp::Link(OpLink::DeleteLink { original_action, link_type, action }) => {
+            validate_delete_link(&link_type, &original_action.data.target_address, original_action.author(), action.author())
+        }
         _ => Ok(ValidateCallbackResult::Valid),
     }
+}
+
+/// Whether `agent` is the author a carried record's proof names.
+fn proven(carried: &Option<Carried>, agent: &AgentPubKey) -> bool {
+    carried.as_ref().is_some_and(|c| &c.original_author == agent)
+}
+
+/// One of a carried link's two agents.
+fn in_carried_link(link: &CarriedLink, agent: &AgentPubKey) -> bool {
+    original_fields::<IsSamePerson>(&link.carried).is_ok_and(|e| &e.agent_a == agent || &e.agent_b == agent)
+}
+
+/// A record of this zome, with its author: `None` when it is another zome's.
+fn our_record(hash: ActionHash) -> ExternResult<Option<(AgentPubKey, EntryTypes)>> {
+    let record = must_get_valid_record(hash)?;
+    let (Some(EntryType::App(def)), Some(entry)) = (record.action().entry_type(), record.entry().as_option()) else {
+        return Ok(None);
+    };
+    Ok(EntryTypes::deserialize_from_type(def.zome_index, def.entry_index, entry)?.map(|e| (record.action().author().clone(), e)))
+}
+
+fn validate_delete(deleter: &AgentPubKey, deletes: &ActionHash) -> ExternResult<ValidateCallbackResult> {
+    let Some((author, entry)) = our_record(deletes.clone())? else { return Ok(ValidateCallbackResult::Valid) };
+    let by_author = *deleter == author;
+    let allowed = match &entry {
+        EntryTypes::Poll(p) => by_author || proven(&p.carried_from, deleter),
+        EntryTypes::Flag(f) => by_author || proven(&f.carried_from, deleter),
+        EntryTypes::EncryptedEntry(_) => by_author,
+        EntryTypes::CarriedLink(l) => by_author || in_carried_link(l, deleter),
+        EntryTypes::Vote(_) | EntryTypes::MigratedPoll(_) => return invalid("Votes and poll mappings are never deleted"),
+    };
+    if allowed {
+        Ok(ValidateCallbackResult::Valid)
+    } else {
+        invalid("Only a record's author can delete it")
+    }
+}
+
+fn validate_delete_link(link_type: &LinkTypes, target: &AnyLinkableHash, link_author: &AgentPubKey, deleter: &AgentPubKey) -> ExternResult<ValidateCallbackResult> {
+    if matches!(link_type, LinkTypes::PollToVotes | LinkTypes::MigrationIndex) {
+        return invalid("Vote and poll mapping links are never removed");
+    }
+    if deleter == link_author {
+        return Ok(ValidateCallbackResult::Valid);
+    }
+    // Removed with its record by whoever may delete that record.
+    let allowed = match target.clone().into_action_hash() {
+        Some(hash) => match our_record(hash)? {
+            Some((_, EntryTypes::Poll(p))) if matches!(link_type, LinkTypes::AllPolls) => proven(&p.carried_from, deleter),
+            Some((_, EntryTypes::Flag(f))) if matches!(link_type, LinkTypes::PollToFlags) => proven(&f.carried_from, deleter),
+            Some((_, EntryTypes::CarriedLink(l))) if matches!(link_type, LinkTypes::AgentToCarriedLink) => in_carried_link(&l, deleter),
+            _ => false,
+        },
+        None => false,
+    };
+    if allowed {
+        Ok(ValidateCallbackResult::Valid)
+    } else {
+        invalid("Only a link's author can remove it")
+    }
+}
+
+/// A link to a record of the kind `is_kind` accepts, created by that
+/// record's author.
+fn validate_filed_by_author(target: &AnyLinkableHash, author: &AgentPubKey, is_kind: impl Fn(&EntryTypes) -> bool) -> ExternResult<ValidateCallbackResult> {
+    let Some(hash) = target.clone().into_action_hash() else { return invalid("A link here points at a record") };
+    match our_record(hash)? {
+        Some((record_author, entry)) if is_kind(&entry) => {
+            if record_author == *author {
+                Ok(ValidateCallbackResult::Valid)
+            } else {
+                invalid("A record is filed by its own author")
+            }
+        }
+        _ => invalid("A link points at the kind of record it files"),
+    }
+}
+
+/// A draft's or reason's link: to an encrypted entry by the link's author.
+fn validate_private_link(target: &AnyLinkableHash, author: &AgentPubKey) -> ExternResult<ValidateCallbackResult> {
+    validate_filed_by_author(target, author, |e| matches!(e, EntryTypes::EncryptedEntry(_)))
 }
 
 fn validate_poll(poll: &Poll) -> ExternResult<ValidateCallbackResult> {
@@ -560,7 +695,8 @@ fn validate_migrated_poll(mp: &MigratedPoll) -> ExternResult<ValidateCallbackRes
 
 /// A later copy (`old_action_hash`, on a later DNA) of the first record the
 /// copy here carries: both proofs verify, the carried mapping maps the first
-/// record's hash to the later poll, and all three are by one author.
+/// record's hash to the later poll, and all three are by one person (one
+/// key, or the first record's key vouching for the later one).
 fn check_later_copy(first: &Carried, later: &LaterCopy, old_action_hash: &ActionHash) -> ExternResult<Result<(), String>> {
     if later.poll.poll_mapping.is_some() || later.mapping.poll_mapping.is_some() {
         return Ok(Err("a later copy's records name no poll mapping".to_string()));
@@ -574,8 +710,17 @@ fn check_later_copy(first: &Carried, later: &LaterCopy, old_action_hash: &Action
     if !(first.original_dna == "1.3" && later.poll.original_dna == "1.4") {
         return Ok(Err("a later copy is on a later DNA than the first record".to_string()));
     }
-    if later.poll.original_author != first.original_author || later.mapping.original_author != first.original_author {
-        return Ok(Err("a later copy and its mapping are by the first record's author".to_string()));
+    if later.mapping.original_author != later.poll.original_author {
+        return Ok(Err("a later copy and its mapping are by one author".to_string()));
+    }
+    if later.poll.original_author != first.original_author {
+        let vouched = match &later.vouch {
+            Some(v) => verify_signature_raw(first.original_author.clone(), v.clone(), key_vouch_payload(&later.poll.original_author))?,
+            None => false,
+        };
+        if !vouched {
+            return Ok(Err("a later copy is by the first record's author or a key it vouches for".to_string()));
+        }
     }
     if let Err(e) = check_carried(&later.poll, POLLS_ZOME, POLL_ENTRY)? {
         return Ok(Err(format!("the later copy: {e}")));
@@ -593,25 +738,27 @@ fn check_later_copy(first: &Carried, later: &LaterCopy, old_action_hash: &Action
     Ok(Ok(()))
 }
 
-/// A vote or flag link tagged with a voter (a carried one): the tag must be
-/// the original author its target proves. Untagged links file native ones.
-fn validate_voter_tag(target: &AnyLinkableHash, tag: &LinkTag) -> ExternResult<ValidateCallbackResult> {
-    if tag.0.is_empty() {
-        return Ok(ValidateCallbackResult::Valid);
-    }
-    let Ok(voter) = AgentPubKey::try_from_raw_39(tag.0.clone()) else {
-        return invalid("A vote or flag link's tag is a voter's key");
-    };
+/// A vote or flag link: from the poll its record names, by that record's
+/// author, to a vote (PollToVotes) or a flag (PollToFlags). A carried one is
+/// tagged with the original author its proof names; a native one is not.
+fn validate_vote_link(link_type: &LinkTypes, base: &AnyLinkableHash, target: &AnyLinkableHash, tag: &LinkTag, author: &AgentPubKey) -> ExternResult<ValidateCallbackResult> {
     let Some(target) = target.clone().into_action_hash() else {
-        return invalid("A tagged vote or flag link points at a record");
+        return invalid("A vote or flag link points at a record");
     };
-    let record = must_get_valid_record(target)?;
-    let carried = match record.entry().to_app_option::<Vote>() {
-        Ok(Some(v)) => v.carried_from,
-        _ => record.entry().to_app_option::<Flag>().ok().flatten().and_then(|f| f.carried_from),
+    let (record_author, poll, carried) = match (link_type, our_record(target)?) {
+        (LinkTypes::PollToVotes, Some((a, EntryTypes::Vote(v)))) => (a, v.poll_action_hash, v.carried_from),
+        (LinkTypes::PollToFlags, Some((a, EntryTypes::Flag(f)))) => (a, f.poll_action_hash, f.carried_from),
+        _ => return invalid("A vote link points at a vote, a flag link at a flag"),
     };
+    if *base != AnyLinkableHash::from(poll) {
+        return invalid("A vote or flag is filed under the poll it names");
+    }
+    if record_author != *author {
+        return invalid("A record is filed by its own author");
+    }
     match carried {
-        Some(c) if c.original_author == voter => Ok(ValidateCallbackResult::Valid),
+        None if tag.0.is_empty() => Ok(ValidateCallbackResult::Valid),
+        Some(c) if tag.0 == c.original_author.get_raw_39() => Ok(ValidateCallbackResult::Valid),
         _ => invalid("A link's voter tag names the voter its carried record proves"),
     }
 }

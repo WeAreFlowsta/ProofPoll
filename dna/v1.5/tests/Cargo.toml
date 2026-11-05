@@ -19,6 +19,7 @@ hex = "0.4"
 [dev-dependencies]
 holochain = { version = "=0.7.1", features = ["test_utils"] }
 holo_hash = { version = "0.7.1", features = ["encoding"] }
+holochain_serialized_bytes = "0.0.57"
 tokio = { version = "1", features = ["full"] }
 
 [profile.dev]

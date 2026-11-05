@@ -5711,6 +5711,7 @@ dependencies = [
  "hex",
  "holo_hash",
  "holochain",
+ "holochain_serialized_bytes",
  "polls_coordinator_v1_5",
  "polls_integrity_v1_5",
  "serde",

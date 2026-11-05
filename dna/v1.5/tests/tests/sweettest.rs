@@ -3,8 +3,12 @@
 //! Loads the packed bundle from `../workdir/proofpoll_v1_5.dna`, so a passing
 //! run says the committed artifact works on this conductor: every native
 //! validation arm, carried records checked against real v1.3 and v1.4
-//! signatures (`fixtures/carried_records.json`), every forgery refused, and
-//! two conductors gossiping native and carried records.
+//! signatures (`fixtures/carried_records.json`), every forgery refused, a
+//! later copy under another key of its author, two copies of one poll read
+//! as one, and two conductors gossiping native and carried records.
+//!
+//! Two tests also load the test coordinator in `tests/hostile` (build it
+//! first, as `tests/hostile.rs` says).
 
 use holo_hash::{ActionHashB64, AgentPubKeyB64};
 use holochain::prelude::*;
@@ -341,17 +345,22 @@ async fn a_later_copy_maps_to_the_first_records_copy() {
     let (first_b, later_b, map_b) = &moved[1];
     let copy_a: ActionHash = conductor.call(&zome, "carry_poll", CarryInput { carried: carried(first_a, None) }).await;
     let mut forgeries: Vec<(&str, LaterCopy, &[&str])> = Vec::new();
-    forgeries.push(("another poll's mapping", LaterCopy { poll: carried(later_a, None), mapping: carried(map_b, None) }, &["maps the first record to the later copy"]));
-    forgeries.push(("another poll's later copy", LaterCopy { poll: carried(later_b, None), mapping: carried(map_a, None) }, &["maps the first record to the later copy"]));
+    forgeries.push(("another poll's mapping", LaterCopy { poll: carried(later_a, None), mapping: carried(map_b, None), vouch: None }, &["maps the first record to the later copy"]));
+    forgeries.push(("another poll's later copy", LaterCopy { poll: carried(later_b, None), mapping: carried(map_a, None), vouch: None }, &["maps the first record to the later copy"]));
     // (A v1.3 poll not carried yet: a hash already mapped returns its copy before any check.)
-    forgeries.push(("a later copy on the first record's DNA", LaterCopy { poll: carried(first_b, None), mapping: carried(map_a, None) }, &["different DNAs", "later DNA"]));
+    forgeries.push(("a later copy on the first record's DNA", LaterCopy { poll: carried(first_b, None), mapping: carried(map_a, None), vouch: None }, &["different DNAs", "later DNA"]));
     let mut c = carried(map_a, None);
     c.original_author = app.agent().clone();
-    forgeries.push(("a mapping by another author", LaterCopy { poll: carried(later_a, None), mapping: c }, &["by the first record's author"]));
+    forgeries.push(("a mapping by another author", LaterCopy { poll: carried(later_a, None), mapping: c, vouch: None }, &["by one author"]));
+    let (mut p, mut m) = (carried(later_a, None), carried(map_a, None));
+    p.original_author = app.agent().clone();
+    m.original_author = app.agent().clone();
+    forgeries.push(("a later copy by another key, no vouch", LaterCopy { poll: p.clone(), mapping: m.clone(), vouch: None }, &["a key it vouches for"]));
+    forgeries.push(("a later copy by another key, a made-up vouch", LaterCopy { poll: p, mapping: m, vouch: Some(Signature([7; 64])) }, &["a key it vouches for"]));
     let mut c = carried(map_a, None);
     c.original_signature.0[0] ^= 1;
-    forgeries.push(("a mapping with a flipped signature byte", LaterCopy { poll: carried(later_a, None), mapping: c }, &["signature does not verify"]));
-    forgeries.push(("a poll passed as its mapping", LaterCopy { poll: carried(later_a, None), mapping: carried(later_a, None) }, &["another kind of entry", "entry does not decode"]));
+    forgeries.push(("a mapping with a flipped signature byte", LaterCopy { poll: carried(later_a, None), mapping: c, vouch: None }, &["signature does not verify"]));
+    forgeries.push(("a poll passed as its mapping", LaterCopy { poll: carried(later_a, None), mapping: carried(later_a, None), vouch: None }, &["another kind of entry", "entry does not decode"]));
     for (what, later, reasons) in forgeries {
         let r: Result<ActionHash, _> = conductor.call_fallible(&zome, "map_later_copy", MapLaterCopyInput { copy: copy_a.clone(), later }).await;
         let e = format!("{:?}", r.expect_err(what));
@@ -364,14 +373,14 @@ async fn a_later_copy_maps_to_the_first_records_copy() {
     for (first, later, map) in &moved {
         let copy: ActionHash = conductor.call(&zome, "carry_poll", CarryInput { carried: carried(first, None) }).await;
         let to: ActionHash = conductor
-            .call(&zome, "map_later_copy", MapLaterCopyInput { copy: copy.clone(), later: LaterCopy { poll: carried(later, None), mapping: carried(map, None) } })
+            .call(&zome, "map_later_copy", MapLaterCopyInput { copy: copy.clone(), later: LaterCopy { poll: carried(later, None), mapping: carried(map, None), vouch: None } })
             .await;
         assert_eq!(to, copy);
         let via_later: Option<ActionHash> = conductor.call(&zome, "get_migration_mapping", hash_of(later)).await;
         let via_first: Option<ActionHash> = conductor.call(&zome, "get_migration_mapping", hash_of(first)).await;
         assert_eq!((via_later.as_ref(), via_first.as_ref()), (Some(&copy), Some(&copy)), "both older hashes open the one copy");
         let again: ActionHash = conductor
-            .call(&zome, "map_later_copy", MapLaterCopyInput { copy: copy.clone(), later: LaterCopy { poll: carried(later, None), mapping: carried(map, None) } })
+            .call(&zome, "map_later_copy", MapLaterCopyInput { copy: copy.clone(), later: LaterCopy { poll: carried(later, None), mapping: carried(map, None), vouch: None } })
             .await;
         assert_eq!(again, copy, "once per later copy");
         let record: Option<ActionHash> = conductor.call(&zome, "get_migration_record", hash_of(later)).await;
@@ -379,6 +388,203 @@ async fn a_later_copy_maps_to_the_first_records_copy() {
     }
     let all: Vec<Record> = conductor.call(&zome, "get_all_polls", ()).await;
     assert_eq!(all.len(), 2, "one copy per poll, not one per older hash");
+}
+
+/// A Holochain 0.6 Create as it encodes (an enum tagged by `type`).
+#[derive(serde::Serialize, Debug)]
+#[serde(tag = "type")]
+enum Action06 {
+    Create(Create06),
+}
+
+#[derive(serde::Serialize, Debug)]
+struct Create06 {
+    author: AgentPubKey,
+    timestamp: Timestamp,
+    action_seq: u32,
+    prev_action: ActionHash,
+    entry_type: EntryType,
+    entry_hash: EntryHash,
+}
+
+/// A v1.4 poll mapping as it encodes.
+#[derive(serde::Serialize, Debug)]
+struct MigratedPollV14 {
+    old_action_hash: ActionHash,
+    new_action_hash: ActionHash,
+    migrated_at: i64,
+    carried_from: Option<()>,
+}
+
+/// `entry` written on `dna` ("1.3" in Holochain 0.6's action shape, "1.4"
+/// in 0.7's) by `author` as entry `entry_index` of the polls zome, signed by
+/// `author`'s key in `conductor`'s keystore.
+async fn written_by(conductor: &SweetConductor, author: &AgentPubKey, dna: &str, entry_index: u8, entry: Vec<u8>, at: Timestamp) -> Carried {
+    let entry_hash = EntryHash::with_data_sync(&Entry::App(AppEntryBytes(SerializedBytes::from(UnsafeBytes::from(entry.clone())))));
+    let entry_type = EntryType::App(AppEntryDef::new(entry_index.into(), polls_integrity::POLLS_ZOME.into(), EntryVisibility::Public));
+    let prev_action = ActionHash::from_raw_32(vec![0x11; 32]);
+    let action = match dna {
+        "1.3" => holochain_serialized_bytes::encode(&Action06::Create(Create06 { author: author.clone(), timestamp: at, action_seq: 7, prev_action, entry_type, entry_hash })),
+        _ => holochain_serialized_bytes::encode(&Action {
+            header: ActionHeader { author: author.clone(), timestamp: at, action_seq: 7, prev_action: Some(prev_action) },
+            data: ActionData::Create(CreateData { entry_type, entry_hash }),
+        }),
+    }
+    .unwrap();
+    let signature = conductor.keystore().sign(author.clone(), action.clone().into()).await.unwrap();
+    Carried {
+        original_dna: dna.into(),
+        original_action_hash: ActionHash::from_raw_32(holo_hash::encode::blake2b_256(&action)),
+        original_author: author.clone(),
+        original_timestamp: at,
+        original_action: action,
+        original_signature: signature,
+        original_entry: entry,
+        poll_mapping: None,
+    }
+}
+
+/// An install whose v1.4 key is not its v1.3 key (a 0.6 key made by its
+/// conductor): the person's v1.3 poll and their v1.4 copy of it, under the
+/// later key, are one poll here once the v1.3 key vouches for the later one,
+/// and only then.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_later_copy_under_a_new_key_needs_the_first_keys_vouch() {
+    let fixtures = carried_records();
+    let (poll13, poll14) = (of_kind(&fixtures.v13, POLL).remove(0), of_kind(&fixtures.v14, POLL).remove(0));
+    let mut conductor = SweetConductor::standard().await;
+    let app = conductor.setup_app("proofpoll", [&dna().await]).await.unwrap();
+    let zome = app.cells()[0].zome(ZOME);
+    let keystore = conductor.keystore();
+    let (first_key, later_key) = (SweetAgents::one(keystore.clone()).await, SweetAgents::one(keystore.clone()).await);
+
+    let first = written_by(&conductor, &first_key, "1.3", POLL, hex::decode(&poll13.entry).unwrap(), Timestamp::from_micros(poll13.timestamp_us)).await;
+    let later = written_by(&conductor, &later_key, "1.4", POLL, hex::decode(&poll14.entry).unwrap(), Timestamp::from_micros(poll14.timestamp_us)).await;
+    let mapping_entry = holochain_serialized_bytes::encode(&MigratedPollV14 {
+        old_action_hash: first.original_action_hash.clone(),
+        new_action_hash: later.original_action_hash.clone(),
+        migrated_at: poll14.timestamp_us / 1_000_000,
+        carried_from: None,
+    })
+    .unwrap();
+    let mapping = written_by(&conductor, &later_key, "1.4", MIGRATED_POLL, mapping_entry, Timestamp::from_micros(poll14.timestamp_us + 1_000)).await;
+    let copy: ActionHash = conductor.call(&zome, "carry_poll", CarryInput { carried: first.clone() }).await;
+
+    let vouch = |by: &AgentPubKey, for_key: &AgentPubKey| {
+        let (keystore, by, payload) = (keystore.clone(), by.clone(), polls_integrity::key_vouch_payload(for_key));
+        async move { keystore.sign(by, payload.into()).await.unwrap() }
+    };
+    let later_copy = |vouch: Option<Signature>| MapLaterCopyInput { copy: copy.clone(), later: LaterCopy { poll: later.clone(), mapping: mapping.clone(), vouch } };
+    let refusals = [
+        ("no vouch", None),
+        ("the later key vouching for itself", Some(vouch(&later_key, &later_key).await)),
+        ("the first key vouching for another key", Some(vouch(&first_key, app.agent()).await)),
+    ];
+    for (what, v) in refusals {
+        let r: Result<ActionHash, _> = conductor.call_fallible(&zome, "map_later_copy", later_copy(v)).await;
+        let e = format!("{:?}", r.expect_err(what));
+        assert!(e.contains("a key it vouches for"), "{what} refused for its own reason, not: {e}");
+    }
+    let unmapped: Option<ActionHash> = conductor.call(&zome, "get_migration_mapping", later.original_action_hash.clone()).await;
+    assert_eq!(unmapped, None, "no refusal left a mapping");
+
+    let to: ActionHash = conductor.call(&zome, "map_later_copy", later_copy(Some(vouch(&first_key, &later_key).await))).await;
+    assert_eq!(to, copy);
+    let via_later: Option<ActionHash> = conductor.call(&zome, "get_migration_mapping", later.original_action_hash.clone()).await;
+    let via_first: Option<ActionHash> = conductor.call(&zome, "get_migration_mapping", first.original_action_hash.clone()).await;
+    assert_eq!((via_later.as_ref(), via_first.as_ref()), (Some(&copy), Some(&copy)), "both keys' hashes open the one copy");
+    let all: Vec<Record> = conductor.call(&zome, "get_all_polls", ()).await;
+    assert_eq!(all.len(), 1, "one poll, not one per key");
+}
+
+/// The bundle with the test coordinator (`tests/hostile`, built to
+/// `../target`) beside its own.
+async fn dna_with_test_coordinator() -> DnaFile {
+    let mut dna = dna().await;
+    let file = Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/wasm32-unknown-unknown/release/polls_hostile_test.wasm");
+    let wasm = DnaWasm::from(std::fs::read(&file).expect("polls_hostile_test.wasm is built (see tests/hostile.rs)"));
+    let hash = holo_hash::WasmHash::with_data(&wasm).await;
+    let def = ZomeDef::Wasm(WasmZomeDef::new(hash, Some(vec!["polls_integrity".into()])));
+    dna.update_coordinators(vec![(ZomeName::from("hostile"), def.into())], vec![wasm]).await.unwrap();
+    dna
+}
+
+/// A v1.3 poll and vote as they encode.
+#[derive(serde::Serialize, Debug)]
+struct PollV13 {
+    title: String,
+    description: String,
+    options: Vec<String>,
+    created_at: i64,
+    closes_at: Option<i64>,
+    poll_type: PollType,
+}
+
+#[derive(serde::Serialize, Debug)]
+struct VoteV13 {
+    poll_action_hash: ActionHash,
+    option_index: u32,
+    display_name: Option<String>,
+    profile_picture: Option<String>,
+}
+
+/// Two carriers at once: a second copy of one v1.3 poll (the test
+/// coordinator's `carry_again`, as `carry_poll` writes one without its look
+/// for a copy already there). The list shows one poll, the first carried;
+/// the old hash opens it; a vote carried onto either copy counts on both,
+/// once; and a voter who voted on one copy cannot vote again on the other.
+#[tokio::test(flavor = "multi_thread")]
+async fn two_copies_of_one_poll_read_as_one() {
+    let mut conductor = SweetConductor::standard().await;
+    let cell = conductor.setup_app("carrier", [&dna_with_test_coordinator().await]).await.unwrap().into_cells().remove(0);
+    let (zome, test) = (cell.zome(ZOME), cell.zome("hostile"));
+    let keystore = conductor.keystore();
+    let (author, voter) = (SweetAgents::one(keystore.clone()).await, SweetAgents::one(keystore.clone()).await);
+    let at = Timestamp::from_micros(Timestamp::now().as_micros() - 60_000_000);
+    let poll_entry = PollV13 {
+        title: "Carried twice".into(),
+        description: String::new(),
+        options: vec!["Yes".into(), "No".into()],
+        created_at: at.as_micros() / 1_000_000,
+        closes_at: None,
+        poll_type: PollType::Anonymous,
+    };
+    let poll = written_by(&conductor, &author, "1.3", POLL, holochain_serialized_bytes::encode(&poll_entry).unwrap(), at).await;
+    let vote_entry = VoteV13 { poll_action_hash: poll.original_action_hash.clone(), option_index: 1, display_name: None, profile_picture: None };
+    let vote = written_by(&conductor, &voter, "1.3", VOTE, holochain_serialized_bytes::encode(&vote_entry).unwrap(), Timestamp::from_micros(at.as_micros() + 1_000_000)).await;
+
+    let first: ActionHash = conductor.call(&zome, "carry_poll", CarryInput { carried: poll.clone() }).await;
+    let (second, second_mapping): (ActionHash, ActionHash) = conductor.call(&test, "carry_again", poll.clone()).await;
+    assert_ne!(first, second);
+    let listed: Vec<Record> = conductor.call(&zome, "get_all_polls", ()).await;
+    assert_eq!(listed.iter().map(|r| r.action_address().clone()).collect::<Vec<_>>(), vec![first.clone()], "one poll, the first copy");
+    let opened: Option<ActionHash> = conductor.call(&zome, "get_migration_mapping", poll.original_action_hash.clone()).await;
+    assert_eq!(opened, Some(first.clone()), "the old hash opens the first copy");
+
+    // The vote carried onto the second copy counts on both, and carrying it
+    // again by the first copy's mapping returns it.
+    let mut v = vote.clone();
+    v.poll_mapping = Some(second_mapping);
+    let carried_vote: ActionHash = conductor.call(&zome, "carry_vote", CarryInput { carried: v }).await;
+    let mut v = vote.clone();
+    v.poll_mapping = conductor.call(&zome, "get_migration_record", poll.original_action_hash.clone()).await;
+    let again: ActionHash = conductor.call(&zome, "carry_vote", CarryInput { carried: v }).await;
+    assert_eq!(again, carried_vote, "one vote per voter across both copies");
+    for copy in [&first, &second] {
+        let votes: Vec<Record> = conductor.call(&zome, "get_poll_votes", copy.clone()).await;
+        assert_eq!(votes.iter().map(|r| r.action_address().clone()).collect::<Vec<_>>(), vec![carried_vote.clone()]);
+    }
+
+    // A native vote on the first copy; then none on the second.
+    let _: ActionHash = conductor
+        .call(&zome, "cast_vote", CastVoteInput { poll_action_hash: first.clone(), option_index: 0, display_name: None, profile_picture: None })
+        .await;
+    let twice: Result<ActionHash, _> = conductor
+        .call_fallible(&zome, "cast_vote", CastVoteInput { poll_action_hash: second.clone(), option_index: 1, display_name: None, profile_picture: None })
+        .await;
+    assert!(format!("{:?}", twice.expect_err("a second vote")).contains("already voted"));
+    let votes: Vec<Record> = conductor.call(&zome, "get_poll_votes", second.clone()).await;
+    assert_eq!(votes.len(), 2, "the carried vote and the native one");
 }
 
 /// Two conductors on a local rendezvous: a poll authored on one is read and
