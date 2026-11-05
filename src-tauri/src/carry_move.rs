@@ -20,7 +20,7 @@
 //! here, or a later copy under another person's two keys) waits for a later
 //! run; the readers show it from the older line meanwhile.
 
-use crate::carried::{self, Carried, CarryInput, LaterCopy, MapLaterCopyInput};
+use crate::carried::{self, fields, Carried, CarryInput, LaterCopy, MapLaterCopyInput, Mapping, OnPoll, FLAG, LINK, MAPPING, POLL, PRIVATE, VOTE};
 use crate::commands::AppState;
 use crate::hc::AppClient;
 use holochain_types_07::prelude::{ActionHash, AgentPubKey, Signature};
@@ -31,14 +31,6 @@ use std::sync::Arc;
 
 const POLLS: &str = "polls";
 const STATE_FILE: &str = "carry-move-v1_5.json";
-
-/// The (zome, entry) index of each kind on v1.3 and v1.4.
-const POLL: (u8, u8) = (1, 0);
-const VOTE: (u8, u8) = (1, 1);
-const FLAG: (u8, u8) = (1, 2);
-const MAPPING: (u8, u8) = (1, 3);
-const PRIVATE: (u8, u8) = (1, 4);
-const LINK: (u8, u8) = (0, 0);
 
 /// What the move keeps between runs.
 #[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq)]
@@ -67,17 +59,6 @@ impl MoveState {
 pub struct Own {
     pub kind: (u8, u8),
     pub carried: Carried,
-}
-
-#[derive(Deserialize, Debug)]
-struct OnPoll {
-    poll_action_hash: ActionHash,
-}
-
-#[derive(Deserialize, Debug)]
-struct Mapping {
-    old_action_hash: ActionHash,
-    new_action_hash: ActionHash,
 }
 
 #[derive(Deserialize, Debug)]
@@ -116,10 +97,6 @@ pub struct Plan {
     pub votes: Vec<(Carried, ActionHash)>,
     pub flags: Vec<(Carried, ActionHash)>,
     pub private: Vec<PrivateCopy>,
-}
-
-fn fields<T: serde::de::DeserializeOwned>(c: &Carried) -> Option<T> {
-    rmp_serde::from_slice(&c.original_entry).ok()
 }
 
 /// The plan for this install's own records (`v13` None when it has no 0.6

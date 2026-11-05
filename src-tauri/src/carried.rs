@@ -211,15 +211,30 @@ pub struct MapLaterCopyInput {
     pub later: LaterCopy,
 }
 
-/// The (zome, entry) index of a poll and of a poll mapping on v1.3 and v1.4.
-const POLL_KIND: (u8, u8) = (1, 0);
-const MAPPING_KIND: (u8, u8) = (1, 3);
+/// The (zome, entry) index of each kind on v1.3 and v1.4.
+pub const POLL: (u8, u8) = (1, 0);
+pub const VOTE: (u8, u8) = (1, 1);
+pub const FLAG: (u8, u8) = (1, 2);
+pub const MAPPING: (u8, u8) = (1, 3);
+pub const PRIVATE: (u8, u8) = (1, 4);
+pub const LINK: (u8, u8) = (0, 0);
 
-/// An older DNA's poll mapping, as far as the check reads it.
+/// A vote's or flag's poll, on the vote's own DNA.
 #[derive(Deserialize, Debug)]
-struct MappingFields {
-    old_action_hash: ActionHash,
-    new_action_hash: ActionHash,
+pub struct OnPoll {
+    pub poll_action_hash: ActionHash,
+}
+
+/// An older DNA's poll mapping.
+#[derive(Deserialize, Debug)]
+pub struct Mapping {
+    pub old_action_hash: ActionHash,
+    pub new_action_hash: ActionHash,
+}
+
+/// A carried record's entry, read as `T`.
+pub fn fields<T: serde::de::DeserializeOwned>(c: &Carried) -> Option<T> {
+    rmp_serde::from_slice(&c.original_entry).ok()
 }
 
 /// The v1.5 integrity zome's check of a later copy of `first` (the record
@@ -243,13 +258,13 @@ pub fn check_later_copy(first: &Carried, later: &LaterCopy) -> Result<(), String
     if later.poll.original_author != first.original_author && !vouched() {
         return Err("a later copy is by the first record's author or a key it vouches for".to_string());
     }
-    if check(&later.poll).map_err(|e| format!("the later copy: {e}"))? != POLL_KIND {
+    if check(&later.poll).map_err(|e| format!("the later copy: {e}"))? != POLL {
         return Err("the later copy: the original is another kind of entry".to_string());
     }
-    if check(&later.mapping).map_err(|e| format!("the later copy's mapping: {e}"))? != MAPPING_KIND {
+    if check(&later.mapping).map_err(|e| format!("the later copy's mapping: {e}"))? != MAPPING {
         return Err("the later copy's mapping: the original is another kind of entry".to_string());
     }
-    let m: MappingFields = holochain_types_07::prelude::decode(&later.mapping.original_entry)
+    let m: Mapping = holochain_types_07::prelude::decode(&later.mapping.original_entry)
         .map_err(|e| format!("the later copy's mapping does not decode: {e}"))?;
     if m.old_action_hash != first.original_action_hash || m.new_action_hash != later.poll.original_action_hash {
         return Err("the later copy's mapping maps the first record to the later copy".to_string());
@@ -321,14 +336,14 @@ mod tests {
     /// The fixture's two v1.3 polls, their v1.4 copies and the v1.4 mappings
     /// (the test instance's own move): (first, later copy) for each.
     fn moved(f: &Fixtures) -> Vec<(Carried, LaterCopy)> {
-        let polls13: Vec<Carried> = f.v13.iter().filter(|r| (r.zome_index, r.entry_index) == POLL_KIND).map(rebuilt).collect();
-        let polls14: Vec<Carried> = f.v14.iter().filter(|r| (r.zome_index, r.entry_index) == POLL_KIND).map(rebuilt).collect();
+        let polls13: Vec<Carried> = f.v13.iter().filter(|r| (r.zome_index, r.entry_index) == POLL).map(rebuilt).collect();
+        let polls14: Vec<Carried> = f.v14.iter().filter(|r| (r.zome_index, r.entry_index) == POLL).map(rebuilt).collect();
         f.v14
             .iter()
-            .filter(|r| (r.zome_index, r.entry_index) == MAPPING_KIND)
+            .filter(|r| (r.zome_index, r.entry_index) == MAPPING)
             .map(|r| {
                 let mapping = rebuilt(r);
-                let m: MappingFields = holochain_types_07::prelude::decode(&mapping.original_entry).unwrap();
+                let m: Mapping = holochain_types_07::prelude::decode(&mapping.original_entry).unwrap();
                 let first = polls13.iter().find(|p| p.original_action_hash == m.old_action_hash).unwrap().clone();
                 let poll = polls14.iter().find(|p| p.original_action_hash == m.new_action_hash).unwrap().clone();
                 (first, LaterCopy { poll, mapping, vouch: None })

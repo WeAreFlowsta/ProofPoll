@@ -54,6 +54,7 @@ dna/v1.3/target/
 dna/*/target/
 dna/*/tests/target/
 dna/*/tests/hostile/target/
+carrier/target/
 
 # WebdriverIO run logs (npm run e2e)
 /logs/
