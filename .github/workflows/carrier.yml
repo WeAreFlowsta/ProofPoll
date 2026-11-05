@@ -1,0 +1,53 @@
+name: Carrier
+
+# The ProofPoll node's carrier (carrier/): its tests and a linux-x64 build
+# on Debian bookworm, the node agent image's glibc (node:22-slim, 2.36), so
+# the binary loads there. A release attaches the same build to its assets
+# (build-release.yml); a branch build is kept as a workflow artifact.
+
+on:
+  push:
+    branches: [main, "proofpoll-*", "carrier-*"]
+    paths:
+      - "carrier/**"
+      - "src-tauri/src/carried.rs"
+      - "src-tauri/src/hc.rs"
+      - "rust-toolchain.toml"
+      - ".github/workflows/carrier.yml"
+  workflow_dispatch:
+
+jobs:
+  carrier:
+    runs-on: ubuntu-latest
+    container: debian:bookworm
+    steps:
+      - name: Build tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates curl git build-essential perl pkg-config
+
+      - uses: actions/checkout@v5
+
+      - name: Rust (the version rust-toolchain.toml pins)
+        run: |
+          curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Test and build
+        working-directory: carrier
+        run: |
+          cargo test --release --locked
+          cargo build --release --locked
+
+      - name: Check what it links
+        working-directory: carrier
+        run: |
+          ldd target/release/proofpoll-carrier
+          ./target/release/proofpoll-carrier --help
+          sha256sum target/release/proofpoll-carrier
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: proofpoll-carrier-linux-x64
+          path: carrier/target/release/proofpoll-carrier
+          retention-days: 14

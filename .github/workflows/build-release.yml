@@ -447,8 +447,54 @@ jobs:
             Write-Host "No sign-windows.log at $log"
           }
 
+  carrier:
+    # The ProofPoll node's carrier (carrier/), built on Debian bookworm so it
+    # loads in the node agent's image (node:22-slim, glibc 2.36); attached
+    # as proofpoll-carrier-<version>-linux-x64. The node image pins it by
+    # its SHA-256 (SHA256SUMS.txt lists it).
+    needs: create-release
+    runs-on: ubuntu-latest
+    container: debian:bookworm
+    steps:
+      - name: Build tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates curl git build-essential perl pkg-config
+
+      - uses: actions/checkout@v5
+
+      - name: Rust (the version rust-toolchain.toml pins)
+        run: |
+          curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Test and build
+        working-directory: carrier
+        run: |
+          cargo test --release --locked
+          cargo build --release --locked
+          ldd target/release/proofpoll-carrier
+          sha256sum target/release/proofpoll-carrier
+
+      - name: Attach to the release
+        uses: actions/github-script@v8
+        env:
+          release_id: ${{ needs.create-release.outputs.release_id }}
+        with:
+          script: |
+            const fs = require('fs');
+            const { owner, repo } = context.repo;
+            const release_id = Number(process.env.release_id);
+            const version = context.ref.replace('refs/tags/proofpoll-v', '');
+            const name = `proofpoll-carrier-${version}-linux-x64`;
+            const { data: assets } = await github.rest.repos.listReleaseAssets({ owner, repo, release_id, per_page: 100 });
+            for (const a of assets) {
+              if (a.name === name) await github.rest.repos.deleteReleaseAsset({ owner, repo, asset_id: a.id });
+            }
+            await github.rest.repos.uploadReleaseAsset({ owner, repo, release_id, name, data: fs.readFileSync('carrier/target/release/proofpoll-carrier') });
+
   publish-release:
-    needs: [create-release, build]
+    needs: [create-release, build, carrier]
     runs-on: ubuntu-latest
     steps:
       - name: Rename release assets
