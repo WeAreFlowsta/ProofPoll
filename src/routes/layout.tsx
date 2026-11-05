@@ -71,8 +71,10 @@ export default component$(() => {
   const migrationDismissed = useSignal(false);
   // The app's own updates: one downloaded and checked, waiting for a
   // restart; and, once after an update, what this copy was updated to.
-  const updateReady = useSignal<{ version: string; notes_url: string; changes_line: boolean } | null>(null);
-  const updateBusy = useSignal(false);
+  const updateReady = useSignal<{ version: string; notes_url: string; changes_line: boolean; asks_password: boolean } | null>(null);
+  // "Restart to update" under way: the step it is at (set on the click,
+  // then from `update-stage`), or "failed" when the install did not happen.
+  const updateStage = useSignal<"password" | "installing" | "restarting" | "failed" | null>(null);
   const updatedFrom = useSignal<{ version: string; to: string; notes_url: string } | null>(null);
   const disconnecting = useSignal(false);
   // Step 2 of an adopt/re-key: the key was restored, the sign-in hasn't
@@ -121,6 +123,9 @@ export default component$(() => {
       .catch(() => {});
     listen<NonNullable<typeof updateReady.value>>("update-ready", (event) => {
       updateReady.value = event.payload;
+    }).then((unlisten) => unlistenMigration.push(unlisten));
+    listen<"password" | "installing" | "restarting">("update-stage", (event) => {
+      updateStage.value = event.payload;
     }).then((unlisten) => unlistenMigration.push(unlisten));
 
     const startBackup = async () => {
@@ -570,20 +575,32 @@ export default component$(() => {
           <button
             type="button"
             data-testid="nav-restart-to-update"
-            disabled={updateBusy.value}
-            title={`ProofPoll ${updateReady.value.version} is downloaded and checked`}
-            class="rounded-full bg-indigo-600 px-3 py-1 text-sm font-medium text-white transition-colors hover:bg-indigo-500 disabled:opacity-60"
+            disabled={updateStage.value !== null && updateStage.value !== "failed"}
+            title={
+              updateReady.value.asks_password
+                ? `Installs ProofPoll ${updateReady.value.version}, then closes and opens ProofPoll again. Your computer asks for your password first.`
+                : `Installs ProofPoll ${updateReady.value.version}, then closes and opens ProofPoll again.`
+            }
+            class="flex items-center gap-2 rounded-full bg-indigo-600 px-3 py-1 text-sm font-medium text-white transition-colors hover:bg-indigo-500 disabled:cursor-default disabled:bg-indigo-600/80"
             onClick$={async () => {
-              updateBusy.value = true;
+              // Said at once, before the password prompt or the conductors' stop.
+              updateStage.value = updateReady.value!.asks_password ? "password" : "installing";
               try {
                 await invoke("restart_to_update");
               } catch (e) {
                 console.error("Update did not install:", e);
-                updateBusy.value = false;
+                updateStage.value = "failed";
               }
             }}
           >
-            Restart to update
+            {updateStage.value !== null && updateStage.value !== "failed" && (
+              <span class="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white border-t-transparent" />
+            )}
+            {updateStage.value === "restarting"
+              ? "Reopening…"
+              : updateStage.value !== null && updateStage.value !== "failed"
+                ? "Installing…"
+                : "Restart to update"}
           </button>
         )}
         {status.value?.ready &&
@@ -876,26 +893,31 @@ export default component$(() => {
         </div>
       )}
 
+      {/* The app's messages, one stack at the bottom right, each on a solid
+          panel so nothing behind shows through. Dialogs (z-50) cover it. */}
+      <div class="pointer-events-none fixed bottom-6 right-6 z-40 flex w-80 flex-col gap-3">
       {/* Once after an update: what changed */}
       {updatedFrom.value && (
-        <div data-testid="nav-updated" class="fixed bottom-6 left-6 z-50 flex items-center gap-3 rounded-lg border border-indigo-500/40 bg-indigo-500/15 px-4 py-3 shadow-xl">
-          <p class="text-sm text-indigo-200">Updated to ProofPoll {updatedFrom.value.to}</p>
-          {updatedFrom.value.notes_url && (
-            <button
-              type="button"
-              class="text-sm font-medium text-indigo-300 underline hover:text-indigo-200"
-              onClick$={async () => {
-                const { open } = await import("@tauri-apps/plugin-shell");
-                await open(updatedFrom.value!.notes_url);
-              }}
-            >
-              What changed
-            </button>
-          )}
+        <div data-testid="nav-updated" class="pointer-events-auto flex items-start gap-3 rounded-lg border border-indigo-500/40 bg-indigo-950 px-4 py-3 shadow-xl">
+          <div class="min-w-0 flex-1">
+            <p class="text-sm text-indigo-200">Updated to ProofPoll {updatedFrom.value.to}</p>
+            {updatedFrom.value.notes_url && (
+              <button
+                type="button"
+                class="mt-0.5 text-sm font-medium text-indigo-300 underline hover:text-indigo-200"
+                onClick$={async () => {
+                  const { open } = await import("@tauri-apps/plugin-shell");
+                  await open(updatedFrom.value!.notes_url);
+                }}
+              >
+                What changed
+              </button>
+            )}
+          </div>
           <button
             type="button"
             aria-label="Dismiss"
-            class="text-indigo-300 hover:text-white"
+            class="shrink-0 text-indigo-300 hover:text-white"
             onClick$={async () => {
               updatedFrom.value = null;
               await invoke("dismiss_updated").catch(() => {});
@@ -905,6 +927,45 @@ export default component$(() => {
           </button>
         </div>
       )}
+
+      {/* "Restart to update" under way: what happens next */}
+      {updateReady.value && updateStage.value && (
+        <div
+          class={`pointer-events-auto flex items-start gap-2.5 rounded-lg border px-4 py-3 shadow-xl ${
+            updateStage.value === "failed" ? "border-red-500/40 bg-red-950" : "border-indigo-500/40 bg-gray-800"
+          }`}
+        >
+          {updateStage.value !== "failed" && (
+            <div class="mt-0.5 h-4 w-4 shrink-0 animate-spin rounded-full border-2 border-indigo-400 border-t-transparent" />
+          )}
+          <div class="min-w-0 flex-1">
+            {updateStage.value === "password" ? (
+              <>
+                <p class="text-sm text-gray-100">Installing ProofPoll {updateReady.value.version}</p>
+                <p class="mt-0.5 text-xs text-gray-400">Your computer asks for your password to install it. Then ProofPoll closes and opens again.</p>
+              </>
+            ) : updateStage.value === "installing" ? (
+              <>
+                <p class="text-sm text-gray-100">Installing ProofPoll {updateReady.value.version}</p>
+                <p class="mt-0.5 text-xs text-gray-400">Then ProofPoll closes and opens again.</p>
+              </>
+            ) : updateStage.value === "restarting" ? (
+              <p class="text-sm text-gray-100">Installed. ProofPoll is closing and opening again.</p>
+            ) : (
+              <>
+                <p class="text-sm text-red-200">ProofPoll {updateReady.value.version} was not installed</p>
+                <p class="mt-0.5 text-xs text-gray-400">Nothing changed. Press Restart to update to try again.</p>
+              </>
+            )}
+          </div>
+          {updateStage.value === "failed" && (
+            <button type="button" aria-label="Dismiss" class="shrink-0 text-gray-400 hover:text-white" onClick$={() => (updateStage.value = null)}>
+              ×
+            </button>
+          )}
+        </div>
+      )}
+      </div>
     </div>
   );
 });

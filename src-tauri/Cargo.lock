@@ -5258,7 +5258,7 @@ dependencies = [
 
 [[package]]
 name = "proofpoll"
-version = "0.6.0-beta.1"
+version = "0.6.0-beta.2"
 dependencies = [
  "axum 0.7.9",
  "base64 0.22.1",

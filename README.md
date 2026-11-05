@@ -17,6 +17,13 @@ ProofPoll is built on **[Flowsta Vault](https://flowsta.com/vault/)**, which kee
 
 ## What's New
 
+### v0.6.0-beta.2 - 2026-11-05
+- **The first version that arrives by itself.** Installs of 0.6.0-beta.1 download this one in the background and install it when you restart ProofPoll or quit it.
+- **Your Vault backup includes everything.** It now also carries what you did on polls still on the older network, so the Vault's count of your polls and votes and your data export are complete. Polls and votes already copied to the new network count once.
+- **Flags work on every poll.** Flagging a poll still on the older network failed with "Poll not found", a flag on a newer poll did not show after a reload, and hiding a poll with several flags worked only for the oldest polls. Each poll's flags are now read and written on its own network.
+- **Your link to your Flowsta identity reaches the new network.** An install linked before 0.5.0 now makes that link on the new network as well when it starts, so your other devices count as you there too.
+- **Logs:** ProofPoll names its version when it starts and says what each update check found. On a Mac the logs are now in ~/Library/Logs/ProofPoll (Finder showed the old folder as an app); the older logs move there on the first start.
+
 ### v0.6.0-beta.1 - 2026-11-04
 - **ProofPoll updates itself.** A new version downloads in the background, is checked against its signed release record and its own signature, and installs when you restart ProofPoll or quit it. "Restart to update" appears in the header when one is ready, and after an update ProofPoll says once what it was updated to. Turn it off in Settings, Updates. A beta follows the betas and then the release. This first beta is installed by hand; versions after it arrive on their own.
 - **Settings.** The header's Identity link is now Settings: an Identity tab, an Updates tab, and this copy's version at the top.
