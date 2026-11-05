@@ -123,9 +123,12 @@ pub struct Carried {
     pub poll_mapping: Option<ActionHash>,
 }
 
-/// Maps a poll on an older DNA to its copy here. Valid only when the copy
-/// is a carried poll whose proof names the old hash, so a mapping cannot
-/// point an old poll at anything else.
+/// Maps a poll on an older DNA to its copy here. A poll has one copy here,
+/// carried from its first record; a mapping is valid when that copy's proof
+/// names the old hash, or, for a later copy of the same poll (the v1.4 copy
+/// its author made of a v1.3 poll), when `via` proves it. So a mapping
+/// cannot point an old poll at anything else, and a poll's votes land on one
+/// copy whichever older hash they name.
 #[hdk_entry_helper]
 #[derive(Clone, PartialEq)]
 pub struct MigratedPoll {
@@ -135,6 +138,19 @@ pub struct MigratedPoll {
     pub new_action_hash: ActionHash,
     /// Unix seconds when it was carried.
     pub migrated_at: i64,
+    /// For a later copy's hash: the proof that it is its author's copy of the
+    /// first record the copy here carries. None for that first record's hash.
+    #[serde(default)]
+    pub via: Option<LaterCopy>,
+}
+
+/// A later copy of a poll, tied to its first record: the later poll record
+/// and the mapping its own DNA holds from the first record's hash to it,
+/// both carried with their proofs, both by the first record's author.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct LaterCopy {
+    pub poll: Carried,
+    pub mapping: Carried,
 }
 
 /// An encrypted blob stored on the public DHT.
@@ -247,6 +263,7 @@ pub const POLLS_ZOME: u8 = 1;
 pub const POLL_ENTRY: u8 = 0;
 pub const VOTE_ENTRY: u8 = 1;
 pub const FLAG_ENTRY: u8 = 2;
+pub const MIGRATED_POLL_ENTRY: u8 = 3;
 pub const AGENT_LINKING_ZOME: u8 = 0;
 pub const IS_SAME_PERSON_ENTRY: u8 = 0;
 
@@ -353,6 +370,14 @@ pub struct FlagFields {
     pub poll_action_hash: ActionHash,
     pub reason: FlagReason,
     pub created_at: i64,
+}
+
+/// An older DNA's poll mapping (v1.3 and v1.4; v1.4's extra fields unread).
+#[derive(Deserialize, Debug)]
+pub struct MigratedPollFields {
+    pub old_action_hash: ActionHash,
+    pub new_action_hash: ActionHash,
+    pub migrated_at: i64,
 }
 
 /// The agent-linking zome's entry, as a carried link checks it.
@@ -517,10 +542,55 @@ fn validate_migrated_poll(mp: &MigratedPoll) -> ExternResult<ValidateCallbackRes
         .ok()
         .flatten()
         .and_then(|p| p.carried_from);
-    match carried {
-        Some(c) if c.original_action_hash == mp.old_action_hash => Ok(ValidateCallbackResult::Valid),
-        _ => invalid("A mapping names a poll carried from the old one"),
+    let Some(first) = carried else {
+        return invalid("A mapping names a poll carried from the old one");
+    };
+    let Some(later) = &mp.via else {
+        return if first.original_action_hash == mp.old_action_hash {
+            Ok(ValidateCallbackResult::Valid)
+        } else {
+            invalid("A mapping names a poll carried from the old one")
+        };
+    };
+    match check_later_copy(&first, later, &mp.old_action_hash)? {
+        Ok(()) => Ok(ValidateCallbackResult::Valid),
+        Err(e) => invalid(e),
     }
+}
+
+/// A later copy (`old_action_hash`, on a later DNA) of the first record the
+/// copy here carries: both proofs verify, the carried mapping maps the first
+/// record's hash to the later poll, and all three are by one author.
+fn check_later_copy(first: &Carried, later: &LaterCopy, old_action_hash: &ActionHash) -> ExternResult<Result<(), String>> {
+    if later.poll.poll_mapping.is_some() || later.mapping.poll_mapping.is_some() {
+        return Ok(Err("a later copy's records name no poll mapping".to_string()));
+    }
+    if later.poll.original_action_hash != *old_action_hash {
+        return Ok(Err("the later copy is not the poll this mapping maps".to_string()));
+    }
+    if later.poll.original_dna != later.mapping.original_dna {
+        return Ok(Err("the later copy and its mapping are on different DNAs".to_string()));
+    }
+    if !(first.original_dna == "1.3" && later.poll.original_dna == "1.4") {
+        return Ok(Err("a later copy is on a later DNA than the first record".to_string()));
+    }
+    if later.poll.original_author != first.original_author || later.mapping.original_author != first.original_author {
+        return Ok(Err("a later copy and its mapping are by the first record's author".to_string()));
+    }
+    if let Err(e) = check_carried(&later.poll, POLLS_ZOME, POLL_ENTRY)? {
+        return Ok(Err(format!("the later copy: {e}")));
+    }
+    if let Err(e) = check_carried(&later.mapping, POLLS_ZOME, MIGRATED_POLL_ENTRY)? {
+        return Ok(Err(format!("the later copy's mapping: {e}")));
+    }
+    let m: MigratedPollFields = match original_fields(&later.mapping) {
+        Ok(m) => m,
+        Err(e) => return Ok(Err(e)),
+    };
+    if m.old_action_hash != first.original_action_hash || m.new_action_hash != *old_action_hash {
+        return Ok(Err("the later copy's mapping maps the first record to the later copy".to_string()));
+    }
+    Ok(Ok(()))
 }
 
 /// A vote or flag link tagged with a voter (a carried one): the tag must be

@@ -1,0 +1,5 @@
+# Two tests at a time: each compiles the DNA's wasm on an unoptimized
+# conductor, and six at once made the signed zome calls expire before they
+# ran (BadNonce "Expired", 11-05).
+[env]
+RUST_TEST_THREADS = "2"

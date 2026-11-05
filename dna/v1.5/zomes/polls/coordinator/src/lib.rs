@@ -62,6 +62,14 @@ pub struct CarryInput {
     pub carried: Carried,
 }
 
+/// A later copy of a poll (a v1.4 copy of a v1.3 poll, with its v1.4
+/// mapping) and the poll's one copy here.
+#[derive(Serialize, Deserialize, Debug)]
+pub struct MapLaterCopyInput {
+    pub copy: ActionHash,
+    pub later: LaterCopy,
+}
+
 // ── Poll functions ─────────────────────────────────────────────────────
 
 #[hdk_extern]
@@ -534,10 +542,32 @@ pub fn carry_poll(input: CarryInput) -> ExternResult<ActionHash> {
         old_action_hash,
         new_action_hash: poll_hash.clone(),
         migrated_at: sys_time()?.as_seconds_and_nanos().0,
+        via: None,
     };
     let mapping_hash = create_entry(&EntryZomes::Integrity(EntryTypes::MigratedPoll(mapping)))?;
     create_link(migration_anchor()?, mapping_hash, LinkTypes::MigrationIndex, ())?;
     Ok(poll_hash)
+}
+
+/// Map a later copy's hash to the poll's one copy here (`copy`, carried from
+/// the poll's first record), so votes cast on the later copy land on the
+/// same copy as the first record's. Once per later copy: a hash already
+/// mapped returns its copy.
+#[hdk_extern]
+pub fn map_later_copy(input: MapLaterCopyInput) -> ExternResult<ActionHash> {
+    let old_action_hash = input.later.poll.original_action_hash.clone();
+    if let Some(existing) = get_migration_mapping(old_action_hash.clone())? {
+        return Ok(existing);
+    }
+    let mapping = MigratedPoll {
+        old_action_hash,
+        new_action_hash: input.copy.clone(),
+        migrated_at: sys_time()?.as_seconds_and_nanos().0,
+        via: Some(input.later),
+    };
+    let mapping_hash = create_entry(&EntryZomes::Integrity(EntryTypes::MigratedPoll(mapping)))?;
+    create_link(migration_anchor()?, mapping_hash, LinkTypes::MigrationIndex, ())?;
+    Ok(input.copy)
 }
 
 /// The poll a carried vote or flag is filed under: the new hash of the

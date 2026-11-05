@@ -133,6 +133,62 @@ pub fn check(c: &Carried) -> Result<(u8, u8), String> {
     Ok(kind)
 }
 
+/// The v1.5 integrity zome's `LaterCopy`: a later copy of a poll (a v1.4
+/// copy its author made of a v1.3 poll) and that DNA's mapping to it.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct LaterCopy {
+    pub poll: Carried,
+    pub mapping: Carried,
+}
+
+/// The input of v1.5's `map_later_copy`: the poll's one copy there.
+#[derive(Serialize, Debug)]
+pub struct MapLaterCopyInput {
+    pub copy: ActionHash,
+    pub later: LaterCopy,
+}
+
+/// The (zome, entry) index of a poll and of a poll mapping on v1.3 and v1.4.
+const POLL_KIND: (u8, u8) = (1, 0);
+const MAPPING_KIND: (u8, u8) = (1, 3);
+
+/// An older DNA's poll mapping, as far as the check reads it.
+#[derive(Deserialize, Debug)]
+struct MappingFields {
+    old_action_hash: ActionHash,
+    new_action_hash: ActionHash,
+}
+
+/// The v1.5 integrity zome's check of a later copy of `first` (the record
+/// the poll's copy there carries), run first so a mapping the network would
+/// refuse is never submitted.
+pub fn check_later_copy(first: &Carried, later: &LaterCopy) -> Result<(), String> {
+    if later.poll.poll_mapping.is_some() || later.mapping.poll_mapping.is_some() {
+        return Err("a later copy's records name no poll mapping".to_string());
+    }
+    if later.poll.original_dna != later.mapping.original_dna {
+        return Err("the later copy and its mapping are on different DNAs".to_string());
+    }
+    if !(first.original_dna == "1.3" && later.poll.original_dna == "1.4") {
+        return Err("a later copy is on a later DNA than the first record".to_string());
+    }
+    if later.poll.original_author != first.original_author || later.mapping.original_author != first.original_author {
+        return Err("a later copy and its mapping are by the first record's author".to_string());
+    }
+    if check(&later.poll).map_err(|e| format!("the later copy: {e}"))? != POLL_KIND {
+        return Err("the later copy: the original is another kind of entry".to_string());
+    }
+    if check(&later.mapping).map_err(|e| format!("the later copy's mapping: {e}"))? != MAPPING_KIND {
+        return Err("the later copy's mapping: the original is another kind of entry".to_string());
+    }
+    let m: MappingFields = holochain_types_07::prelude::decode(&later.mapping.original_entry)
+        .map_err(|e| format!("the later copy's mapping does not decode: {e}"))?;
+    if m.old_action_hash != first.original_action_hash || m.new_action_hash != later.poll.original_action_hash {
+        return Err("the later copy's mapping maps the first record to the later copy".to_string());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -192,6 +248,45 @@ mod tests {
             assert_eq!(c.original_timestamp.as_micros(), r.timestamp_us);
             assert_eq!(check(&c), Ok((r.zome_index, r.entry_index)), "{} passes the network's checks", r.action_hash);
         }
+    }
+
+    /// The fixture's two v1.3 polls, their v1.4 copies and the v1.4 mappings
+    /// (the test instance's own move): (first, later copy) for each.
+    fn moved(f: &Fixtures) -> Vec<(Carried, LaterCopy)> {
+        let polls13: Vec<Carried> = f.v13.iter().filter(|r| (r.zome_index, r.entry_index) == POLL_KIND).map(rebuilt).collect();
+        let polls14: Vec<Carried> = f.v14.iter().filter(|r| (r.zome_index, r.entry_index) == POLL_KIND).map(rebuilt).collect();
+        f.v14
+            .iter()
+            .filter(|r| (r.zome_index, r.entry_index) == MAPPING_KIND)
+            .map(|r| {
+                let mapping = rebuilt(r);
+                let m: MappingFields = holochain_types_07::prelude::decode(&mapping.original_entry).unwrap();
+                let first = polls13.iter().find(|p| p.original_action_hash == m.old_action_hash).unwrap().clone();
+                let poll = polls14.iter().find(|p| p.original_action_hash == m.new_action_hash).unwrap().clone();
+                (first, LaterCopy { poll, mapping })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_later_copy_passes_the_networks_check_and_a_mismatch_does_not() {
+        let f = fixtures();
+        let moved = moved(&f);
+        assert_eq!(moved.len(), 2);
+        for (first, later) in &moved {
+            assert_eq!(check_later_copy(first, later), Ok(()));
+        }
+        let (first_a, later_a) = &moved[0];
+        let (_, later_b) = &moved[1];
+        let swapped = LaterCopy { poll: later_a.poll.clone(), mapping: later_b.mapping.clone() };
+        assert!(check_later_copy(first_a, &swapped).unwrap_err().contains("maps the first record"));
+        let wrong_dna = LaterCopy { poll: first_a.clone(), mapping: later_a.mapping.clone() };
+        assert!(check_later_copy(first_a, &wrong_dna).unwrap_err().contains("different DNAs"));
+        let mut other_author = later_a.clone();
+        other_author.mapping.original_author = AgentPubKey::from_raw_32(vec![7u8; 32]);
+        assert!(check_later_copy(first_a, &other_author).unwrap_err().contains("first record's author"));
+        let poll_as_mapping = LaterCopy { poll: later_a.poll.clone(), mapping: later_a.poll.clone() };
+        assert!(check_later_copy(first_a, &poll_as_mapping).unwrap_err().contains("another kind of entry"));
     }
 
     #[test]

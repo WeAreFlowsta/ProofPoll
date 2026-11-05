@@ -9,8 +9,8 @@
 use holo_hash::{ActionHashB64, AgentPubKeyB64};
 use holochain::prelude::*;
 use holochain::sweettest::*;
-use polls_coordinator::{CarryInput, CastVoteInput, CreateEncryptedEntryInput, CreatePollInput, FlagPollInput};
-use polls_integrity::{Carried, FlagReason, Poll, PollType, Vote};
+use polls_coordinator::{CarryInput, CastVoteInput, CreateEncryptedEntryInput, CreatePollInput, FlagPollInput, MapLaterCopyInput};
+use polls_integrity::{Carried, FlagReason, LaterCopy, MigratedPollFields, Poll, PollType, Vote};
 use proofpoll_v1_5_tests::{carried_records, SignedRecord, MIGRATED_POLL, POLL, VOTE};
 use std::path::Path;
 
@@ -306,6 +306,79 @@ async fn forged_carried_records_are_refused() {
     let r: Result<ActionHash, _> = conductor.call_fallible(&zome, "carry_vote", CarryInput { carried: carried(&vote, wrong) }).await;
     let e = format!("{:?}", r.expect_err("a vote under another poll's mapping"));
     assert!(e.contains("does not map the original's poll"), "refused for its own reason, not: {e}");
+}
+
+fn hash_of(r: &SignedRecord) -> ActionHash {
+    ActionHashB64::from_b64_str(&r.action_hash).unwrap().into()
+}
+
+/// A poll its author moved v1.3 -> v1.4 has one copy here: carried from the
+/// v1.3 record, with the v1.4 copy's hash mapped to it by the v1.4 mapping's
+/// proof (the test instance's own move, both real). Mismatched or misplaced
+/// proofs are refused.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_later_copy_maps_to_the_first_records_copy() {
+    let fixtures = carried_records();
+    let polls13 = of_kind(&fixtures.v13, POLL);
+    let polls14 = of_kind(&fixtures.v14, POLL);
+    let maps14 = of_kind(&fixtures.v14, MIGRATED_POLL);
+    assert_eq!((polls13.len(), polls14.len(), maps14.len()), (2, 2, 2), "two polls moved v1.3 -> v1.4, with their mappings");
+    let mut conductor = SweetConductor::standard().await;
+    let app = conductor.setup_app("proofpoll", [&dna().await]).await.unwrap();
+    let zome = app.cells()[0].zome(ZOME);
+
+    // Each v1.4 mapping with the v1.3 poll and the v1.4 copy it names.
+    let mut moved = Vec::new();
+    for m in &maps14 {
+        let f: MigratedPollFields = polls_integrity::original_fields(&carried(m, None)).unwrap();
+        let first = polls13.iter().find(|p| hash_of(p) == f.old_action_hash).expect("the mapping's v1.3 poll").clone();
+        let later = polls14.iter().find(|p| hash_of(p) == f.new_action_hash).expect("the mapping's v1.4 copy").clone();
+        moved.push((first, later, m.clone()));
+    }
+
+    // Forgeries first, against the first poll's copy.
+    let (first_a, later_a, map_a) = &moved[0];
+    let (first_b, later_b, map_b) = &moved[1];
+    let copy_a: ActionHash = conductor.call(&zome, "carry_poll", CarryInput { carried: carried(first_a, None) }).await;
+    let mut forgeries: Vec<(&str, LaterCopy, &[&str])> = Vec::new();
+    forgeries.push(("another poll's mapping", LaterCopy { poll: carried(later_a, None), mapping: carried(map_b, None) }, &["maps the first record to the later copy"]));
+    forgeries.push(("another poll's later copy", LaterCopy { poll: carried(later_b, None), mapping: carried(map_a, None) }, &["maps the first record to the later copy"]));
+    // (A v1.3 poll not carried yet: a hash already mapped returns its copy before any check.)
+    forgeries.push(("a later copy on the first record's DNA", LaterCopy { poll: carried(first_b, None), mapping: carried(map_a, None) }, &["different DNAs", "later DNA"]));
+    let mut c = carried(map_a, None);
+    c.original_author = app.agent().clone();
+    forgeries.push(("a mapping by another author", LaterCopy { poll: carried(later_a, None), mapping: c }, &["by the first record's author"]));
+    let mut c = carried(map_a, None);
+    c.original_signature.0[0] ^= 1;
+    forgeries.push(("a mapping with a flipped signature byte", LaterCopy { poll: carried(later_a, None), mapping: c }, &["signature does not verify"]));
+    forgeries.push(("a poll passed as its mapping", LaterCopy { poll: carried(later_a, None), mapping: carried(later_a, None) }, &["another kind of entry", "entry does not decode"]));
+    for (what, later, reasons) in forgeries {
+        let r: Result<ActionHash, _> = conductor.call_fallible(&zome, "map_later_copy", MapLaterCopyInput { copy: copy_a.clone(), later }).await;
+        let e = format!("{:?}", r.expect_err(what));
+        assert!(reasons.iter().any(|reason| e.contains(reason)), "{what} refused for its own reason, not: {e}");
+    }
+    let unmapped: Option<ActionHash> = conductor.call(&zome, "get_migration_mapping", hash_of(later_a)).await;
+    assert_eq!(unmapped, None, "no forgery left a mapping");
+
+    // The genuine ones: each later copy's hash opens its first record's copy.
+    for (first, later, map) in &moved {
+        let copy: ActionHash = conductor.call(&zome, "carry_poll", CarryInput { carried: carried(first, None) }).await;
+        let to: ActionHash = conductor
+            .call(&zome, "map_later_copy", MapLaterCopyInput { copy: copy.clone(), later: LaterCopy { poll: carried(later, None), mapping: carried(map, None) } })
+            .await;
+        assert_eq!(to, copy);
+        let via_later: Option<ActionHash> = conductor.call(&zome, "get_migration_mapping", hash_of(later)).await;
+        let via_first: Option<ActionHash> = conductor.call(&zome, "get_migration_mapping", hash_of(first)).await;
+        assert_eq!((via_later.as_ref(), via_first.as_ref()), (Some(&copy), Some(&copy)), "both older hashes open the one copy");
+        let again: ActionHash = conductor
+            .call(&zome, "map_later_copy", MapLaterCopyInput { copy: copy.clone(), later: LaterCopy { poll: carried(later, None), mapping: carried(map, None) } })
+            .await;
+        assert_eq!(again, copy, "once per later copy");
+        let record: Option<ActionHash> = conductor.call(&zome, "get_migration_record", hash_of(later)).await;
+        assert!(record.is_some(), "a vote cast on the later copy names this mapping");
+    }
+    let all: Vec<Record> = conductor.call(&zome, "get_all_polls", ()).await;
+    assert_eq!(all.len(), 2, "one copy per poll, not one per older hash");
 }
 
 /// Two conductors on a local rendezvous: a poll authored on one is read and

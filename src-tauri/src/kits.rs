@@ -27,7 +27,7 @@ pub const KIT_07: KitDescriptor = KitDescriptor {
     lair: KitBinary { sidecar: "proofpoll-lair-keystore-07", version: "0.7.1", accepted: &[] },
     files: &[
         KitFile { name: "proofpoll_v1_4_happ.happ", sha256: "160f768b90a5e5ae27252af472ea95166782c0949f9df137ad3fd96507928dac" },
-        KitFile { name: "proofpoll_v1_5_happ.happ", sha256: "8222dd71b2f2f6aae4cbd4ce9cbcafd364988c7800453d817b7482d3609baa90" },
+        KitFile { name: "proofpoll_v1_5_happ.happ", sha256: "7600fdd4747b6f0d596d29f92002e137a1eba10dced0b060ab5c402ea2230ea0" },
     ],
 };
 
