@@ -42,6 +42,8 @@ pub struct Options {
     pub max_writes: u64,
     pub pause_ms: u64,
     pub min_free_mb: u64,
+    /// Each delete decision on stderr (hashes only).
+    pub verbose: bool,
 }
 
 /// What a pass saw and did: counts only.
@@ -63,7 +65,8 @@ pub struct Report {
     pub failed: u64,
     /// Anything was written on v1.5 this pass.
     pub wrote: bool,
-    /// Why the pass stopped before the end (memory, the write limit).
+    /// Why the pass stopped before the end (memory, the write limit, a read
+    /// that failed).
     pub stopped: Option<String>,
 }
 
@@ -603,6 +606,10 @@ async fn pass(o: &Options, l06: Option<&Line06>, l07: &Line07, pace: &mut Pace<'
                 pace.call().await?;
                 on.insert(key.clone(), on_copy(v15, getter, &copy).await?);
             }
+            if o.verbose && !deleted.is_empty() {
+                let here = &on[&key];
+                eprintln!("carrier: {getter} on copy {copy}: {} carried, {} by this node", here.carried.len(), here.carried.iter().filter(|(_, _, w)| *w == me).count());
+            }
             if records.is_empty() {
                 continue;
             }
@@ -645,6 +652,9 @@ async fn pass(o: &Options, l06: Option<&Line06>, l07: &Line07, pace: &mut Pace<'
                     continue;
                 }
                 for (original, hash, writer) in &here.carried {
+                    if o.verbose && deleted.contains(original) {
+                        eprintln!("carrier: removed flag {original}: copy {hash}, made here {}", *writer == me);
+                    }
                     if *writer != me || !deleted.contains(original) {
                         continue;
                     }
@@ -666,13 +676,22 @@ async fn pass(o: &Options, l06: Option<&Line06>, l07: &Line07, pace: &mut Pace<'
     let mut live: Option<Vec<hc::RecordView>> = None;
     for old in &deleted {
         pace.call().await?;
-        let Some(copy) = copy_of(v15, old).await? else { continue };
+        let Some(copy) = copy_of(v15, old).await? else {
+            if o.verbose {
+                eprintln!("carrier: deleted {old}: no copy here");
+            }
+            continue;
+        };
         if live.is_none() {
             pace.call().await?;
             live = Some(hc::records(Line::V07, &call(v15, "get_all_polls", &()).await?)?);
         }
         let copy_s = copy.to_string();
-        let mine = live.as_ref().expect("read above").iter().any(|p| p.action_hash == copy_s && p.author == me);
+        let listed = live.as_ref().expect("read above").iter().find(|p| p.action_hash == copy_s);
+        let mine = listed.is_some_and(|p| p.author == me);
+        if o.verbose {
+            eprintln!("carrier: deleted poll {old}: copy {copy_s}, listed {}, made here {mine}", listed.is_some());
+        }
         if !mine {
             continue;
         }

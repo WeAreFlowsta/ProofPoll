@@ -3116,10 +3116,11 @@ pub(crate) async fn harness_v13_poll(
     description: String,
     options: Vec<String>,
     closes_at: Option<i64>,
+    poll_type: Option<String>,
 ) -> Result<String, String> {
     let client = state.app_client_v1_3.lock().await;
     let client = client.as_ref().ok_or("v1.3 is not running")?;
-    let input = CreatePollInput { title, description, options, closes_at, poll_type: Some("Anonymous".to_string()) };
+    let input = CreatePollInput { title, description, options, closes_at, poll_type: Some(poll_type.unwrap_or_else(|| "Anonymous".to_string())) };
     let result = call_zome(client, POLLS_ZOME, "create_poll", crate::hc::encode(&input)?).await?;
     let action_hash: ActionHash = crate::hc::decode(&result)?;
     Ok(action_hash.to_string())
@@ -3128,12 +3129,41 @@ pub(crate) async fn harness_v13_poll(
 /// See `harness_v13_poll`: a vote on a v1.3 poll, cast there with no
 /// identity gate (the carrier's test fixtures need one).
 #[cfg(feature = "harness")]
-pub(crate) async fn harness_v13_vote(state: &AppState, poll: String, option_index: u32) -> Result<String, String> {
+pub(crate) async fn harness_v13_vote(state: &AppState, poll: String, option_index: u32, display_name: Option<String>) -> Result<String, String> {
     let client = state.app_client_v1_3.lock().await;
     let client = client.as_ref().ok_or("v1.3 is not running")?;
     let poll_action_hash = ActionHash::try_from(poll).map_err(|e| format!("Invalid action hash: {:?}", e))?;
-    let input = CastVoteInput { poll_action_hash, option_index, display_name: None, profile_picture: None };
+    let input = CastVoteInput { poll_action_hash, option_index, display_name, profile_picture: None };
     let result = call_zome(client, POLLS_ZOME, "cast_vote", crate::hc::encode(&input)?).await?;
+    let action_hash: ActionHash = crate::hc::decode(&result)?;
+    Ok(action_hash.to_string())
+}
+
+/// See `harness_v13_poll`: a flag on a v1.3 poll, raised there with no
+/// identity gate.
+#[cfg(feature = "harness")]
+pub(crate) async fn harness_v13_flag(state: &AppState, poll: String, reason: String) -> Result<String, String> {
+    #[derive(serde::Serialize, Debug)]
+    struct Input {
+        poll_action_hash: ActionHash,
+        reason: String,
+    }
+    let client = state.app_client_v1_3.lock().await;
+    let client = client.as_ref().ok_or("v1.3 is not running")?;
+    let poll_action_hash = ActionHash::try_from(poll).map_err(|e| format!("Invalid action hash: {:?}", e))?;
+    let result = call_zome(client, POLLS_ZOME, "flag_poll", crate::hc::encode(&Input { poll_action_hash, reason })?).await?;
+    let action_hash: ActionHash = crate::hc::decode(&result)?;
+    Ok(action_hash.to_string())
+}
+
+/// See `harness_v13_poll`: `f` ("delete_poll" or "remove_flag") on a v1.3
+/// record, as its 0.4.x author does.
+#[cfg(feature = "harness")]
+pub(crate) async fn harness_v13_remove(state: &AppState, f: &str, hash: String) -> Result<String, String> {
+    let client = state.app_client_v1_3.lock().await;
+    let client = client.as_ref().ok_or("v1.3 is not running")?;
+    let hash = ActionHash::try_from(hash).map_err(|e| format!("Invalid action hash: {:?}", e))?;
+    let result = call_zome(client, POLLS_ZOME, f, crate::hc::encode(&hash)?).await?;
     let action_hash: ActionHash = crate::hc::decode(&result)?;
     Ok(action_hash.to_string())
 }

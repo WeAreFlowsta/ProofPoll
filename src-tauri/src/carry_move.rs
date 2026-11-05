@@ -451,9 +451,20 @@ struct CarriedVote {
     carried_from: Option<Carried>,
 }
 
+/// A debug build takes `PROOFPOLL_TEST_HOLD_MOVE=1`: the move does not start
+/// by itself (the instance stands for one that has not updated; a test runs
+/// the move when it should). A release build never reads it.
+fn held_for_a_test() -> bool {
+    cfg!(debug_assertions) && std::env::var("PROOFPOLL_TEST_HOLD_MOVE").is_ok_and(|v| !v.is_empty())
+}
+
 /// Run the move now and again every ten minutes until nothing is left,
 /// under the same gate as every write (a different identity present: wait).
 pub fn spawn(state: Arc<AppState>) {
+    if held_for_a_test() {
+        log::info!("[move 1.5] held for a test (PROOFPOLL_TEST_HOLD_MOVE)");
+        return;
+    }
     tauri::async_runtime::spawn(async move {
         // The cells settle for a moment after startup.
         tokio::time::sleep(std::time::Duration::from_secs(10)).await;

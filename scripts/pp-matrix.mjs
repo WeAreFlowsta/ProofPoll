@@ -4,12 +4,14 @@
  * the `harness` feature) through their /dev routes, beside a Flowsta Vault test
  * instance. scripts/matrix.sh starts everything and runs the legs in order.
  *
- * Usage: node scripts/pp-matrix.mjs --leg=<fresh|signin|polls|devices|migration>
+ * Usage: node scripts/pp-matrix.mjs --leg=<fresh|signin|polls|devices|migration|carrier>
  * Env:
  *   PP_A, PP_B     harness URLs of instances A and B (B only for `devices`)
  *   VAULT          the Vault test instance's URL (http://127.0.0.1:27778)
  *   CLIENT_ID      a client id the staging API knows (the staging fixture app)
  */
+
+import { execFile } from 'node:child_process';
 
 const LEG = (process.argv.find((a) => a.startsWith('--leg=')) || '--leg=').split('=')[1];
 const A = process.env.PP_A || 'http://127.0.0.1:28801';
@@ -18,6 +20,7 @@ const C = process.env.PP_C || 'http://127.0.0.1:28803';
 const D = process.env.PP_D || 'http://127.0.0.1:28804';
 const VAULT = process.env.VAULT || 'http://127.0.0.1:27778';
 const CLIENT_ID = process.env.CLIENT_ID || '';
+const CARRIER = process.env.PP_CARRIER || new URL('../carrier/target/debug/proofpoll-carrier', import.meta.url).pathname;
 
 let failures = 0;
 const results = [];
@@ -311,9 +314,122 @@ async function adopted(state) {
     JSON.stringify({ headMoved: (logs.app.match(/head has moved/g) || []).length, foreignKey: (logs.conductor07.match(/FOREIGN KEY constraint failed/g) || []).length }));
 }
 
+/** The node's carrier: ProofPoll 0.4.x data on v1.3 by installs that never
+ * update (each instance holds its own move: PROOFPOLL_TEST_HOLD_MOVE), carried
+ * to v1.5 by the carrier binary against D's conductors, D standing for the
+ * node. Nobody whose records move acts. The staging network holds other runs'
+ * polls too, so the counts are at least, not exactly. */
+async function carrier() {
+  console.log('\n── The node carries what nobody else does');
+  for (const [b, w] of [[A, 'A'], [B, 'B'], [C, 'C'], [D, 'D']]) record(`${w}: ready`, await waitReady(b));
+  const keyOf = async (b) => (await status(b)).app?.agent_pub_key;
+  const [aKey, bKey, cKey] = [await keyOf(A), await keyOf(B), await keyOf(C)];
+  const anon = await op(A, { op: 'v13_poll', title: `carrier anonymous ${nowS()}`, description: 'by an install that never updates', options: ['red', 'blue'], closes_at: nowS() + 7 * 86400 });
+  const pub = await op(A, { op: 'v13_poll', title: `carrier public ${nowS()}`, description: 'names shown', options: ['yes', 'no'], closes_at: nowS() + 7 * 86400, poll_type: 'Public' });
+  record('A: two v1.3 polls, one anonymous and one public', anon.ok && pub.ok, anon.error || pub.error);
+  for (const [b, w] of [[B, 'B'], [C, 'C']]) {
+    record(`${w}: sees A's v1.3 polls`, await until(async () => {
+      const listed = (await op(b, { op: 'polls' })).data || [];
+      return listed.some((p) => p.hash === anon.data) && listed.some((p) => p.hash === pub.data);
+    }, 300, 10000));
+  }
+  const votes = [
+    await op(A, { op: 'v13_vote', poll: anon.data, option: 0 }),
+    await op(B, { op: 'v13_vote', poll: anon.data, option: 1 }),
+    await op(C, { op: 'v13_vote', poll: anon.data, option: 0 }),
+    await op(B, { op: 'v13_vote', poll: pub.data, option: 0, display_name: 'Voter B' }),
+  ];
+  record('three votes on the anonymous poll (A, B, C), B named on the public one', votes.every((v) => v.ok), JSON.stringify(votes.map((v) => v.error)));
+  const flag = await op(C, { op: 'v13_flag', poll: anon.data, reason: 'Spam' });
+  record('C: a flag on the anonymous poll', flag.ok, flag.error);
+
+  const node = (await op(D, { op: 'node_admin' })).data;
+  record("D: its conductors' admin ports and origin", !!node?.origin, JSON.stringify(node && { admin_06: node.admin_06, admin_07: node.admin_07 }));
+  const run = (extra = []) => new Promise((resolve) => execFile(CARRIER,
+    ['--admin-06', `localhost:${node.admin_06}`, '--admin-07', `localhost:${node.admin_07}`, '--origin', node.origin, '--pause-ms', '50', '--max-writes', '2000', '--verbose', ...extra],
+    { timeout: 900_000, maxBuffer: 1 << 24 },
+    (err, stdout, stderr) => {
+      let report = null;
+      try { report = JSON.parse(String(stdout).trim().split('\n').pop()); } catch { /* none */ }
+      resolve({ code: err ? (err.code ?? 1) : 0, report, stderr: String(stderr) });
+    }));
+  const show = (r) => JSON.stringify(r.report || { code: r.code, stderr: r.stderr.slice(-400) });
+
+  // D holds what the network gossips to it: the dry run counts until it has
+  // every record, then the real run carries them.
+  let dry = { report: null };
+  const seen = await until(async () => {
+    dry = await run(['--dry-run']);
+    const s = dry.report?.seen || {};
+    return s.polls_v13 >= 2 && s.votes >= 4 && s.flags >= 1;
+  }, 600, 15000);
+  record('the carrier (dry run) reads both polls, four votes and the flag through D', seen, show(dry));
+  record('the dry run writes nothing', dry.report?.wrote === false && dry.report?.carried?.polls >= 2, show(dry));
+  const t0 = Date.now();
+  const first = await run();
+  record('the carrier runs to the end, nothing refused', first.code === 0 && first.report?.failed === 0 && !first.report?.stopped, show(first));
+  console.log(`  (took ${Math.round((Date.now() - t0) / 1000)} s)`);
+  record('it carried both polls and the four votes and the flag', first.report?.carried?.polls >= 2 && first.report?.carried?.votes >= 4 && first.report?.carried?.flags >= 1, show(first));
+
+  const copyOf = async (old) => (await op(C, { op: 'poll', poll: old })).data?.hash;
+  let anonCopy, pubCopy;
+  record('C: each v1.3 hash opens its v1.5 copy', await until(async () => {
+    [anonCopy, pubCopy] = [await copyOf(anon.data), await copyOf(pub.data)];
+    return !!anonCopy && anonCopy !== anon.data && !!pubCopy && pubCopy !== pub.data;
+  }, 300, 10000), JSON.stringify({ anonCopy, pubCopy }));
+  // A failed read is null, never an empty list: no check passes on it.
+  const v15 = async (b, fn, hash) => {
+    const r = await op(b, { op: 'v15_records', fn, hash });
+    return r.ok && Array.isArray(r.data) ? r.data : null;
+  };
+  let anonVotes = [];
+  await until(async () => ((anonVotes = (await v15(C, 'get_poll_votes', anonCopy)) || []).length >= 3), 300, 10000);
+  const by = (rs) => rs.map((v) => [v.carried_author?.slice(0, 12), v.writer?.slice(0, 12), v.fields?.display_name ?? null]);
+  record('C, on v1.5 alone: the anonymous poll has three votes, one each by A, B and C', anonVotes.length === 3 && [aKey, bKey, cKey].every((k) => anonVotes.filter((v) => v.carried_author === k).length === 1), JSON.stringify(by(anonVotes)));
+  record('no name on an anonymous vote; each carried by another key than its voter\'s', anonVotes.every((v) => !v.fields?.display_name && v.writer !== v.carried_author), JSON.stringify(by(anonVotes)));
+  const pubVotes = (await v15(C, 'get_poll_votes', pubCopy)) || [];
+  record("the public poll's vote keeps its name, by B", pubVotes.length === 1 && pubVotes[0].fields?.display_name === 'Voter B' && pubVotes[0].carried_author === bKey, JSON.stringify(by(pubVotes)));
+  const flags = (await v15(C, 'get_poll_flags', anonCopy)) || [];
+  record('the flag is on the copy, by C', flags.length === 1 && flags[0].carried_author === cKey, JSON.stringify(by(flags)));
+  const second = await run();
+  record('a second run writes nothing', second.code === 0 && second.report?.wrote === false && second.report?.failed === 0, show(second));
+
+  // B updates: its own move finds its votes carried; a second vote is refused.
+  // The carrier's records reach B by gossip first, as they would a voter
+  // who updates later (before that, its move retries on its next run).
+  record('B: sees the carried votes on both copies', await until(async () => ((await v15(B, 'get_poll_votes', anonCopy)) || []).length >= 3 && ((await v15(B, 'get_poll_votes', pubCopy)) || []).length >= 1, 300, 10000));
+  const mv = await op(B, { op: 'move15' }, 600);
+  record("B: its own move runs, nothing refused", mv.ok && mv.data?.report?.failed === 0, mv.error || JSON.stringify(mv.data?.report));
+  const afterMove = (await v15(C, 'get_poll_votes', anonCopy)) || [];
+  record('the anonymous poll still has three votes', afterMove.length === 3, JSON.stringify(by(afterMove)));
+  await signin(B, 'B');
+  const recast = await op(B, { op: 'vote', poll: anonCopy, option: 0, dna_version: '1.5' });
+  record('B: a second vote on the copy is refused', !recast.ok, recast.error || JSON.stringify(recast.data));
+
+  // A deletes its public poll and C removes its flag, on v1.3: the carrier
+  // removes the copies it made.
+  const del = await op(A, { op: 'v13_delete', poll: pub.data });
+  const unflag = await op(C, { op: 'v13_unflag', flag: flag.data });
+  record('A deletes its public poll on v1.3; C removes its flag', del.ok && unflag.ok, del.error || unflag.error);
+  let removed = 0;
+  let last = { report: null };
+  const mirrored = await until(async () => {
+    last = await run();
+    removed += last.report?.carried?.deleted ?? 0;
+    console.log(`  (a run: ${show(last)})`);
+    for (const line of last.stderr.split('\n').filter((l) => l.includes('deleted') || l.includes('removed flag') || l.includes('on copy'))) console.log(`    ${line}`);
+    return removed >= 2;
+  }, 600, 20000);
+  record('the carrier removes both copies', mirrored, show(last));
+  let listed = null;
+  record("the deleted poll's copy no longer lists on v1.5", await until(async () => (listed = await v15(C, 'get_all_polls')) !== null && !listed.some((p) => p.hash === pubCopy), 300, 10000), listed === null ? 'the list did not read' : `${listed.length} listed`);
+  let left = null;
+  record('the removed flag is gone from v1.5', await until(async () => (left = await v15(C, 'get_poll_flags', anonCopy)) !== null && left.length === 0, 300, 10000), JSON.stringify(left && by(left)));
+}
+
 // ───────────────────────── main ─────────────────────────
 
-const legs = { fresh, signin: () => signin(), polls, migration };
+const legs = { fresh, signin: () => signin(), polls, migration, carrier };
 try {
   if (['devices', 'offline', 'adopt', 'adopted'].includes(LEG)) {
     const s = JSON.parse(process.env.PP_STATE || '{}');

@@ -312,6 +312,55 @@ async fn fixtures() -> Reply {
     ok(json!({ "v13": v13, "v14": v14 }))
 }
 
+/// A v1.5 getter's records as v1.5 alone holds them (no older line read):
+/// each with its writer, the author its proof names when it was carried, and
+/// its entry's fields.
+async fn v15_records(state: &AppState, f: &str, hash: Option<String>) -> Reply {
+    #[derive(serde::Deserialize)]
+    struct Carried {
+        #[serde(default)]
+        carried_from: Option<crate::carried::Carried>,
+    }
+    /// The fields a test reads, whichever kind the record is.
+    #[derive(serde::Deserialize, serde::Serialize)]
+    struct Fields {
+        #[serde(default)]
+        title: Option<String>,
+        #[serde(default)]
+        option_index: Option<u32>,
+        #[serde(default)]
+        display_name: Option<String>,
+        #[serde(default)]
+        reason: Option<Value>,
+    }
+    let Some(client) = state.app_client.lock().await.clone() else { return failed("the v1.5 client is not connected") };
+    let payload = match hash {
+        Some(h) => crate::hc::action_hash(&h).and_then(|h| crate::hc::encode(&h)),
+        None => crate::hc::encode(&()),
+    };
+    let records = match payload {
+        Ok(p) => client.call_zome("proofpoll", "polls", f, p).await.and_then(|b| crate::hc::records(client.line(), &b)),
+        Err(e) => Err(e),
+    };
+    match records {
+        Ok(records) => ok(json!(records
+            .iter()
+            .map(|r| {
+                let from = r.entry_as::<Carried>().ok().and_then(|c| c.carried_from);
+                json!({
+                    "hash": r.action_hash,
+                    "writer": r.author,
+                    "carried_author": from.as_ref().map(|c| c.original_author.to_string()),
+                    "carried_dna": from.as_ref().map(|c| c.original_dna.clone()),
+                    "carried_hash": from.as_ref().map(|c| c.original_action_hash.to_string()),
+                    "fields": r.entry_as::<Fields>().ok(),
+                })
+            })
+            .collect::<Vec<_>>())),
+        Err(e) => failed(e),
+    }
+}
+
 fn s(body: &Value, key: &str) -> String {
     body.get(key).and_then(|v| v.as_str()).unwrap_or_default().to_string()
 }
@@ -362,7 +411,18 @@ async fn op(Ax(app): Ax<tauri::AppHandle>, Json(body): Json<Value>) -> Reply {
             to_value(commands::get_my_agent_set(state, local).await)
         }
         // ProofPoll 0.4.x's shapes on v1.3, for the migration leg.
-        "v13_poll" => to_value(commands::harness_v13_poll(&state, s(&body, "title"), s(&body, "description"), options(), closes_at).await),
+        "v13_poll" => to_value(commands::harness_v13_poll(&state, s(&body, "title"), s(&body, "description"), options(), closes_at, opt_s(&body, "poll_type")).await),
+        "v13_flag" => to_value(commands::harness_v13_flag(&state, s(&body, "poll"), opt_s(&body, "reason").unwrap_or_else(|| "Spam".into())).await),
+        "v13_delete" => to_value(commands::harness_v13_remove(&state, "delete_poll", s(&body, "poll")).await),
+        "v13_unflag" => to_value(commands::harness_v13_remove(&state, "remove_flag", s(&body, "flag")).await),
+        "v15_records" => v15_records(&state, &s(&body, "fn"), opt_s(&body, "hash")).await,
+        // This start's admin ports and origin, so a test can run the node's
+        // carrier against this instance's conductors.
+        "node_admin" => ok(json!({
+            "admin_06": crate::conductor::admin_port(),
+            "admin_07": crate::conductor::admin_port_07(),
+            "origin": crate::conductor::node_origin(),
+        })),
         "v13_draft" => {
             let draft = json!({
                 "title": s(&body, "title"),
@@ -404,7 +464,7 @@ async fn op(Ax(app): Ax<tauri::AppHandle>, Json(body): Json<Value>) -> Reply {
         "chain07" => chain07(&opt_s(&body, "dna").unwrap_or_else(|| "1.4".into())).await,
         "proof_check" => proof_check().await,
         "v13_vote" => to_value(
-            commands::harness_v13_vote(&state, s(&body, "poll"), body.get("option").and_then(|v| v.as_u64()).unwrap_or(0) as u32).await,
+            commands::harness_v13_vote(&state, s(&body, "poll"), body.get("option").and_then(|v| v.as_u64()).unwrap_or(0) as u32, opt_s(&body, "display_name")).await,
         ),
         "fixtures" => fixtures().await,
         // What the Vault backup holds for this app: the escrowed seed or none.

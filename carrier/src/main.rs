@@ -13,11 +13,12 @@
 //! ```text
 //! proofpoll-carrier [--admin-06 localhost:4444] [--admin-07 localhost:4445]
 //!   [--origin flowsta-agent] [--dry-run] [--max-writes 500]
-//!   [--pause-ms 200] [--min-free-mb 150]
+//!   [--pause-ms 200] [--min-free-mb 150] [--verbose]
 //! ```
-//! `--dry-run` reads and counts, and writes nothing (not even the grants'
-//! zome calls beyond reads). Exit status: 0 when the pass ran (whatever it
-//! carried), 2 when it stopped early (memory or the write limit), 1 when it
+//! `--dry-run` reads and counts and writes nothing on v1.5 (the signing
+//! grants are still added). `--verbose` prints each delete decision on
+//! stderr. Exit status: 0 when the pass ran (whatever it carried), 2 when it
+//! stopped early (memory, the write limit, a read that failed), 1 when it
 //! could not run.
 
 #[allow(dead_code)]
@@ -45,7 +46,7 @@ fn number(args: &[String], name: &str, default: u64) -> Result<u64, String> {
 fn options() -> Result<node::Options, String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--help" || a == "-h") {
-        println!("proofpoll-carrier [--admin-06 localhost:4444] [--admin-07 localhost:4445] [--origin flowsta-agent] [--dry-run] [--max-writes 500] [--pause-ms 200] [--min-free-mb 150]");
+        println!("proofpoll-carrier [--admin-06 localhost:4444] [--admin-07 localhost:4445] [--origin flowsta-agent] [--dry-run] [--max-writes 500] [--pause-ms 200] [--min-free-mb 150] [--verbose]");
         std::process::exit(0);
     }
     Ok(node::Options {
@@ -56,6 +57,7 @@ fn options() -> Result<node::Options, String> {
         max_writes: number(&args, "max-writes", 500)?,
         pause_ms: number(&args, "pause-ms", 200)?,
         min_free_mb: number(&args, "min-free-mb", 150)?,
+        verbose: args.iter().any(|a| a == "--verbose"),
     })
 }
 
