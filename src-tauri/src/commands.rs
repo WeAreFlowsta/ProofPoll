@@ -376,6 +376,25 @@ fn decode_entry<T: serde::de::DeserializeOwned>(record: &crate::hc::RecordView) 
 ///   - Auto-recovery from CellDisabled errors (re-enables the app and retries)
 ///   - User-friendly error messages via `friendly_error()`
 ///
+/// [`call_zome`], waiting at most `secs` for the answer. A read that asks the
+/// network can wait minutes on authorities that have gone away (a conductor
+/// that has just reconnected); a list shows what it has instead.
+pub(crate) async fn call_zome_within(
+    client: &crate::hc::AppClient,
+    zome: &str,
+    fn_name: &str,
+    payload: Vec<u8>,
+    secs: u64,
+) -> Result<Vec<u8>, String> {
+    match tokio::time::timeout(std::time::Duration::from_secs(secs), call_zome(client, zome, fn_name, payload)).await {
+        Ok(r) => r,
+        Err(_) => Err(format!("{}.{} did not answer within {} s", zome, fn_name, secs)),
+    }
+}
+
+/// How long a list waits on the network before it shows what this device holds.
+const LIST_WAIT_SECS: u64 = 15;
+
 /// For forking: you don't need to change this function — just call it
 /// with your zome name and function name from your Tauri commands.
 /// Call a zome function on either line. `payload` and the result are the
@@ -697,7 +716,13 @@ pub async fn get_all_polls(
         let client = state.app_client.lock().await;
         let client = client.as_ref().ok_or("Conductor not ready")?;
         let payload = crate::hc::encode(&())?;
-        let result = call_zome(client, POLLS_ZOME, "get_all_polls", payload).await?;
+        let result = match call_zome_within(client, POLLS_ZOME, "get_all_polls", payload.clone(), LIST_WAIT_SECS).await {
+            Ok(r) => r,
+            Err(e) => {
+                log::warn!("[polls] the network list did not come ({}): showing the polls this device holds", e);
+                call_zome(client, POLLS_ZOME, "get_all_polls_local", payload).await?
+            }
+        };
         let records = crate::hc::records(client.line(), &result)?;
         for record in &records {
             if let Ok(poll) = decode_entry::<Poll>(record) {
@@ -722,7 +747,13 @@ pub async fn get_all_polls(
         let client = state.app_client.lock().await;
         if let Some(client) = client.as_ref() {
             let payload = crate::hc::encode(&())?;
-            if let Ok(r) = call_zome(client, POLLS_ZOME, "get_all_migration_mappings", payload).await {
+            let mappings = match call_zome_within(client, POLLS_ZOME, "get_all_migration_mappings", payload.clone(), LIST_WAIT_SECS).await {
+                Ok(r) => Ok(r),
+                // The mappings this device holds: without them a carried
+                // poll would show again from its older line.
+                Err(_) => call_zome(client, POLLS_ZOME, "get_all_migration_mappings_local", payload).await,
+            };
+            if let Ok(r) = mappings {
                 for rec in crate::hc::records(client.line(), &r).unwrap_or_default() {
                     if let Ok(entry) = decode_entry::<MigratedPollEntry>(&rec) {
                         migrated_hashes.insert(entry.old_action_hash.to_string());
@@ -743,14 +774,14 @@ pub async fn get_all_polls(
         if let Some(client) = client.as_ref() {
             let payload = crate::hc::encode(&())?;
             let mut polls_14 = std::collections::HashMap::<String, (String, Poll)>::new();
-            if let Ok(r) = call_zome(client, POLLS_ZOME, "get_all_polls", crate::hc::encode(&())?).await {
+            if let Ok(r) = call_zome_within(client, POLLS_ZOME, "get_all_polls", crate::hc::encode(&())?, LIST_WAIT_SECS).await {
                 for rec in crate::hc::records(client.line(), &r).unwrap_or_default() {
                     if let Ok(poll) = decode_entry::<Poll>(&rec) {
                         polls_14.insert(rec.action_hash.clone(), (rec.author.clone(), poll));
                     }
                 }
             }
-            if let Ok(r) = call_zome(client, POLLS_ZOME, "get_all_migration_mappings", payload).await {
+            if let Ok(r) = call_zome_within(client, POLLS_ZOME, "get_all_migration_mappings", payload, LIST_WAIT_SECS).await {
                 for rec in crate::hc::records(client.line(), &r).unwrap_or_default() {
                     let Ok(entry) = decode_entry::<MigratedPollEntry>(&rec) else { continue };
                     let (old, later) = (entry.old_action_hash.to_string(), entry.new_action_hash.to_string());
@@ -774,7 +805,7 @@ pub async fn get_all_polls(
         let client = older_client_mutex.lock().await;
         if let Some(client) = client.as_ref() {
             let payload = crate::hc::encode(&())?;
-            if let Ok(r) = call_zome(client, POLLS_ZOME, "get_all_migration_mappings", payload).await {
+            if let Ok(r) = call_zome_within(client, POLLS_ZOME, "get_all_migration_mappings", payload, LIST_WAIT_SECS).await {
                 let records = crate::hc::records(client.line(), &r).unwrap_or_default();
                 for rec in &records {
                     if let Ok(entry) = decode_entry::<MigratedPollEntry>(rec) {
@@ -798,7 +829,7 @@ pub async fn get_all_polls(
         let client = client_mutex.lock().await;
         if let Some(client) = client.as_ref() {
             let payload = crate::hc::encode(&())?;
-            match call_zome(client, POLLS_ZOME, "get_all_polls", payload).await {
+            match call_zome_within(client, POLLS_ZOME, "get_all_polls", payload, LIST_WAIT_SECS).await {
                 Ok(result) => {
                     let records = crate::hc::records(client.line(), &result).unwrap_or_default();
                     for record in &records {

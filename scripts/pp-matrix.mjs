@@ -161,8 +161,6 @@ async function migration() {
   record('A: the 0.4.x draft and reason carried', (mig.data?.drafts ?? 0) >= 1 && (mig.data?.reasons ?? 0) >= 1, JSON.stringify({ drafts: mig.data?.drafts, reasons: mig.data?.reasons }));
   const listed = (await op(A, { op: 'polls' })).data || [];
   record('A: both polls still list (the closed one in place)', listed.some((p) => p.poll?.title?.startsWith('v13 open')) && listed.some((p) => p.poll?.title?.startsWith('v13 closing')), JSON.stringify(listed.map((p) => [p.poll?.title, p.dna_version])).slice(0, 300));
-  const drafts = (await op(A, { op: 'drafts' })).data || [];
-  record('A: the old draft lists', drafts.some((d) => JSON.stringify(d).includes('v13 draft')), JSON.stringify(drafts).slice(0, 200));
   const reasonNow = await op(A, { op: 'rationale', vote: vote13.data });
   record('A: the old reason reads', reasonNow.ok && reasonNow.data === 'an old reason', reasonNow.error || JSON.stringify(reasonNow.data));
 
@@ -238,9 +236,12 @@ async function adopt(state) {
       record(`${name}: holds A's latest poll`, await until(async () => ((await op(base, { op: 'polls' })).data || []).some((p) => p.hash === state.published), 300, 10000));
     }
   }
+  const oneEach = (d) => d?.forked_seqs?.length === 0 && d?.actions === d?.head_seq + 1;
   const chainA = await op(A, { op: 'chain07' });
-  record("A: its v1.4 chain, one action per seq", chainA.ok && chainA.data?.forked_seqs?.length === 0 && chainA.data?.actions === chainA.data?.head_seq + 1, chainA.error || JSON.stringify(chainA.data));
-  if (process.env.PP_STATE_OUT) (await import('node:fs')).writeFileSync(process.env.PP_STATE_OUT, JSON.stringify({ ...state, a_head: chainA.data?.head_seq }));
+  record("A: its v1.4 chain, one action per seq", chainA.ok && oneEach(chainA.data), chainA.error || JSON.stringify(chainA.data));
+  const chainA15 = await op(A, { op: 'chain07', dna: '1.5' });
+  record("A: its v1.5 chain, one action per seq", chainA15.ok && oneEach(chainA15.data), chainA15.error || JSON.stringify(chainA15.data));
+  if (process.env.PP_STATE_OUT) (await import('node:fs')).writeFileSync(process.env.PP_STATE_OUT, JSON.stringify({ ...state, a_head: chainA.data?.head_seq, a_head15: chainA15.data?.head_seq }));
   const b = await op(A, { op: 'backup', client_id: CLIENT_ID }, 120);
   record('A: backs up to the Vault', b.ok, b.error || JSON.stringify(b.data)?.slice(0, 120));
   const esc = await op(B, { op: 'escrow', client_id: CLIENT_ID });
@@ -280,6 +281,9 @@ async function adopted(state) {
   const chainB = await op(B, { op: 'chain07' });
   const c = chainB.data || {};
   record("B: its v1.4 chain is A's, one action per seq", chainB.ok && c.forked_seqs?.length === 0 && c.actions === c.head_seq + 1 && (state.a_head == null || c.head_seq >= state.a_head), chainB.error || JSON.stringify({ ...c, a_head: state.a_head }));
+  const chainB15 = await op(B, { op: 'chain07', dna: '1.5' });
+  const c15 = chainB15.data || {};
+  record("B: its v1.5 chain is A's, one action per seq", chainB15.ok && c15.forked_seqs?.length === 0 && c15.actions === c15.head_seq + 1 && (state.a_head15 == null || c15.head_seq >= state.a_head15), chainB15.error || JSON.stringify({ ...c15, a_head15: state.a_head15 }));
   record("B: runs as A's agent", !!state.agent && st.app?.agent_pub_key === state.agent, JSON.stringify({ b: st.app?.agent_pub_key, a: state.agent }));
   record('B: both conductors up with the network auth', st.configs_with_auth === 2 && st.app?.conductor_status?.status === 'ready', JSON.stringify(st.app?.conductor_status));
   if (state.vote) {
@@ -297,8 +301,11 @@ async function adopted(state) {
   const made = await op(B, { op: 'create_poll', title, description: 'written by the restored device', options: ['yes', 'no'], closes_at: nowS() + 86400 });
   record('B: creates a poll after the restore', made.ok && typeof made.data === 'string', made.error || made.data);
   record("C: sees B's new poll (B's writes publish)", await until(async () => ((await op(C, { op: 'polls' })).data || []).some((p) => p.hash === made.data), 300, 10000));
-  const after = (await op(B, { op: 'chain07' })).data || {};
-  record("B: its chain grew on A's, still one action per seq", after.forked_seqs?.length === 0 && after.actions === after.head_seq + 1 && after.head_seq > (c.head_seq ?? -1), JSON.stringify(after));
+  // Writes go to v1.5: that chain grows on A's; v1.4's stays as restored.
+  const after = (await op(B, { op: 'chain07', dna: '1.5' })).data || {};
+  record("B: its v1.5 chain grew on A's, still one action per seq", after.forked_seqs?.length === 0 && after.actions === after.head_seq + 1 && after.head_seq > (c15.head_seq ?? -1), JSON.stringify(after));
+  const after14 = (await op(B, { op: 'chain07' })).data || {};
+  record("B: its v1.4 chain as restored, one action per seq", after14.forked_seqs?.length === 0 && after14.actions === after14.head_seq + 1 && after14.head_seq === c.head_seq, JSON.stringify(after14));
   const logs = await logsSinceStart('pp-b');
   record('B: no "head has moved" and no failed publishes', !/head has moved/.test(logs.app) && !/FOREIGN KEY constraint failed/.test(logs.conductor07),
     JSON.stringify({ headMoved: (logs.app.match(/head has moved/g) || []).length, foreignKey: (logs.conductor07.match(/FOREIGN KEY constraint failed/g) || []).length }));

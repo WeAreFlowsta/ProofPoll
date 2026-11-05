@@ -22,6 +22,24 @@ enum EntryZomes {
     Integrity(polls_integrity::EntryTypes),
 }
 
+/// A record, read from this cell's own store first and from the network
+/// only when it is not held here: a network get waits on every authority,
+/// which on a conductor that has just started can outlast the call.
+fn get_record(hash: ActionHash) -> ExternResult<Option<Record>> {
+    if let Some(record) = get(hash.clone(), GetOptions::local())? {
+        return Ok(Some(record));
+    }
+    get(hash, GetOptions::default())
+}
+
+/// [`get_record`], or this cell's own store alone for `GetStrategy::Local`.
+fn get_record_with(hash: ActionHash, strategy: GetStrategy) -> ExternResult<Option<Record>> {
+    match strategy {
+        GetStrategy::Local => get(hash, GetOptions::local()),
+        _ => get_record(hash),
+    }
+}
+
 // ── Configuration ─────────────────────────────────────────────────────
 
 /// Minimum flags from unique agents before the UI hides a poll.
@@ -103,24 +121,33 @@ pub fn create_poll(input: CreatePollInput) -> ExternResult<ActionHash> {
 
 #[hdk_extern]
 pub fn get_poll(action_hash: ActionHash) -> ExternResult<Option<Record>> {
-    get(action_hash, GetOptions::default())
+    get_record(action_hash)
 }
 
 #[hdk_extern]
 pub fn get_all_polls(_: ()) -> ExternResult<Vec<Record>> {
+    all_polls(GetStrategy::default())
+}
+
+/// The poll list from what this cell holds, without asking the network. The
+/// app shows it when the network does not answer in time: a conductor that
+/// has just reconnected can wait minutes on authorities that have gone away.
+#[hdk_extern]
+pub fn get_all_polls_local(_: ()) -> ExternResult<Vec<Record>> {
+    all_polls(GetStrategy::Local)
+}
+
+fn all_polls(strategy: GetStrategy) -> ExternResult<Vec<Record>> {
     let anchor = all_polls_anchor()?;
-    let links = get_links(
-        LinkQuery::try_new(anchor, LinkTypes::AllPolls)?,
-        GetStrategy::default(),
-    )?;
+    let links = get_links(LinkQuery::try_new(anchor, LinkTypes::AllPolls)?, strategy)?;
 
     // One poll per original: a carried poll is listed by the copy that counts.
-    let copies = Copies::read()?;
+    let copies = Copies::read_with(strategy)?;
     let mut records = Vec::new();
     for link in links {
         let hash = ActionHash::try_from(link.target)
             .map_err(|_| wasm_error!("Invalid poll link target"))?;
-        if let Some(record) = get(hash.clone(), GetOptions::default())? {
+        if let Some(record) = get_record_with(hash.clone(), strategy)? {
             let carried = record.entry().to_app_option::<Poll>().ok().flatten().and_then(|p| p.carried_from);
             let counts = match carried {
                 Some(c) => copies.copy_for(&c.original_action_hash).map_or(true, |first| first == hash),
@@ -137,7 +164,7 @@ pub fn get_all_polls(_: ()) -> ExternResult<Vec<Record>> {
 
 #[hdk_extern]
 pub fn delete_poll(action_hash: ActionHash) -> ExternResult<ActionHash> {
-    let record = get(action_hash.clone(), GetOptions::default())?
+    let record = get_record(action_hash.clone())?
         .ok_or(wasm_error!("Poll not found"))?;
     let my_agent = agent_info()?.agent_initial_pubkey;
     // Its writer, or for a carried poll the author its proof names.
@@ -242,7 +269,7 @@ fn voter_tag(c: &Carried) -> LinkTag {
 
 #[hdk_extern]
 pub fn cast_vote(input: CastVoteInput) -> ExternResult<ActionHash> {
-    let poll_record = get(input.poll_action_hash.clone(), GetOptions::default())?
+    let poll_record = get_record(input.poll_action_hash.clone())?
         .ok_or(wasm_error!("Poll not found"))?;
 
     let poll: Poll = poll_record
@@ -312,7 +339,7 @@ pub fn get_poll_votes(poll_action_hash: ActionHash) -> ExternResult<Vec<Record>>
 
 #[hdk_extern]
 pub fn flag_poll(input: FlagPollInput) -> ExternResult<ActionHash> {
-    let _poll_record = get(input.poll_action_hash.clone(), GetOptions::default())?
+    let _poll_record = get_record(input.poll_action_hash.clone())?
         .ok_or(wasm_error!("Poll not found"))?;
 
     let my_agent = agent_info()?.agent_initial_pubkey;
@@ -353,7 +380,7 @@ pub fn get_poll_flags(poll_action_hash: ActionHash) -> ExternResult<Vec<Record>>
 
 #[hdk_extern]
 pub fn remove_flag(flag_action_hash: ActionHash) -> ExternResult<ActionHash> {
-    let record = get(flag_action_hash.clone(), GetOptions::default())?
+    let record = get_record(flag_action_hash.clone())?
         .ok_or(wasm_error!("Flag not found"))?;
 
     let flag: Flag = record
@@ -439,7 +466,7 @@ pub fn get_vote_rationale(vote_action_hash: ActionHash) -> ExternResult<Option<R
     if let Some(link) = links.first() {
         let hash = ActionHash::try_from(link.target.clone())
             .map_err(|_| wasm_error!("Invalid rationale link target"))?;
-        return get(hash, GetOptions::default());
+        return get_record(hash);
     }
     Ok(None)
 }
@@ -457,7 +484,7 @@ pub fn get_my_drafts(_: ()) -> ExternResult<Vec<Record>> {
     for link in links {
         let hash = ActionHash::try_from(link.target)
             .map_err(|_| wasm_error!("Invalid draft link target"))?;
-        if let Some(record) = get(hash, GetOptions::default())? {
+        if let Some(record) = get_record(hash)? {
             records.push(record);
         }
     }
@@ -470,7 +497,7 @@ pub fn get_my_drafts(_: ()) -> ExternResult<Vec<Record>> {
 ///   None → draft poll (linked from agent anchor via AgentDrafts)
 #[hdk_extern]
 pub fn delete_encrypted_entry(action_hash: ActionHash) -> ExternResult<ActionHash> {
-    let record = get(action_hash.clone(), GetOptions::default())?
+    let record = get_record(action_hash.clone())?
         .ok_or(wasm_error!("Encrypted entry not found"))?;
     let my_agent = agent_info()?.agent_initial_pubkey;
     if *record.action().author() != my_agent {
@@ -578,7 +605,7 @@ pub fn map_later_copy(input: MapLaterCopyInput) -> ExternResult<ActionHash> {
 /// mapping it names.
 fn mapped_poll(c: &Carried) -> ExternResult<ActionHash> {
     let mapping_hash = c.poll_mapping.clone().ok_or(wasm_error!("A carried vote or flag names its poll's mapping"))?;
-    let record = get(mapping_hash, GetOptions::default())?.ok_or(wasm_error!("The poll mapping is not found"))?;
+    let record = get_record(mapping_hash)?.ok_or(wasm_error!("The poll mapping is not found"))?;
     let mapping: MigratedPoll = record
         .entry()
         .to_app_option()
@@ -665,7 +692,7 @@ fn carried_links_from(agent: &AgentPubKey) -> ExternResult<Vec<(ActionHash, Carr
     let mut out = Vec::new();
     for link in links {
         let Ok(hash) = ActionHash::try_from(link.target) else { continue };
-        if let Some(record) = get(hash.clone(), GetOptions::default())? {
+        if let Some(record) = get_record(hash.clone())? {
             if let Ok(Some(CarriedLink { carried })) = record.entry().to_app_option::<CarriedLink>() {
                 out.push((hash, carried));
             }
@@ -723,11 +750,15 @@ struct Copies {
 
 impl Copies {
     fn read() -> ExternResult<Self> {
-        let links = get_links(LinkQuery::try_new(migration_anchor()?, LinkTypes::MigrationIndex)?, GetStrategy::default())?;
+        Self::read_with(GetStrategy::default())
+    }
+
+    fn read_with(strategy: GetStrategy) -> ExternResult<Self> {
+        let links = get_links(LinkQuery::try_new(migration_anchor()?, LinkTypes::MigrationIndex)?, strategy)?;
         let mut mappings = Vec::new();
         for link in links {
             let Ok(hash) = ActionHash::try_from(link.target) else { continue };
-            let Some(record) = get(hash.clone(), GetOptions::default())? else { continue };
+            let Some(record) = get_record_with(hash.clone(), strategy)? else { continue };
             if let Ok(Some(m)) = record.entry().to_app_option::<MigratedPoll>() {
                 if !mappings.iter().any(|(h, _, _)| *h == hash) {
                     mappings.push((hash, record.action().timestamp(), m));
@@ -809,7 +840,7 @@ fn filed_records(poll: &ActionHash, link_type: LinkTypes, original_of: impl Fn(&
         if records.iter().any(|r| r.action_address() == &hash) {
             continue;
         }
-        if let Some(record) = get(hash, GetOptions::default())? {
+        if let Some(record) = get_record(hash)? {
             if original_of(&record).is_some_and(|o| !originals.insert(o)) {
                 continue;
             }
@@ -821,17 +852,25 @@ fn filed_records(poll: &ActionHash, link_type: LinkTypes, original_of: impl Fn(&
 
 #[hdk_extern]
 pub fn get_all_migration_mappings(_: ()) -> ExternResult<Vec<Record>> {
+    migration_mappings(GetStrategy::default())
+}
+
+/// The mappings this cell holds, without asking the network (as
+/// `get_all_polls_local`).
+#[hdk_extern]
+pub fn get_all_migration_mappings_local(_: ()) -> ExternResult<Vec<Record>> {
+    migration_mappings(GetStrategy::Local)
+}
+
+fn migration_mappings(strategy: GetStrategy) -> ExternResult<Vec<Record>> {
     let anchor = migration_anchor()?;
-    let links = get_links(
-        LinkQuery::try_new(anchor, LinkTypes::MigrationIndex)?,
-        GetStrategy::default(),
-    )?;
+    let links = get_links(LinkQuery::try_new(anchor, LinkTypes::MigrationIndex)?, strategy)?;
 
     let mut records = Vec::new();
     for link in links {
         let hash = ActionHash::try_from(link.target)
             .map_err(|_| wasm_error!("Invalid migration link target"))?;
-        if let Some(record) = get(hash, GetOptions::default())? {
+        if let Some(record) = get_record_with(hash, strategy)? {
             records.push(record);
         }
     }

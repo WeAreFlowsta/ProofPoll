@@ -4,7 +4,8 @@
 //!
 //! Build first, with build.sh's RUSTFLAGS: `./build.sh` in `v1.5`, then
 //! `cargo build --release --target wasm32-unknown-unknown` in
-//! `tests/hostile` with `CARGO_TARGET_DIR=../../target`.
+//! `tests/hostile` (its own target folder: building it into the DNA's would
+//! leave a differently built integrity crate where `build.sh` picks it up).
 
 use holochain::prelude::*;
 use holochain::sweettest::*;
@@ -20,7 +21,7 @@ async fn dna(hostile: bool) -> DnaFile {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../workdir/proofpoll_v1_5.dna");
     let mut dna = SweetDnaFile::from_bundle(&path).await.expect("v1.5/workdir/proofpoll_v1_5.dna loads (run build.sh first)");
     if hostile {
-        let file = Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/wasm32-unknown-unknown/release/polls_hostile_test.wasm");
+        let file = Path::new(env!("CARGO_MANIFEST_DIR")).join("hostile/target/wasm32-unknown-unknown/release/polls_hostile_test.wasm");
         let wasm = DnaWasm::from(std::fs::read(&file).expect("polls_hostile_test.wasm is built"));
         let hash = holo_hash::WasmHash::with_data(&wasm).await;
         let def = ZomeDef::Wasm(WasmZomeDef::new(hash, Some(vec!["polls_integrity".into()])));

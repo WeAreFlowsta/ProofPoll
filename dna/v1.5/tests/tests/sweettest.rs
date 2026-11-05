@@ -497,11 +497,11 @@ async fn a_later_copy_under_a_new_key_needs_the_first_keys_vouch() {
     assert_eq!(all.len(), 1, "one poll, not one per key");
 }
 
-/// The bundle with the test coordinator (`tests/hostile`, built to
-/// `../target`) beside its own.
+/// The bundle with the test coordinator (`tests/hostile`, built in its own
+/// target folder) beside its own.
 async fn dna_with_test_coordinator() -> DnaFile {
     let mut dna = dna().await;
-    let file = Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/wasm32-unknown-unknown/release/polls_hostile_test.wasm");
+    let file = Path::new(env!("CARGO_MANIFEST_DIR")).join("hostile/target/wasm32-unknown-unknown/release/polls_hostile_test.wasm");
     let wasm = DnaWasm::from(std::fs::read(&file).expect("polls_hostile_test.wasm is built (see tests/hostile.rs)"));
     let hash = holo_hash::WasmHash::with_data(&wasm).await;
     let def = ZomeDef::Wasm(WasmZomeDef::new(hash, Some(vec!["polls_integrity".into()])));
@@ -558,6 +558,10 @@ async fn two_copies_of_one_poll_read_as_one() {
     assert_ne!(first, second);
     let listed: Vec<Record> = conductor.call(&zome, "get_all_polls", ()).await;
     assert_eq!(listed.iter().map(|r| r.action_address().clone()).collect::<Vec<_>>(), vec![first.clone()], "one poll, the first copy");
+    let local: Vec<Record> = conductor.call(&zome, "get_all_polls_local", ()).await;
+    assert_eq!(local.iter().map(|r| r.action_address().clone()).collect::<Vec<_>>(), vec![first.clone()], "the local list reads the same");
+    let mappings: Vec<Record> = conductor.call(&zome, "get_all_migration_mappings_local", ()).await;
+    assert_eq!(mappings.len(), 2, "both copies' mappings, read locally");
     let opened: Option<ActionHash> = conductor.call(&zome, "get_migration_mapping", poll.original_action_hash.clone()).await;
     assert_eq!(opened, Some(first.clone()), "the old hash opens the first copy");
 

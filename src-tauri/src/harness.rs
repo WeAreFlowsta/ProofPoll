@@ -97,9 +97,11 @@ async fn status(Ax(app): Ax<tauri::AppHandle>) -> Reply {
     }))
 }
 
-/// This device's v1.4 chain as its 0.7 conductor holds it: the app's status,
-/// the actions it authored, the head seq, and any seq held twice (a fork).
-async fn chain07() -> Reply {
+/// This device's v1.4 or v1.5 chain (`dna`) as its 0.7 conductor holds it:
+/// the app's status, the actions it authored, the head seq, and any seq
+/// held twice (a fork).
+async fn chain07(dna: &str) -> Reply {
+    let app_id = if dna == "1.5" { crate::dna::APP_ID_V1_5 } else { crate::dna::APP_ID_V1_4 };
     use holochain_client_07::{AdminWebsocket, CellInfo};
     let admin = match AdminWebsocket::connect(
         format!("localhost:{}", crate::conductor::admin_port_07()),
@@ -114,15 +116,15 @@ async fn chain07() -> Reply {
         Ok(a) => a,
         Err(e) => return failed(format!("list_apps: {}", e)),
     };
-    let Some(app) = apps.iter().find(|a| a.installed_app_id == crate::dna::APP_ID_V1_4) else {
-        return failed("v1.4 is not installed");
+    let Some(app) = apps.iter().find(|a| a.installed_app_id == app_id) else {
+        return failed(format!("v{} is not installed", dna));
     };
     let status = format!("{:?}", app.status);
     let Some(cell_id) = app.cell_info.values().flat_map(|c| c.iter()).find_map(|c| match c {
         CellInfo::Provisioned(p) => Some(p.cell_id.clone()),
         _ => None,
     }) else {
-        return failed("no v1.4 cell");
+        return failed(format!("no v{} cell", dna));
     };
     let dump = match admin.dump_full_state(cell_id, None, None).await {
         Ok(d) => d,
@@ -399,7 +401,7 @@ async fn op(Ax(app): Ax<tauri::AppHandle>, Json(body): Json<Value>) -> Reply {
         // The canonical backup into the pinned Vault, as the SDK's backup
         // posts it (it carries this install's escrowed seed).
         "backup" => backup(state, s(&body, "client_id")).await,
-        "chain07" => chain07().await,
+        "chain07" => chain07(&opt_s(&body, "dna").unwrap_or_else(|| "1.4".into())).await,
         "proof_check" => proof_check().await,
         "v13_vote" => to_value(
             commands::harness_v13_vote(&state, s(&body, "poll"), body.get("option").and_then(|v| v.as_u64()).unwrap_or(0) as u32).await,
