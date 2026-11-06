@@ -62,7 +62,7 @@ describe("a new poll and a vote", () => {
   });
 
   it("the app's own records hold the one vote, for the chosen option", async () => {
-    const votes = await harnessOp({ op: "votes", poll: pollHash, dna_version: "1.4" });
+    const votes = await harnessOp({ op: "votes", poll: pollHash, dna_version: "1.5" });
     expect(votes.error).toBeNull();
     expect(Array.isArray(votes.data)).toBe(true);
     expect(votes.data.length).toBe(1);
