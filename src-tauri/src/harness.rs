@@ -405,6 +405,18 @@ async fn op(Ax(app): Ax<tauri::AppHandle>, Json(body): Json<Value>) -> Reply {
         "identity" => ok(serde_json::to_value(commands::get_identity_link(state)).unwrap_or(Value::Null)),
         "migration" => to_value(commands::get_migration_status(state).await),
         "link" => link(&app, state, s(&body, "client_id")).await,
+        // A sign-in as 0.4.x made it: the link on v1.3 only.
+        "v13_link" => v13_link(state, s(&body, "client_id")).await,
+        // The layout's check: v1.5 links the key the active network runs
+        // as to the signed-in identity (own or carried link).
+        "linked_active" => {
+            let st = commands::get_app_status(state.clone());
+            match st.agent_pub_key_07.or(st.agent_pub_key).map(holochain_types::prelude::AgentPubKey::try_from) {
+                Some(Ok(key)) => to_value(commands::identity_linked_on_active_inner(state.inner(), &key).await),
+                Some(Err(e)) => failed(format!("{:?}", e)),
+                None => failed("no local agent yet"),
+            }
+        }
         // As the UI asks it: from this install's own agent key.
         "agent_set" => {
             let local = commands::get_app_status(state.clone()).agent_pub_key;
@@ -517,31 +529,52 @@ async fn backup(state: tauri::State<'_, Arc<AppState>>, client_id: String) -> Re
     }
 }
 
+/// The Vault's signature for this install's key, as `/link-identity` gives
+/// it to the SDK: (identity key, signature).
+async fn vault_signs_link(agent: &str, client_id: &str) -> Result<(String, String), String> {
+    let base = match crate::vault_probe::test_vault_port() {
+        Some(p) => format!("http://127.0.0.1:{}", p),
+        None => return Err("no PROOFPOLL_TEST_VAULT_PORT".into()),
+    };
+    let r = reqwest::Client::new()
+        .post(format!("{}/link-identity", base))
+        .header("Origin", crate::vault_probe::webview_origin())
+        .json(&json!({ "app_name": "ProofPoll", "client_id": client_id, "app_agent_pub_key": agent }))
+        .timeout(std::time::Duration::from_secs(120))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !r.status().is_success() {
+        return Err(format!("link-identity {}: {}", r.status(), r.text().await.unwrap_or_default()));
+    }
+    let v: Value = r.json().await.unwrap_or(Value::Null);
+    match (v.get("vault_agent_pub_key").and_then(|x| x.as_str()), v.get("vault_signature").and_then(|x| x.as_str())) {
+        (Some(key), Some(sig)) => Ok((key.to_string(), sig.to_string())),
+        _ => Err(format!("link-identity answered without a key and signature: {}", v)),
+    }
+}
+
+/// A sign-in as ProofPoll 0.4.x made it: the Vault signs this install's
+/// key and the link is written on v1.3 (and saved here), nowhere else.
+async fn v13_link(state: tauri::State<'_, Arc<AppState>>, client_id: String) -> Reply {
+    let Some(agent) = commands::get_app_status(state.clone()).agent_pub_key else {
+        return failed("no local agent yet");
+    };
+    match vault_signs_link(&agent, &client_id).await {
+        Ok((key, sig)) => to_value(commands::harness_v13_link(&state, key.clone(), sig).await.map(|h| json!({ "vault_agent_pub_key": key, "link": h }))),
+        Err(e) => failed(e),
+    }
+}
+
 /// The sign-in the identity page does through the SDK: the Vault's
 /// `/link-identity` (the Vault the instance is pinned to), then the commit.
 async fn link(app: &tauri::AppHandle, state: tauri::State<'_, Arc<AppState>>, client_id: String) -> Reply {
     let Some(agent) = commands::get_app_status(state.clone()).agent_pub_key else {
         return failed("no local agent yet");
     };
-    let base = match crate::vault_probe::test_vault_port() {
-        Some(p) => format!("http://127.0.0.1:{}", p),
-        None => return failed("no PROOFPOLL_TEST_VAULT_PORT"),
-    };
     let _ = app;
-    let resp = reqwest::Client::new()
-        .post(format!("{}/link-identity", base))
-        .header("Origin", crate::vault_probe::webview_origin())
-        .json(&json!({ "app_name": "ProofPoll", "client_id": client_id, "app_agent_pub_key": agent }))
-        .timeout(std::time::Duration::from_secs(120))
-        .send()
-        .await;
-    let v: Value = match resp {
-        Ok(r) if r.status().is_success() => r.json().await.unwrap_or(Value::Null),
-        Ok(r) => return failed(format!("link-identity {}: {}", r.status(), r.text().await.unwrap_or_default())),
-        Err(e) => return failed(e),
-    };
-    let (Some(key), Some(sig)) = (v.get("vault_agent_pub_key").and_then(|x| x.as_str()), v.get("vault_signature").and_then(|x| x.as_str())) else {
-        return failed(format!("link-identity answered without a key and signature: {}", v));
-    };
-    to_value(commands::commit_identity_link(state, key.to_string(), sig.to_string()).await.map(|h| json!({ "vault_agent_pub_key": key, "link": h })))
+    match vault_signs_link(&agent, &client_id).await {
+        Ok((key, sig)) => to_value(commands::commit_identity_link(state, key.clone(), sig).await.map(|h| json!({ "vault_agent_pub_key": key, "link": h }))),
+        Err(e) => failed(e),
+    }
 }

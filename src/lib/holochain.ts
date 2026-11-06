@@ -188,11 +188,15 @@ export async function getLinkedAgents(
   });
 }
 
-/** The agents linked on the active network only (v1.4), not v1.3 too. */
-export async function getLinkedAgentsActive(
+/**
+ * Whether the active network (v1.5) links this key to the identity this
+ * install is signed in with, by a link made there or one carried there for
+ * this key. Rejects while that network does not answer.
+ */
+export async function identityLinkedOnActive(
   agentPubKey: string,
-): Promise<string[]> {
-  return invoke<string[]>("get_linked_agents_active", {
+): Promise<boolean> {
+  return invoke<boolean>("identity_linked_on_active", {
     agentPubKey,
   });
 }

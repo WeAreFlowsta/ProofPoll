@@ -353,7 +353,7 @@ pub fn run() {
             commands::save_profile_cache,
             commands::commit_identity_link,
             commands::get_linked_agents,
-            commands::get_linked_agents_active,
+            commands::identity_linked_on_active,
             commands::get_my_agent_set,
             commands::get_identity_link,
             commands::revoke_identity_link,

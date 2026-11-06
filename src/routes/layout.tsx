@@ -7,7 +7,7 @@ import { sanitizeImageSrc } from "~/lib/sanitize";
 import { setSignInIntent, vaultLinkOptions } from "~/lib/signin";
 import {
   getLinkedAgents,
-  getLinkedAgentsActive,
+  identityLinkedOnActive,
   getIdentityLink,
   commitIdentityLink,
   revokeIdentityLink,
@@ -44,6 +44,8 @@ interface AppStatus {
     | { status: "ready"; admin_port: number; app_port: number }
     | { status: "error"; message: string };
   relaunched_into_identity?: boolean;
+  /** This start's agent links are on v1.5 (the move carried them). */
+  links_carried?: boolean;
 }
 
 export default component$(() => {
@@ -80,6 +82,14 @@ export default component$(() => {
   // Step 2 of an adopt/re-key: the key was restored, the sign-in hasn't
   // happened yet (the adopt-relink-pending marker is on disk).
   const relinkPending = useSignal(false);
+  // Signed in, but the active network has no link of this install's key to
+  // the identity, made there or carried there: other people cannot see
+  // that what it writes there is this person's. Asked for from the banner,
+  // never in the background (a Vault dialog nobody started reads as the
+  // Vault forgetting the app).
+  const linkNeeded = useSignal(false);
+  const linkConfirming = useSignal(false);
+  const linkConfirmFailed = useSignal(false);
 
   useVisibleTask$(({ cleanup }) => {
     let active = true;
@@ -246,6 +256,28 @@ export default component$(() => {
       return "mismatch";
     };
 
+    // Once a session, after this start's agent links are on v1.5 (a check
+    // before the move carried them would find none): does the active
+    // network link this install's key to the identity? Asked again on the
+    // link poll's ticks until the network answers.
+    let activeLinkChecked = false;
+    let activeLinkChecking = false;
+    const checkActiveLink = async (linkKey: string) => {
+      if (activeLinkChecked || activeLinkChecking || linkState.value !== "linked") return;
+      activeLinkChecking = true;
+      try {
+        const s = await invoke<AppStatus>("get_app_status");
+        if (!s.links_carried) return;
+        const ok = await identityLinkedOnActive(linkKey);
+        activeLinkChecked = true;
+        linkNeeded.value = !ok;
+      } catch {
+        // The network did not answer: the next tick asks again.
+      } finally {
+        activeLinkChecking = false;
+      }
+    };
+
     const poll = async () => {
       while (active) {
         try {
@@ -289,44 +321,10 @@ export default component$(() => {
                 }
               }
 
-              // Migration race: Vault confirms the link but the new DNA's
-              // DHT doesn't have an entry yet. Recreate it in the
-              // background so peers can verify. Safe against account
-              // switches: commit_identity_link hard-refuses binding any
-              // identity other than the one already linked AND live.
-              // The check reads the active network only, and its own links
-              // only: counting older networks' or carried links, it never
-              // linked this key there.
-              if (state === "linked") {
-                const dhtLinked = await getLinkedAgentsActive(linkKey)
-                  .then((a) => a.length > 0)
-                  .catch(() => true);
-                if (!dhtLinked) {
-                  const agentPubKey = linkKey;
-                  import("@flowsta/holochain")
-                    .then(async ({ linkFlowstaIdentity }) => {
-                      try {
-                        const result = await linkFlowstaIdentity({
-                          appName: "ProofPoll",
-                          clientId: import.meta.env.VITE_FLOWSTA_CLIENT_ID,
-                          localAgentPubKey: agentPubKey,
-                          ...(await vaultLinkOptions()),
-                        });
-                        if (result.success) {
-                          await commitIdentityLink(
-                            result.payload.vaultAgentPubKey,
-                            result.payload.vaultSignature,
-                          );
-                          console.log("[ProofPoll] DHT identity link re-created after migration");
-                        }
-                      } catch {
-                        // Vault dialog dismissed or identity guard refused —
-                        // the local link still works for display
-                      }
-                    })
-                    .catch(() => {});
-                }
-              }
+              // Signed in, but the active network may hold no link of this
+              // key (a key that never linked on an older version either):
+              // the banner offers it once the move's links are carried.
+              checkActiveLink(linkKey);
             }
 
             // Load profile: cache first, then Vault refresh.
@@ -425,6 +423,14 @@ export default component$(() => {
         // side clears the marker in commit_identity_link).
         if (nowLinked) relinkPending.value = false;
 
+        // The active network's link: asked once linked (again after a
+        // switch or a sign-out, which can change the answer).
+        if (nowLinked) checkActiveLink(linkKey);
+        else {
+          activeLinkChecked = false;
+          linkNeeded.value = false;
+        }
+
         // Fetch profile when linked but profile is missing. Cache display
         // is fine in `offline` too; refreshing the cache is linked-only
         // (Rust refuses it otherwise).
@@ -506,6 +512,35 @@ export default component$(() => {
   const handleRelinkSignIn = $(() => {
     setSignInIntent({ autoLink: true });
     nav("/identity/");
+  });
+  // The link banner's action: the Vault signs the link of the key the
+  // active network runs as, and it is written there. commit_identity_link
+  // refuses any identity but the one this install is linked to.
+  const handleConfirmLink = $(async () => {
+    const s = status.value;
+    const linkKey = s?.agent_pub_key_07 ?? s?.agent_pub_key;
+    if (!linkKey || linkConfirming.value) return;
+    linkConfirming.value = true;
+    linkConfirmFailed.value = false;
+    try {
+      const { linkFlowstaIdentity } = await import("@flowsta/holochain");
+      const result = await linkFlowstaIdentity({
+        appName: "ProofPoll",
+        clientId: import.meta.env.VITE_FLOWSTA_CLIENT_ID,
+        localAgentPubKey: linkKey,
+        ...(await vaultLinkOptions()),
+      });
+      if (result.success) {
+        await commitIdentityLink(result.payload.vaultAgentPubKey, result.payload.vaultSignature);
+        linkNeeded.value = false;
+      } else {
+        linkConfirmFailed.value = true;
+      }
+    } catch {
+      linkConfirmFailed.value = true;
+    } finally {
+      linkConfirming.value = false;
+    }
   });
   // A switch mid-session: relaunch, and ProofPoll opens on the profile of
   // the identity the Vault holds now (picked at launch) instead of staying
@@ -841,6 +876,35 @@ export default component$(() => {
                   </div>
                 </div>
               )}
+
+            {linkNeeded.value && linkState.value === "linked" && (
+              <div class="bg-indigo-900/30 border border-indigo-800/50 rounded-lg px-4 py-3 mb-4" data-testid="nav-link-banner">
+                <p class="text-sm font-medium text-indigo-200">
+                  Confirm this device in your Vault
+                </p>
+                <p class="mt-1 text-xs text-indigo-300/90">
+                  Once, so other people can see that the polls and votes you
+                  make on this device are yours.
+                </p>
+                {linkConfirmFailed.value && (
+                  <p class="mt-1 text-xs text-amber-300/90">
+                    Your Vault did not confirm it. Try again with your Vault
+                    open and unlocked.
+                  </p>
+                )}
+                <div class="mt-3">
+                  <button
+                    type="button"
+                    onClick$={handleConfirmLink}
+                    disabled={linkConfirming.value}
+                    data-testid="nav-link-confirm"
+                    class="inline-flex items-center rounded-md bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-500 disabled:opacity-60"
+                  >
+                    {linkConfirming.value ? "Waiting for your Vault..." : "Confirm in Vault"}
+                  </button>
+                </div>
+              </div>
+            )}
 
             <Slot />
           </>

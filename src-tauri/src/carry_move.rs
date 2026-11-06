@@ -32,6 +32,20 @@ use std::sync::Arc;
 const POLLS: &str = "polls";
 const STATE_FILE: &str = "carry-move-v1_5.json";
 
+/// This start's agent links are on v1.5: a run carried every one of them,
+/// or the move was already complete. Until then the identity link this
+/// install made on an older version may not be on v1.5 yet, so nothing
+/// decides from v1.5's links that a new one is needed.
+static LINKS_CARRIED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn links_carried() -> bool {
+    LINKS_CARRIED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn set_links_carried() {
+    LINKS_CARRIED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// What the move keeps between runs.
 #[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq)]
 pub struct MoveState {
@@ -326,6 +340,7 @@ pub async fn run(state: &Arc<AppState>) -> Result<Report, String> {
     let mut ms = MoveState::load(&state.data_dir);
     let mut report = Report::default();
     if ms.complete {
+        set_links_carried();
         return Ok(report);
     }
     let v13 = own_v13(state).await?;
@@ -349,6 +364,9 @@ pub async fn run(state: &Arc<AppState>) -> Result<Report, String> {
             Err(e) => Err(e),
         };
         count(r, &mut report.links, &mut report.waiting, &mut report.failed, "an agent link");
+    }
+    if report.waiting == 0 && report.failed == 0 {
+        set_links_carried();
     }
     for c in &plan.first {
         let r = match carried::check(c) {

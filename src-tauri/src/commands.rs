@@ -536,6 +536,8 @@ pub struct AppStatus {
     pub conductor_status: ConductorStatus,
     /// This launch was asked for by "Open as this identity".
     pub relaunched_into_identity: bool,
+    /// This start's agent links are on v1.5 (`carry_move::links_carried`).
+    pub links_carried: bool,
 }
 
 #[tauri::command]
@@ -555,6 +557,7 @@ pub fn get_app_status(state: tauri::State<'_, std::sync::Arc<AppState>>) -> AppS
         relaunched_into_identity: state
             .relaunched_into_identity
             .load(std::sync::atomic::Ordering::Relaxed),
+        links_carried: crate::carry_move::links_carried(),
     }
 }
 
@@ -1494,7 +1497,14 @@ pub async fn commit_identity_link(
                         if let Err(e) =
                             call_zome(client, AGENT_LINKING_ZOME, "revoke_link", payload).await
                         {
-                            log::warn!("could not revoke the superseded identity link: {}", e);
+                            // A re-link on a newer network version: the
+                            // previous link is on the older one and stays
+                            // there with it.
+                            if e.contains("Entry not found") {
+                                log::info!("the superseded identity link is on an older network version; left there");
+                            } else {
+                                log::warn!("could not revoke the superseded identity link: {}", e);
+                            }
                         }
                     }
                 }
@@ -1889,17 +1899,40 @@ async fn fold_siblings_on(
     }
 }
 
-/// The agents linked to `agent_pub_key` on the active network (v1.5) only,
-/// natively (a carried link does not count), for the launch check that
-/// links this install's key there. `get_linked_agents` also counts the older
-/// networks, so that check never ran.
+/// Whether the active network (v1.5) links `agent_pub_key` to the identity
+/// this install is signed in with: by a link made there, or by one carried
+/// there. A carried link counts only for a key its original names (v1.5
+/// files it under those two keys alone and validates that), so a link made
+/// for the install's other key never stands in for this one. Without a
+/// saved link to name the identity, any link of this key there counts. Err
+/// while that network does not answer: the caller asks again later rather
+/// than deciding from nothing. Older networks are not read: a link there
+/// does not let v1.5 peers see who wrote what.
 #[tauri::command]
-pub async fn get_linked_agents_active(
+pub async fn identity_linked_on_active(
     state: tauri::State<'_, std::sync::Arc<AppState>>,
     agent_pub_key: String,
-) -> Result<Vec<String>, String> {
+) -> Result<bool, String> {
     let agent = AgentPubKey::try_from(agent_pub_key).map_err(|e| format!("Invalid agent key: {:?}", e))?;
-    Ok(linked_agent_keys(state.inner(), &agent).await?.iter().map(|a| a.to_string()).collect())
+    identity_linked_on_active_inner(state.inner(), &agent).await
+}
+
+pub(crate) async fn identity_linked_on_active_inner(
+    state: &std::sync::Arc<AppState>,
+    agent: &AgentPubKey,
+) -> Result<bool, String> {
+    let linked = linked_on(state, "active", agent).await?.ok_or("The active network is not running yet")?;
+    let identity = load_identity_link(&state.data_dir).and_then(|l| parse_agent_pub_key_string(&l.vault_agent_pub_key).ok());
+    Ok(links_this_identity(&linked, identity.as_ref()))
+}
+
+/// By the key itself: the saved identity key comes from the Vault as text,
+/// and its location bytes need not match the network's copy.
+fn links_this_identity(linked: &[AgentPubKey], identity: Option<&AgentPubKey>) -> bool {
+    match identity {
+        Some(identity) => linked.iter().any(|k| k.get_raw_32() == identity.get_raw_32()),
+        None => !linked.is_empty(),
+    }
 }
 
 #[tauri::command]
@@ -3172,6 +3205,34 @@ pub(crate) async fn harness_v13_vote(state: &AppState, poll: String, option_inde
     Ok(action_hash.to_string())
 }
 
+/// See `harness_v13_poll`: a sign-in as a 0.4.x install made it, the
+/// identity link written on v1.3 and saved here, so the move's tests start
+/// from an install whose only link is on an older version.
+#[cfg(feature = "harness")]
+pub(crate) async fn harness_v13_link(state: &AppState, vault_agent_pub_key: String, vault_signature: String) -> Result<String, String> {
+    #[derive(serde::Serialize, Debug)]
+    struct CreateExternalLinkInput {
+        external_agent: AgentPubKey,
+        external_signature: Vec<u8>,
+    }
+    use base64::Engine;
+    let external_signature = base64::engine::general_purpose::STANDARD
+        .decode(&vault_signature)
+        .map_err(|e| format!("Invalid signature: {}", e))?;
+    let input = CreateExternalLinkInput { external_agent: parse_agent_pub_key_string(&vault_agent_pub_key)?, external_signature };
+    let client = state.app_client_v1_3.lock().await;
+    let client = client.as_ref().ok_or("v1.3 is not running")?;
+    let result = call_zome(client, AGENT_LINKING_ZOME, "create_external_link", crate::hc::encode(&input)?).await?;
+    let action_hash: ActionHash = crate::hc::decode(&result)?;
+    let linked_at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
+    save_identity_link(
+        &state.data_dir,
+        &IdentityLinkData { vault_agent_pub_key: vault_agent_pub_key.clone(), entry_action_hash: action_hash.to_string(), linked_at },
+    );
+    crate::profiles::bind_profile(&state.device_root, &state.data_dir, &vault_agent_pub_key);
+    Ok(action_hash.to_string())
+}
+
 /// See `harness_v13_poll`: a flag on a v1.3 poll, raised there with no
 /// identity gate.
 #[cfg(feature = "harness")]
@@ -3264,5 +3325,32 @@ mod backup_tests {
         assert!(!copied.holds("EncryptedEntry", DRAFT_06, None));
         state.private_copied.push(DRAFT_06.into());
         assert!(Copied06::from(&state).holds("EncryptedEntry", DRAFT_06, None));
+    }
+}
+
+#[cfg(test)]
+mod active_link_tests {
+    use super::links_this_identity;
+    use holochain_types::prelude::AgentPubKey;
+
+    #[test]
+    fn the_active_link_counts_for_the_signed_in_identity_only() {
+        let identity = AgentPubKey::from_raw_32(vec![7; 32]);
+        let other_identity = AgentPubKey::from_raw_32(vec![8; 32]);
+        assert!(links_this_identity(&[identity.clone()], Some(&identity)));
+        assert!(links_this_identity(&[other_identity.clone(), identity.clone()], Some(&identity)));
+        assert!(!links_this_identity(&[other_identity.clone()], Some(&identity)), "a link to an identity this install left does not count");
+        assert!(!links_this_identity(&[], Some(&identity)));
+
+        // The saved key arrives as text from the Vault: compared by the key
+        // itself, whatever its location bytes say.
+        let mut raw = identity.get_raw_39().to_vec();
+        raw[35..39].copy_from_slice(&[0, 0, 0, 0]);
+        let as_saved = AgentPubKey::from_raw_39(raw);
+        assert!(links_this_identity(&[identity.clone()], Some(&as_saved)));
+
+        // No saved link to name the identity: any link of the key counts.
+        assert!(links_this_identity(&[other_identity], None));
+        assert!(!links_this_identity(&[], None));
     }
 }
