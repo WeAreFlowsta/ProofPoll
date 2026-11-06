@@ -19,8 +19,8 @@ const DEBOUNCE_MS = 30_000;
 
 /**
  * Tell the Rust side what a backup attempt did. It writes proofpoll.log and
- * keeps the last outcome for the Identity page - the console alone left a
- * stale backup date unexplained (Windows, 2026-10-25). Fire and forget.
+ * keeps the last outcome for the Identity page, so a stale backup date has
+ * an explanation outside the console. Fire and forget.
  */
 export function reportBackupOutcome(
   ok: boolean,

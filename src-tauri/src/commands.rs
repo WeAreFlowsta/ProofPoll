@@ -1819,8 +1819,7 @@ async fn linked_agent_keys_with(
 /// install that linked on v1.3 or v1.4 and never upgraded exists only there,
 /// so while those lines run the identity's agent set is the UNION of every
 /// answer. Without it, every vote cast by an older install of the same
-/// person stopped reading as theirs the moment they upgraded (beta.1 gate,
-/// Windows, 2026-10-25).
+/// person would stop reading as theirs the moment they upgraded.
 const LINK_NETWORKS: [&str; 3] = ["active", "v1.4", "v1.3"];
 
 /// The agents linked to `agent` on one network (on the active one, its own
