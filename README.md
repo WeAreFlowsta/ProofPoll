@@ -17,6 +17,15 @@ ProofPoll is built on **[Flowsta Vault](https://flowsta.com/vault/)**, which kee
 
 ## What's New
 
+### v0.6.0-beta.3 - 2026-11-06
+- **Your polls and votes move to ProofPoll's next network version, with their proof.** This version installs it beside the current one. In the background, each install copies what it wrote (polls, votes, flags, drafts, vote reasons and its link to your Flowsta identity) to the new version with its original author and time, then reads the new version first. There is nothing to do: until something has moved it is read where it is, each poll shows once, and each person's vote counts once wherever it is read.
+- **Only the person who wrote a poll or a flag can remove it.** On the new version votes stay once cast and nothing is changed after it is written. A copy of a poll made from another of its author's devices is accepted only with the author's signature for that device.
+- **Polls show without waiting on the network.** ProofPoll reads polls, votes and flags from this computer's own copy first, and when the network has not answered after 15 seconds it shows what this computer has instead of waiting on computers that have gone offline.
+- **Restart to update shows each step.** The window keeps responding while an update installs, says what comes next, and says that ProofPoll closes and opens again. On Linux the update installs before ProofPoll's background programs stop.
+- **Your Vault backup and a restore include the new version.** The backup lists the new version's history as well (a backup that cannot list it is not made), and restoring your key on another computer restores every history the backup lists, so that computer never starts a second history under the same key.
+- **For node operators:** `proofpoll-carrier`, attached to each release for Linux, copies a node's polls, votes, flags and identity links to the new version in one pass, with the same checks the app runs; `--dry-run` writes nothing.
+- **For developers and forks:** the headless test run has a carrier leg, and its restore leg checks the key's history on both network versions.
+
 ### v0.6.0-beta.2 - 2026-11-05
 - **The first version that arrives by itself.** Installs of 0.6.0-beta.1 download this one in the background and install it when you restart ProofPoll or quit it.
 - **Your Vault backup includes everything.** It now also carries what you did on polls still on the older network, so the Vault's count of your polls and votes and your data export are complete. Polls and votes already copied to the new network count once.
