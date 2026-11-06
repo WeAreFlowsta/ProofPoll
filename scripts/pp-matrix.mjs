@@ -197,6 +197,8 @@ async function migration() {
   const rep2 = again.data?.report || {};
   record('A: a second run writes nothing new', again.ok && rep2.failed === 0 && (await op(A, { op: 'polls' })).data?.length === after.length && ((await op(A, { op: 'drafts' })).data || []).length === drafts15.length,
     again.error || JSON.stringify(rep2));
+  const aLinked = await op(A, { op: 'linked_active' });
+  record('A: v1.5 links its key to the identity (its own link from the sign-in)', aLinked.ok && aLinked.data === true, aLinked.error || JSON.stringify(aLinked.data));
 }
 
 /** A restarted with every rendezvous check failing for ~90 s (debug switch):
@@ -324,6 +326,15 @@ async function carrier() {
   for (const [b, w] of [[A, 'A'], [B, 'B'], [C, 'C'], [D, 'D']]) record(`${w}: ready`, await waitReady(b));
   const keyOf = async (b) => (await status(b)).app?.agent_pub_key;
   const [aKey, bKey, cKey] = [await keyOf(A), await keyOf(B), await keyOf(C)];
+  // B signs in on v1.3 as ProofPoll 0.4.x did: its only identity link is
+  // there. Once its move carries that link, v1.5 links its key to the
+  // identity, and the app has nothing to ask the Vault for.
+  const b13 = await op(B, { op: 'v13_link', client_id: CLIENT_ID });
+  record('B: signed in on v1.3 as 0.4.x did (its only link there)', b13.ok, b13.error);
+  const bBefore = await op(B, { op: 'linked_active' });
+  const bCarriedBefore = (await status(B)).app?.links_carried;
+  record('B: before its move, v1.5 links its key to no identity', bBefore.ok && bBefore.data === false && bCarriedBefore === false,
+    bBefore.error || JSON.stringify({ linked: bBefore.data, links_carried: bCarriedBefore }));
   const anon = await op(A, { op: 'v13_poll', title: `carrier anonymous ${nowS()}`, description: 'by an install that never updates', options: ['red', 'blue'], closes_at: nowS() + 7 * 86400 });
   const pub = await op(A, { op: 'v13_poll', title: `carrier public ${nowS()}`, description: 'names shown', options: ['yes', 'no'], closes_at: nowS() + 7 * 86400, poll_type: 'Public' });
   record('A: two v1.3 polls, one anonymous and one public', anon.ok && pub.ok, anon.error || pub.error);
@@ -419,6 +430,10 @@ async function carrier() {
   record('B: sees the carried votes on both copies', await until(async () => ((await v15(B, 'get_poll_votes', anonCopy)) || []).length >= 3 && ((await v15(B, 'get_poll_votes', pubCopy)) || []).length >= 1, 300, 10000));
   const mv = await op(B, { op: 'move15' }, 600);
   record("B: its own move runs, nothing refused", mv.ok && mv.data?.report?.failed === 0, mv.error || JSON.stringify(mv.data?.report));
+  record('B: its move carried its links', (await status(B)).app?.links_carried === true);
+  let bAfter = { ok: false };
+  record('B: its carried v1.3 link links its key to the identity on v1.5 (no new link to ask the Vault for)',
+    await until(async () => (bAfter = await op(B, { op: 'linked_active' })).ok && bAfter.data === true, 120, 5000), bAfter.error || JSON.stringify(bAfter.data));
   const afterMove = (await v15(C, 'get_poll_votes', anonCopy)) || [];
   record('the anonymous poll still has three votes', afterMove.length === 3, JSON.stringify(by(afterMove)));
   await signin(B, 'B');
