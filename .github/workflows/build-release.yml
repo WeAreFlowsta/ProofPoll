@@ -627,9 +627,10 @@ jobs:
               }
             }
 
+            const installer = (name) => /\.(dmg|deb|rpm|msi)$|-Setup\.exe$/.test(name);
             const lines = [];
             for (const a of assets) {
-              if (a.name === 'SHA256SUMS.txt') continue;
+              if (!installer(a.name)) continue;
               const res = await github.request(
                 'GET /repos/{owner}/{repo}/releases/assets/{asset_id}',
                 { owner, repo, asset_id: a.id, headers: { accept: 'application/octet-stream' } }
