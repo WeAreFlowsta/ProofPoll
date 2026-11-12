@@ -581,7 +581,13 @@ pub fn launch_vault() -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
         // Packaged installs (.deb/.rpm) put `flowsta-vault` on PATH.
-        Command::new("flowsta-vault")
+        // The Vault decides its own window's drawing: it never inherits
+        // what this app's webview fix set.
+        let mut vault = Command::new("flowsta-vault");
+        for var in crate::webview_fix::set_here() {
+            vault.env_remove(var);
+        }
+        vault
             .spawn()
             .map(|_| ())
             .map_err(|e| format!("Could not open Flowsta Vault: {e}"))

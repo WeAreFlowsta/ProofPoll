@@ -45,6 +45,8 @@ mod carried;
 mod carry_move;
 mod vault_probe;
 mod webview_fix;
+#[cfg(test)]
+mod spawn_guard;
 mod kits;
 mod updater;
 #[cfg(feature = "harness")]
