@@ -246,6 +246,10 @@ jobs:
         env:
           HC_RELEASE_07: holochain-0.7.1
           HC_RELEASE_06: holochain-0.6.1
+          # The 0.7 conductor: the official source with the patches listed at
+          # https://github.com/WeAreFlowsta/holochain-build (the key stores
+          # and the 0.6.1 line are the official releases).
+          HC_BUILD_07: holochain-0.7.1-flowsta.4
         run: |
           mkdir -p src-tauri/binaries
           pinned() { awk -v k="$1" '$1 !~ /^#/ && $2 == k { print $1 }' .github/holochain-sidecars.sha256; }
@@ -254,14 +258,17 @@ jobs:
             w=$(pinned "$2"); g=$(sha "$1")
             [ -n "$w" ] && [ "$g" = "$w" ] || { echo "$2: SHA-256 $g does not match the pinned ${w:-(none)}"; exit 1; }
           }
-          base="https://github.com/holochain/holochain/releases/download"
           fetch() { # release, upstream name, our name
+            case "$1" in
+              *-flowsta.*) base="https://github.com/WeAreFlowsta/holochain-build/releases/download" ;;
+              *) base="https://github.com/holochain/holochain/releases/download" ;;
+            esac
             dest="src-tauri/binaries/$3-${{ matrix.target }}"
             curl -fsSL "${base}/$1/$2-${{ matrix.target }}" -o "$dest"
             chmod +x "$dest"
             check "$dest" "$1/$2-${{ matrix.target }}"
           }
-          fetch "$HC_RELEASE_07" holochain proofpoll-holochain
+          fetch "$HC_BUILD_07" holochain proofpoll-holochain
           fetch "$HC_RELEASE_06" holochain proofpoll-holochain-06
           fetch "$HC_RELEASE_06" lair-keystore proofpoll-lair-keystore
           fetch "$HC_RELEASE_07" lair-keystore proofpoll-lair-keystore-07
@@ -272,12 +279,15 @@ jobs:
         env:
           HC_RELEASE_07: holochain-0.7.1
           HC_RELEASE_06: holochain-0.6.1
+          # The 0.7 conductor: the official source with the patches listed at
+          # https://github.com/WeAreFlowsta/holochain-build (the key stores
+          # and the 0.6.1 line are the official releases).
+          HC_BUILD_07: holochain-0.7.1-flowsta.4
         run: |
           New-Item -ItemType Directory -Force -Path src-tauri/binaries
-          $base = "https://github.com/holochain/holochain/releases/download"
           $t = "${{ matrix.target }}"
           $wanted = @(
-            @{ rel = $env:HC_RELEASE_07; up = "holochain"; ours = "proofpoll-holochain" },
+            @{ rel = $env:HC_BUILD_07; up = "holochain"; ours = "proofpoll-holochain" },
             @{ rel = $env:HC_RELEASE_06; up = "holochain"; ours = "proofpoll-holochain-06" },
             @{ rel = $env:HC_RELEASE_06; up = "lair-keystore"; ours = "proofpoll-lair-keystore" },
             @{ rel = $env:HC_RELEASE_07; up = "lair-keystore"; ours = "proofpoll-lair-keystore-07" }
@@ -289,6 +299,7 @@ jobs:
             if (-not $want -or $got -ne $want) { throw "${key}: SHA-256 $got does not match the pinned $want" }
           }
           foreach ($w in $wanted) {
+            $base = if ($w.rel -like "*-flowsta.*") { "https://github.com/WeAreFlowsta/holochain-build/releases/download" } else { "https://github.com/holochain/holochain/releases/download" }
             $dest = "src-tauri/binaries/$($w.ours)-$t.exe"
             Invoke-WebRequest "$base/$($w.rel)/$($w.up)-$t.exe" -OutFile $dest
             Assert-Pinned $dest "$($w.rel)/$($w.up)-$t.exe"

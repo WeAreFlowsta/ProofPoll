@@ -52,15 +52,6 @@ fn test_port_offset() -> u16 {
 }
 /// Data directory name of the 0.7.1 conductor (the 0.6.1 one keeps `conductor`).
 pub const CONDUCTOR_DIR_07: &str = "conductor-07";
-/// How many bytes of ops one gossip exchange may offer the 0.7 conductor
-/// (kitsune2's default is 100 MB). Holochain 0.7.1 checks which offered ops
-/// it already holds in one query that binds every op id three times, and
-/// SQLite refuses past 32,766 bound values: an exchange offering more than
-/// ~10.9k ids is dropped, every round (holochain/holochain#6062). Once
-/// ProofPoll's 0.7 network holds that many ops, a new install's first sync
-/// would never finish. 1 MiB keeps a batch to a few thousand ids; a larger
-/// backlog arrives over several rounds. The Vault's value since 1.7.0.
-pub const GOSSIP_OP_BYTES_07: u32 = 1024 * 1024;
 
 /// Key store directory of the 0.7.1 line (the 0.6.1 one keeps `lair`).
 pub const LAIR_DIR_07: &str = "lair-07";
@@ -345,10 +336,6 @@ network:
   bootstrap_url: {bootstrap}
   relay_url: {relay}
   request_timeout_s: 60
-  advanced:
-    k2Gossip:
-      maxGossipOpBytes: {gossip_bytes}
-      maxRequestGossipOpBytes: {gossip_bytes}
 {auth_line}db_sync_level: Normal
 "#,
             data_root = data_root,
@@ -357,7 +344,6 @@ network:
             lair_url = lair_url,
             bootstrap = bootstrap_url_07(),
             relay = relay_url_07(),
-            gossip_bytes = GOSSIP_OP_BYTES_07,
             auth_line = auth_line,
         ),
     };
@@ -1230,14 +1216,19 @@ pub fn spawn_health_monitor(
 mod tests {
     use super::*;
 
+    /// No gossip cap on 0.7: upstream 0.7.1 needed one (its presence check
+    /// fails above about 10.9k offered ids, holochain/holochain#6062), and
+    /// under it a large batch can strand. The conductor ProofPoll ships
+    /// checks in chunks (WeAreFlowsta/holochain-build), so Kitsune2's own
+    /// limit applies; a capped conductor elsewhere is never sent more than
+    /// its own limit.
     #[test]
-    fn the_07_config_caps_each_gossip_exchange() {
+    fn the_07_config_carries_no_gossip_cap() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = generate_conductor_config(dir.path(), "unix:///tmp/x/socket?k=a", admin_port_07(), crate::hc::Line::V07, true).unwrap();
         let yaml = std::fs::read_to_string(cfg).unwrap();
-        // Under network.advanced.k2Gossip: a misplaced key fails the network
-        // join with "decode config: invalid type".
-        assert!(yaml.contains("\n  advanced:\n    k2Gossip:\n      maxGossipOpBytes: 1048576\n      maxRequestGossipOpBytes: 1048576\n"), "{yaml}");
+        assert!(!yaml.contains("k2Gossip") && !yaml.contains("maxGossipOpBytes"), "{yaml}");
+        assert!(yaml.contains("  request_timeout_s: 60\n"), "{yaml}");
     }
 
     /// Full-stack probe for the "Failed to save draft" report: real lair,
