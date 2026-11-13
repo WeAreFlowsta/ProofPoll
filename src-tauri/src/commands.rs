@@ -6,14 +6,16 @@
 //!
 //! ## For forking developers
 //!
-//! This file has three sections:
-//!   1. **Entry types + response types** (top) — Mirror your zome's Rust structs.
-//!      Change these to match your own data model.
-//!   2. **Infrastructure** (middle) — `AppState`, `call_zome`, `friendly_error`,
-//!      `decode_entry`. Keep these as-is; they work for any Holochain app.
-//!   3. **Tauri commands** (bottom) — One `#[tauri::command]` per frontend action.
-//!      Replace the poll/vote/flag commands with your own. The identity-linking
-//!      and migration commands are reusable infrastructure.
+//! This file is plumbing any Holochain desktop app keeps: `AppState`,
+//! `call_zome`, `friendly_error`, `decode_entry`, the status command,
+//! Flowsta identity linking, the Vault backup and export, the restore
+//! screen's two buttons. What is about POLLS (the entry types and every
+//! command the page calls for polls, votes, flags, drafts and vote
+//! reasons) is in the `polls/` folder: that is the part to replace.
+//!
+//! Two functions here still read poll records and change with your data
+//! model: `classify_app_entry` (the backup names each record) and
+//! `get_export_data` (the export decodes them).
 //!
 //! After changing commands, register them in `lib.rs` → `invoke_handler`.
 
@@ -22,154 +24,8 @@ use holochain_types::prelude::{ActionHash, AgentPubKey};
 use lair_keystore_api::prelude::LairClient;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-
-// ── Entry types matching the zome definitions ─────────────────────────
-//
-// These structs must match the entry types in your coordinator zome.
-// Holochain entries are MessagePack-encoded, so Serialize + Deserialize
-// are required. The frontend never sees these directly — they're decoded
-// in the Tauri commands and returned as response types (below).
-
-/// Used to decode MigratedPoll entries when merging v1.0 and v1.1 poll lists.
-/// Mirrors the MigratedPoll entry type in the v1.1 integrity zome.
-#[derive(serde::Deserialize)]
-struct MigratedPollEntry {
-    old_action_hash: ActionHash,
-    new_action_hash: ActionHash,
-    #[allow(dead_code)]
-    migrated_at: i64,
-}
-
-/// What the app reads of a carried record's proof (v1.5's `Carried`): who
-/// wrote the original and its hash. Never sent to the frontend.
-#[derive(serde::Deserialize, Clone, Debug)]
-pub struct Origin {
-    pub original_action_hash: ActionHash,
-    pub original_author: AgentPubKey,
-}
-
-/// Two polls that ask the same question: the same title, description,
-/// options and closing time (a copy made by the 0.5 move keeps all four).
-fn same_question(a: &Poll, b: &Poll) -> bool {
-    a.title == b.title && a.description == b.description && a.options == b.options && a.closes_at == b.closes_at
-}
-
-/// The author a record counts for: the original author its proof names
-/// when it was carried, else its writer.
-fn counted_author(record: &crate::hc::RecordView, origin: &Option<Origin>) -> String {
-    origin.as_ref().map(|o| o.original_author.to_string()).unwrap_or_else(|| record.author.clone())
-}
-
-/// Mirrors PollType in the v1.2 integrity zome.
-///
-/// Must use the same serde representation so `decode_entry` works: rmp_serde
-/// encodes unit enum variants as externally-tagged maps `{"Public": nil}`, not
-/// as strings. Using a matching enum here round-trips correctly. Tauri then
-/// re-serialises to JSON (human-readable) which produces the string `"Public"`
-/// that the frontend already expects.
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
-pub enum PollType {
-    Anonymous,
-    Public,
-}
-
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
-pub struct Poll {
-    pub title: String,
-    pub description: String,
-    pub options: Vec<String>,
-    pub created_at: i64,
-    pub closes_at: Option<i64>,
-    /// None for v1.0/v1.1 polls (no poll_type field — treated as Anonymous).
-    #[serde(default)]
-    pub poll_type: Option<PollType>,
-    /// v1.5: where a carried poll came from.
-    #[serde(default, skip_serializing)]
-    pub carried_from: Option<Origin>,
-}
-
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
-pub struct Vote {
-    pub poll_action_hash: ActionHash,
-    pub option_index: u32,
-    /// Only present on v1.2 public poll votes.
-    #[serde(default)]
-    pub display_name: Option<String>,
-    /// Only present on v1.2 public poll votes.
-    #[serde(default)]
-    pub profile_picture: Option<String>,
-    /// v1.5: where a carried vote came from.
-    #[serde(default, skip_serializing)]
-    pub carried_from: Option<Origin>,
-}
-
-#[derive(serde::Serialize, serde::Deserialize, Debug)]
-pub struct CreatePollInput {
-    pub title: String,
-    pub description: String,
-    pub options: Vec<String>,
-    pub closes_at: Option<i64>,
-    /// Only sent for v1.2. Omit for v1.0/v1.1 migration calls.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub poll_type: Option<String>,
-}
-
-#[derive(serde::Serialize, serde::Deserialize, Debug)]
-pub struct CastVoteInput {
-    pub poll_action_hash: ActionHash,
-    pub option_index: u32,
-    /// Only sent for v1.2 public polls; None otherwise.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub display_name: Option<String>,
-    /// Only sent for v1.2 public polls; None otherwise.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub profile_picture: Option<String>,
-}
-
-// ── Frontend response types ───────────────────────────────────────────
-//
-// These are what the frontend receives via Tauri invoke().
-// ActionHashes are converted to strings because TypeScript can't handle
-// Holochain's native hash types. The frontend uses these string hashes
-// to reference entries in subsequent calls.
-
-#[derive(serde::Serialize, Clone)]
-pub struct PollListItem {
-    pub hash: String,
-    pub poll: Poll,
-    pub author: String,
-    /// Which DHT this poll lives on: "1.0", "1.1", or "1.2".
-    /// The frontend passes this back when voting so the vote goes to the correct cell.
-    pub dna_version: String,
-}
-
-#[derive(serde::Serialize)]
-pub struct PollDetail {
-    /// The poll this detail is of: the hash asked for, or the copy on the
-    /// active network an older hash opens.
-    pub hash: String,
-    pub poll: Poll,
-    pub author: String,
-    /// Which DHT this poll lives on: "1.0", "1.1", or "1.2".
-    pub dna_version: String,
-}
-
-#[derive(serde::Serialize, Clone)]
-pub struct VoteData {
-    pub vote: VoteResponse,
-    pub author: String,
-    /// Display name from v1.2 public poll votes. None for anonymous or pre-v1.2 votes.
-    pub display_name: Option<String>,
-    /// Profile picture URL from v1.2 public poll votes. None for anonymous or pre-v1.2 votes.
-    pub profile_picture: Option<String>,
-}
-
-#[derive(serde::Serialize, Clone)]
-pub struct VoteResponse {
-    pub hash: String,
-    pub poll_action_hash: String,
-    pub option_index: u32,
-}
+#[allow(unused_imports)]
+use crate::polls::*;
 
 // --- App state ---
 
@@ -338,7 +194,7 @@ pub fn nuke_state_and_regenerate_passphrase(data_dir: &Path, app_state: &AppStat
     new_passphrase
 }
 
-fn generate_passphrase() -> String {
+pub(crate) fn generate_passphrase() -> String {
     use rand::Rng;
     let mut rng = rand::thread_rng();
     (0..32)
@@ -355,15 +211,15 @@ fn generate_passphrase() -> String {
 /// User-facing app name - shown in Vault dialogs and carried in backup
 /// payloads and data exports. Forks: change once here; the frontend has its
 /// own copies (see the README's rename checklist).
-const APP_NAME: &str = crate::names::APP_NAME;
+pub(crate) const APP_NAME: &str = crate::names::APP_NAME;
 /// Must match the role `id` in your happ.yaml.
-const ROLE_NAME: &str = crate::names::ROLE_NAME;
+pub(crate) const ROLE_NAME: &str = crate::names::ROLE_NAME;
 /// Your app's coordinator zome name (from dna.yaml).
-const POLLS_ZOME: &str = "polls";
+pub(crate) const POLLS_ZOME: &str = "polls";
 /// Flowsta agent-linking zome — keep as-is for identity integration.
 pub(crate) const AGENT_LINKING_ZOME: &str = "agent_linking";
 
-fn decode_entry<T: serde::de::DeserializeOwned>(record: &crate::hc::RecordView) -> Result<T, String> {
+pub(crate) fn decode_entry<T: serde::de::DeserializeOwned>(record: &crate::hc::RecordView) -> Result<T, String> {
     record.entry_as()
 }
 
@@ -391,12 +247,12 @@ pub(crate) async fn call_zome_within(
 }
 
 /// How long a list waits on the network before it shows what this device holds.
-const LIST_WAIT_SECS: u64 = 15;
+pub(crate) const LIST_WAIT_SECS: u64 = 15;
 
 /// A read of `fn_name` on the active line that waits at most
 /// [`LIST_WAIT_SECS`] on the network, then shows what this device holds
 /// (the coordinator's `<fn_name>_local`).
-async fn read_or_local(client: &crate::hc::AppClient, fn_name: &str, payload: Vec<u8>) -> Result<Vec<u8>, String> {
+pub(crate) async fn read_or_local(client: &crate::hc::AppClient, fn_name: &str, payload: Vec<u8>) -> Result<Vec<u8>, String> {
     match call_zome_within(client, POLLS_ZOME, fn_name, payload.clone(), LIST_WAIT_SECS).await {
         Ok(r) => Ok(r),
         Err(e) => {
@@ -411,9 +267,9 @@ async fn read_or_local(client: &crate::hc::AppClient, fn_name: &str, payload: Ve
 /// Call a zome function on either line. `payload` and the result are the
 /// msgpack bytes (`hc::encode` / `hc::decode`, `hc::records`).
 /// When the app last asked a conductor for anything (unix seconds).
-static LAST_CALL_SECS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub(crate) static LAST_CALL_SECS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-fn unix_secs() -> u64 {
+pub(crate) fn unix_secs() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
@@ -460,7 +316,7 @@ pub(crate) async fn call_zome(
 }
 
 /// Attempt to re-enable the app via admin websocket.
-async fn try_reenable_app(line: crate::hc::Line) -> Result<(), String> {
+pub(crate) async fn try_reenable_app(line: crate::hc::Line) -> Result<(), String> {
     match line {
         crate::hc::Line::V06 => {
             use holochain_client::AdminWebsocket;
@@ -494,7 +350,7 @@ async fn try_reenable_app(line: crate::hc::Line) -> Result<(), String> {
 }
 
 /// Translate raw Holochain errors into user-friendly messages.
-fn friendly_error(raw: &str) -> String {
+pub(crate) fn friendly_error(raw: &str) -> String {
     if raw.contains("CellDisabled") {
         "Your data cell was temporarily disabled and could not be recovered automatically. Please restart the app.".into()
     } else if raw.contains("WebsocketError") || raw.contains("ConnectionReset") || raw.contains("Io(") {
@@ -630,633 +486,6 @@ pub fn launch_vault() -> Result<(), String> {
     }
 }
 
-// ── Poll commands (replace with your app's commands) ──────────────────
-//
-// Each command follows the same pattern:
-//   1. Lock the AppWebsocket from state
-//   2. Parse input (convert string hashes to ActionHash)
-//   3. Encode payload with ExternIO::encode()
-//   4. Call call_zome() with your zome name and function
-//   5. Decode the result and return a frontend-friendly type
-
-#[tauri::command]
-pub async fn create_poll(
-    state: tauri::State<'_, std::sync::Arc<AppState>>,
-    title: String,
-    description: String,
-    options: Vec<String>,
-    closes_at: Option<i64>,
-    poll_type: Option<String>,
-) -> Result<String, String> {
-    // Tier-1 gate: signed-in install, no unlock required - but never while
-    // a different identity's Vault is open. See require_identity_link.
-    require_identity_link(&state).await?;
-
-    let client = state.app_client.lock().await;
-    let client = client.as_ref().ok_or("Conductor not ready")?;
-
-    let input = CreatePollInput {
-        title,
-        description,
-        options,
-        closes_at,
-        poll_type: Some(poll_type.unwrap_or_else(|| "Anonymous".to_string())),
-    };
-    let payload = crate::hc::encode(&input)?;
-    let result = call_zome(client, POLLS_ZOME, "create_poll", payload).await?;
-
-    let action_hash: ActionHash = crate::hc::decode(&result)?;
-    Ok(action_hash.to_string())
-}
-
-#[tauri::command]
-pub async fn get_poll(
-    state: tauri::State<'_, std::sync::Arc<AppState>>,
-    action_hash: String,
-) -> Result<Option<PollDetail>, String> {
-    let hash = ActionHash::try_from(action_hash)
-        .map_err(|e| format!("Invalid action hash: {:?}", e))?;
-
-    // The active version first; an older hash it has carried opens its copy.
-    {
-        let client = state.app_client.lock().await;
-        if let Some(client) = client.as_ref() {
-            let mut target = hash.clone();
-            let payload = crate::hc::encode(&hash)?;
-            let mut record = crate::hc::record_opt(client.line(), &call_zome(client, POLLS_ZOME, "get_poll", payload).await?)?;
-            if record.is_none() {
-                let mut mapped: Option<ActionHash> = crate::hc::decode(&call_zome(client, POLLS_ZOME, "get_migration_mapping", crate::hc::encode(&hash)?).await?)?;
-                if mapped.is_none() {
-                    // A v1.4 copy the list shows as its first record's copy.
-                    let merged = state.migrated_from.lock().unwrap().as_ref().and_then(|m| {
-                        m.iter().find(|(_, olds)| olds.contains(&hash.to_string())).map(|(copy, _)| copy.clone())
-                    });
-                    mapped = merged.and_then(|c| ActionHash::try_from(c).ok());
-                }
-                if let Some(copy) = mapped {
-                    record = crate::hc::record_opt(client.line(), &call_zome(client, POLLS_ZOME, "get_poll", crate::hc::encode(&copy)?).await?)?;
-                    target = copy;
-                }
-            }
-            if let Some(record) = record {
-                let poll: Poll = decode_entry(&record)?;
-                return Ok(Some(PollDetail {
-                    hash: target.to_string(),
-                    author: counted_author(&record, &poll.carried_from),
-                    poll,
-                    dna_version: "1.5".to_string(),
-                }));
-            }
-        }
-    }
-
-    // Then each older version, newest first.
-    for (slot, version) in [
-        (&state.app_client_v1_4, "1.4"),
-        (&state.app_client_v1_3, "1.3"),
-        (&state.app_client_v1_2, "1.2"),
-        (&state.app_client_v1_1, "1.1"),
-        (&state.app_client_v1_0, "1.0"),
-    ] {
-        let client = slot.lock().await;
-        if let Some(client) = client.as_ref() {
-            let payload = crate::hc::encode(&hash.clone())?;
-            let result = call_zome(client, POLLS_ZOME, "get_poll", payload).await?;
-            if let Some(record) = crate::hc::record_opt(client.line(), &result)? {
-                let poll: Poll = decode_entry(&record)?;
-                return Ok(Some(PollDetail {
-                    hash: hash.to_string(),
-                    poll,
-                    author: record.author.clone(),
-                    dna_version: version.to_string(),
-                }));
-            }
-        }
-    }
-
-    Ok(None)
-}
-
-#[tauri::command]
-pub async fn get_all_polls(
-    state: tauri::State<'_, std::sync::Arc<AppState>>,
-) -> Result<Vec<PollListItem>, String> {
-    // Step 1: polls on the active version (v1.5), one per original: a
-    // carried poll is listed for the author its proof names.
-    let mut polls = Vec::new();
-    // Each carried poll's original (its hash) -> the poll as asked there.
-    let mut firsts = std::collections::HashMap::<String, Poll>::new();
-    {
-        let client = state.app_client.lock().await;
-        let client = client.as_ref().ok_or("Conductor not ready")?;
-        let payload = crate::hc::encode(&())?;
-        let result = match call_zome_within(client, POLLS_ZOME, "get_all_polls", payload.clone(), LIST_WAIT_SECS).await {
-            Ok(r) => r,
-            Err(e) => {
-                log::warn!("[polls] the network list did not come ({}): showing the polls this device holds", e);
-                call_zome(client, POLLS_ZOME, "get_all_polls_local", payload).await?
-            }
-        };
-        let records = crate::hc::records(client.line(), &result)?;
-        for record in &records {
-            if let Ok(poll) = decode_entry::<Poll>(record) {
-                if let Some(o) = &poll.carried_from {
-                    firsts.insert(o.original_action_hash.to_string(), poll.clone());
-                }
-                polls.push(PollListItem {
-                    hash: record.action_hash.clone(),
-                    author: counted_author(record, &poll.carried_from),
-                    poll,
-                    dna_version: "1.5".to_string(),
-                });
-            }
-        }
-    }
-
-    // Step 2: every older hash some newer version maps (it is shown there),
-    // and for each active poll the older hashes it came from.
-    let mut migrated_hashes = std::collections::HashSet::<String>::new();
-    let mut from = std::collections::HashMap::<String, Vec<String>>::new();
-    {
-        let client = state.app_client.lock().await;
-        if let Some(client) = client.as_ref() {
-            let payload = crate::hc::encode(&())?;
-            let mappings = match call_zome_within(client, POLLS_ZOME, "get_all_migration_mappings", payload.clone(), LIST_WAIT_SECS).await {
-                Ok(r) => Ok(r),
-                // The mappings this device holds: without them a carried
-                // poll would show again from its older line.
-                Err(_) => call_zome(client, POLLS_ZOME, "get_all_migration_mappings_local", payload).await,
-            };
-            if let Ok(r) = mappings {
-                for rec in crate::hc::records(client.line(), &r).unwrap_or_default() {
-                    if let Ok(entry) = decode_entry::<MigratedPollEntry>(&rec) {
-                        migrated_hashes.insert(entry.old_action_hash.to_string());
-                        from.entry(entry.new_action_hash.to_string()).or_default().push(entry.old_action_hash.to_string());
-                    }
-                }
-            }
-        }
-    }
-    // The 0.5 move's v1.4 copy of a v1.3 poll whose copy is here: shown as
-    // that copy, its votes read with it, until its own author's app maps it
-    // on v1.5 (only that app can vouch for an author whose two keys differ).
-    // It counts when its mapping is by the copy's own author and it asks
-    // the same question (title, description, options, closing time): no
-    // one can fold a different poll into another's.
-    {
-        let client = state.app_client_v1_4.lock().await;
-        if let Some(client) = client.as_ref() {
-            let payload = crate::hc::encode(&())?;
-            let mut polls_14 = std::collections::HashMap::<String, (String, Poll)>::new();
-            if let Ok(r) = call_zome_within(client, POLLS_ZOME, "get_all_polls", crate::hc::encode(&())?, LIST_WAIT_SECS).await {
-                for rec in crate::hc::records(client.line(), &r).unwrap_or_default() {
-                    if let Ok(poll) = decode_entry::<Poll>(&rec) {
-                        polls_14.insert(rec.action_hash.clone(), (rec.author.clone(), poll));
-                    }
-                }
-            }
-            if let Ok(r) = call_zome_within(client, POLLS_ZOME, "get_all_migration_mappings", payload, LIST_WAIT_SECS).await {
-                for rec in crate::hc::records(client.line(), &r).unwrap_or_default() {
-                    let Ok(entry) = decode_entry::<MigratedPollEntry>(&rec) else { continue };
-                    let (old, later) = (entry.old_action_hash.to_string(), entry.new_action_hash.to_string());
-                    let (Some(first), Some((later_author, later_poll))) = (firsts.get(&old), polls_14.get(&later)) else { continue };
-                    if *later_author != rec.author || !same_question(first, later_poll) {
-                        continue;
-                    }
-                    if let Some((copy, _)) = from.iter().find(|(_, olds)| olds.contains(&old)) {
-                        let copy = copy.clone();
-                        migrated_hashes.insert(later.clone());
-                        from.entry(copy).or_default().push(later);
-                    }
-                }
-            }
-        }
-    }
-    *state.migrated_from.lock().unwrap() = Some(from);
-
-    // Each older version's own mappings (chains the dedup across all hops).
-    for older_client_mutex in [&state.app_client_v1_4, &state.app_client_v1_3, &state.app_client_v1_2, &state.app_client_v1_1] {
-        let client = older_client_mutex.lock().await;
-        if let Some(client) = client.as_ref() {
-            let payload = crate::hc::encode(&())?;
-            if let Ok(r) = call_zome_within(client, POLLS_ZOME, "get_all_migration_mappings", payload, LIST_WAIT_SECS).await {
-                let records = crate::hc::records(client.line(), &r).unwrap_or_default();
-                for rec in &records {
-                    if let Ok(entry) = decode_entry::<MigratedPollEntry>(rec) {
-                        migrated_hashes.insert(entry.old_action_hash.to_string());
-                    }
-                }
-            }
-        }
-    }
-
-    // Step 3: polls from older versions not carried or migrated yet.
-    let older_versions: Vec<(&tokio::sync::Mutex<Option<crate::hc::AppClient>>, &str)> = vec![
-        (&state.app_client_v1_4, "1.4"),
-        (&state.app_client_v1_3, "1.3"),
-        (&state.app_client_v1_2, "1.2"),
-        (&state.app_client_v1_1, "1.1"),
-        (&state.app_client_v1_0, "1.0"),
-    ];
-
-    for (client_mutex, version) in &older_versions {
-        let client = client_mutex.lock().await;
-        if let Some(client) = client.as_ref() {
-            let payload = crate::hc::encode(&())?;
-            match call_zome_within(client, POLLS_ZOME, "get_all_polls", payload, LIST_WAIT_SECS).await {
-                Ok(result) => {
-                    let records = crate::hc::records(client.line(), &result).unwrap_or_default();
-                    for record in &records {
-                        let hash = record.action_hash.clone();
-                        if migrated_hashes.contains(&hash) {
-                            continue; // shown from a newer version
-                        }
-                        if let Ok(poll) = decode_entry::<Poll>(record) {
-                            polls.push(PollListItem {
-                                hash,
-                                poll,
-                                author: record.author.clone(),
-                                dna_version: version.to_string(),
-                            });
-                        }
-                    }
-                }
-                Err(e) => log::warn!("Could not fetch {} polls (skipping): {}", version, e),
-            }
-        }
-    }
-
-    Ok(polls)
-}
-
-#[tauri::command]
-pub async fn delete_poll(
-    state: tauri::State<'_, std::sync::Arc<AppState>>,
-    action_hash: String,
-) -> Result<String, String> {
-    require_identity_link(&state).await?;
-    let hash =
-        ActionHash::try_from(action_hash).map_err(|e| format!("Invalid action hash: {:?}", e))?;
-    let payload = crate::hc::encode(&hash)?;
-    let result = {
-        let client = state.app_client.lock().await;
-        let client = client.as_ref().ok_or("Conductor not ready")?;
-        call_zome(client, POLLS_ZOME, "delete_poll", payload).await?
-    };
-
-    // The originals it was carried from, where this install wrote them, so
-    // installs still on an older line stop showing it too. Best effort: the
-    // copy here is gone either way, and its mapping keeps it from coming back.
-    for old in olds_of(&state, &hash.to_string()).await {
-        for slot in [&state.app_client_v1_4, &state.app_client_v1_3] {
-            let older = slot.lock().await;
-            let Some(older) = older.as_ref() else { continue };
-            let Ok(payload) = crate::hc::encode(&old) else { continue };
-            if call_zome(older, POLLS_ZOME, "delete_poll", payload).await.is_ok() {
-                log::info!("[delete] its original {} deleted on an older line too", old);
-            }
-        }
-    }
-
-    let delete_hash: ActionHash = crate::hc::decode(&result)?;
-    Ok(delete_hash.to_string())
-}
-
-#[tauri::command]
-pub async fn cast_vote(
-    state: tauri::State<'_, std::sync::Arc<AppState>>,
-    poll_action_hash: String,
-    option_index: u32,
-    // "1.0", "1.1", or "1.2" — routes the vote to the correct DHT cell.
-    // Obtained from dna_version on PollListItem or PollDetail.
-    dna_version: String,
-    // "Anonymous" or "Public" — only relevant for dna_version "1.2".
-    poll_type: Option<String>,
-) -> Result<String, String> {
-    log::info!(
-        "cast_vote: dna_version={}, poll_type={:?}, option_index={}",
-        dna_version, poll_type, option_index,
-    );
-    // Tier-1 gate: a public vote publishes the CACHED display name/photo -
-    // material this install already holds for its linked identity - so a
-    // signed-in install suffices. The cache itself only ever refreshes
-    // under the strict gate, and a different identity demonstrably present
-    // still refuses.
-    require_identity_link(&state).await?;
-    let cached = load_cached_profile(&state.data_dir);
-    log::info!(
-        "cast_vote: identity link present, cached profile: display_name={:?}, has_picture={}",
-        cached.as_ref().and_then(|p| p.display_name.as_deref()),
-        cached.as_ref().and_then(|p| p.profile_picture.as_deref()).is_some(),
-    );
-
-    let hash = ActionHash::try_from(poll_action_hash)
-        .map_err(|e| format!("Invalid action hash: {:?}", e))?;
-
-    let action_hash: ActionHash = if dna_version == "1.0" {
-        // Vote on a legacy poll — write to v1.0 DHT (no display_name field).
-        let input = CastVoteInput {
-            poll_action_hash: hash,
-            option_index,
-            display_name: None,
-            profile_picture: None,
-        };
-        let payload = crate::hc::encode(&input)?;
-        let client = state.app_client_v1_0.lock().await;
-        let client = client.as_ref().ok_or("v1.0 conductor not available")?;
-        let result = call_zome(client, POLLS_ZOME, "cast_vote", payload).await?;
-        crate::hc::decode(&result)?
-    } else if dna_version == "1.1" {
-        // Vote on a v1.1 poll — write to v1.1 DHT (no display_name field).
-        let input = CastVoteInput {
-            poll_action_hash: hash,
-            option_index,
-            display_name: None,
-            profile_picture: None,
-        };
-        let payload = crate::hc::encode(&input)?;
-        let client = state.app_client_v1_1.lock().await;
-        let client = client.as_ref().ok_or("v1.1 conductor not available")?;
-        let result = call_zome(client, POLLS_ZOME, "cast_vote", payload).await?;
-        crate::hc::decode(&result)?
-    } else if dna_version == "1.2" {
-        // Vote on a v1.2 poll — include profile for public polls.
-        let (display_name, profile_picture) = if poll_type.as_deref() == Some("Public") {
-            let profile = load_cached_profile(&state.data_dir);
-            let dn = profile.as_ref().and_then(|p| p.display_name.clone());
-            let pp = profile.as_ref().and_then(|p| p.profile_picture.clone());
-            (dn, pp)
-        } else {
-            (None, None)
-        };
-        let input = CastVoteInput {
-            poll_action_hash: hash,
-            option_index,
-            display_name,
-            profile_picture,
-        };
-        let payload = crate::hc::encode(&input)?;
-        let client = state.app_client_v1_2.lock().await;
-        let client = client.as_ref().ok_or("v1.2 conductor not available")?;
-        let result = call_zome(client, POLLS_ZOME, "cast_vote", payload).await?;
-        crate::hc::decode(&result)?
-    } else if dna_version == "1.3" || dna_version == "1.4" {
-        // Vote on a poll not carried to v1.5 yet: it lands on the poll's own
-        // network, and the move carries it once the poll can come.
-        let (display_name, profile_picture) = if poll_type.as_deref() == Some("Public") {
-            let profile = load_cached_profile(&state.data_dir);
-            let dn = profile.as_ref().and_then(|p| p.display_name.clone());
-            let pp = profile.as_ref().and_then(|p| p.profile_picture.clone());
-            (dn, pp)
-        } else {
-            (None, None)
-        };
-        let input = CastVoteInput {
-            poll_action_hash: hash,
-            option_index,
-            display_name,
-            profile_picture,
-        };
-        let payload = crate::hc::encode(&input)?;
-        let client = client_for(&state, &dna_version).lock().await;
-        let client = client.as_ref().ok_or(format!("The v{} network is not available", dna_version))?;
-        let result = call_zome(client, POLLS_ZOME, "cast_vote", payload).await?;
-        crate::carry_move::reopen(&state.data_dir);
-        crate::hc::decode(&result)?
-    } else {
-        // A poll on the active network (v1.5) — include profile for public polls.
-        let (display_name, profile_picture) = if poll_type.as_deref() == Some("Public") {
-            let profile = load_cached_profile(&state.data_dir);
-            let dn = profile.as_ref().and_then(|p| p.display_name.clone());
-            let pp = profile.as_ref().and_then(|p| p.profile_picture.clone());
-            (dn, pp)
-        } else {
-            (None, None)
-        };
-        let input = CastVoteInput {
-            poll_action_hash: hash,
-            option_index,
-            display_name,
-            profile_picture,
-        };
-        let payload = crate::hc::encode(&input)?;
-        let client = state.app_client.lock().await;
-        let client = client.as_ref().ok_or("Conductor not ready")?;
-        let result = call_zome(client, POLLS_ZOME, "cast_vote", payload).await?;
-        crate::hc::decode(&result)?
-    };
-
-    Ok(action_hash.to_string())
-}
-
-/// The v1.3 poll a v1.4 poll was migrated from: from the map `get_all_polls`
-/// keeps, read once from the active line when it is not loaded yet.
-/// The client of the network a poll of `dna_version` lives on ("1.5" and
-/// unknown versions: the active one).
-fn client_for<'a>(state: &'a AppState, dna_version: &str) -> &'a tokio::sync::Mutex<Option<crate::hc::AppClient>> {
-    match dna_version {
-        "1.0" => &state.app_client_v1_0,
-        "1.1" => &state.app_client_v1_1,
-        "1.2" => &state.app_client_v1_2,
-        "1.3" => &state.app_client_v1_3,
-        "1.4" => &state.app_client_v1_4,
-        _ => &state.app_client,
-    }
-}
-
-/// A poll's flag records on one network (on the active one, what this
-/// device holds when the network does not answer in time).
-async fn flag_records(
-    slot: &tokio::sync::Mutex<Option<crate::hc::AppClient>>,
-    poll: &ActionHash,
-    active: bool,
-) -> Result<Vec<crate::hc::RecordView>, String> {
-    let client = slot.lock().await;
-    let client = client.as_ref().ok_or("This poll's network is not available")?;
-    let payload = crate::hc::encode(poll)?;
-    let result = if active {
-        read_or_local(client, "get_poll_flags", payload).await?
-    } else {
-        call_zome(client, POLLS_ZOME, "get_poll_flags", payload).await?
-    };
-    crate::hc::records(client.line(), &result)
-}
-
-/// The older hashes a poll on the active network came from, from the map
-/// `get_all_polls` keeps (read once from the active line when not loaded).
-async fn olds_of(state: &AppState, new_hash: &str) -> Vec<ActionHash> {
-    let cached = state.migrated_from.lock().unwrap().as_ref().map(|m| m.get(new_hash).cloned().unwrap_or_default());
-    let olds = match cached {
-        Some(found) => found,
-        None => {
-            let client = state.app_client.lock().await;
-            let Some(client) = client.as_ref() else { return Vec::new() };
-            let Ok(payload) = crate::hc::encode(&()) else { return Vec::new() };
-            let Ok(r) = read_or_local(client, "get_all_migration_mappings", payload).await else { return Vec::new() };
-            let mut from = std::collections::HashMap::<String, Vec<String>>::new();
-            for rec in crate::hc::records(client.line(), &r).unwrap_or_default() {
-                if let Ok(entry) = decode_entry::<MigratedPollEntry>(&rec) {
-                    from.entry(entry.new_action_hash.to_string()).or_default().push(entry.old_action_hash.to_string());
-                }
-            }
-            let found = from.get(new_hash).cloned().unwrap_or_default();
-            *state.migrated_from.lock().unwrap() = Some(from);
-            found
-        }
-    };
-    olds.into_iter().filter_map(|o| ActionHash::try_from(o).ok()).collect()
-}
-
-/// The records `fn_name` (votes or flags) returns for `poll` on every older
-/// line that may hold some under one of its older hashes (v1.4, v1.3), each
-/// read waiting at most [`LIST_WAIT_SECS`].
-async fn on_older_lines(state: &AppState, olds: &[ActionHash], fn_name: &str) -> Vec<crate::hc::RecordView> {
-    let mut out = Vec::new();
-    for slot in [&state.app_client_v1_4, &state.app_client_v1_3] {
-        let client = slot.lock().await;
-        let Some(client) = client.as_ref() else { continue };
-        for old in olds {
-            let Ok(payload) = crate::hc::encode(old) else { continue };
-            match call_zome_within(client, POLLS_ZOME, fn_name, payload, LIST_WAIT_SECS).await {
-                Ok(r) => out.extend(crate::hc::records(client.line(), &r).unwrap_or_default()),
-                Err(e) => log::debug!("[{}] an older copy was not read: {}", fn_name, e),
-            }
-        }
-    }
-    out
-}
-
-/// Each voter key's linked identities (the Vault keys it links to on any
-/// network), kept ten minutes: a person's keys share their identity.
-static IDENTITIES: Mutex<Option<std::collections::HashMap<String, (std::time::Instant, Vec<String>)>>> = Mutex::new(None);
-
-async fn identities_of(state: &std::sync::Arc<AppState>, key: &str) -> Vec<String> {
-    let cached = IDENTITIES.lock().unwrap().as_ref().and_then(|m| m.get(key).cloned());
-    if let Some((at, ids)) = &cached {
-        if at.elapsed() < std::time::Duration::from_secs(600) {
-            return ids.clone();
-        }
-    }
-    let Ok(agent) = AgentPubKey::try_from(key.to_string()) else { return Vec::new() };
-    let lookup = async {
-        let mut ids: Vec<String> = Vec::new();
-        for network in LINK_NETWORKS {
-            for h in hubs_on(state, &agent, network).await {
-                let h = h.to_string();
-                if !ids.contains(&h) {
-                    ids.push(h);
-                }
-            }
-        }
-        ids
-    };
-    // At most LIST_WAIT_SECS, as the reads it counts: then the last answer
-    // kept, or the key alone, and asked again next time.
-    let Ok(ids) = tokio::time::timeout(std::time::Duration::from_secs(LIST_WAIT_SECS), lookup).await else {
-        log::debug!("[identity] {}'s linked identities did not come in {} s", key, LIST_WAIT_SECS);
-        return cached.map(|(_, ids)| ids).unwrap_or_default();
-    };
-    IDENTITIES.lock().unwrap().get_or_insert_with(Default::default).insert(key.to_string(), (std::time::Instant::now(), ids.clone()));
-    ids
-}
-
-/// One record per person: keys linked to one identity are one person (two
-/// installs, or one install's two keys), and the first record of each is
-/// kept (the active network's come first). `voter` is whom a record counts
-/// for.
-async fn once_per_person(
-    state: &std::sync::Arc<AppState>,
-    records: Vec<crate::hc::RecordView>,
-    voter: impl Fn(&crate::hc::RecordView) -> String,
-) -> Vec<crate::hc::RecordView> {
-    // Each distinct voter's identities, looked up side by side.
-    let keys: Vec<String> = records.iter().map(&voter).collect();
-    let mut lookups = tokio::task::JoinSet::new();
-    for key in keys.iter().cloned().collect::<std::collections::HashSet<_>>() {
-        let state = state.clone();
-        lookups.spawn(async move {
-            let ids = identities_of(&state, &key).await;
-            (key, ids)
-        });
-    }
-    let mut identities = std::collections::HashMap::<String, Vec<String>>::new();
-    while let Some(Ok((key, ids))) = lookups.join_next().await {
-        identities.insert(key, ids);
-    }
-    let mut seen = std::collections::HashSet::<String>::new();
-    let mut out = Vec::new();
-    for (rec, key) in records.into_iter().zip(keys) {
-        let mut person = identities.get(&key).cloned().unwrap_or_default();
-        person.push(key);
-        if person.iter().any(|p| seen.contains(p)) {
-            continue;
-        }
-        seen.extend(person);
-        out.push(rec);
-    }
-    out
-}
-
-#[tauri::command]
-pub async fn get_poll_votes(
-    state: tauri::State<'_, std::sync::Arc<AppState>>,
-    poll_action_hash: String,
-    // The poll's dna_version (from PollListItem or PollDetail): votes are
-    // read from its network.
-    dna_version: String,
-) -> Result<Vec<VoteData>, String> {
-    let hash = ActionHash::try_from(poll_action_hash)
-        .map_err(|e| format!("Invalid action hash: {:?}", e))?;
-    let payload = crate::hc::encode(&hash)?;
-    let active = !matches!(dna_version.as_str(), "1.0" | "1.1" | "1.2" | "1.3" | "1.4");
-
-    let mut records: Vec<crate::hc::RecordView> = {
-        let client = client_for(&state, &dna_version).lock().await;
-        let client = client.as_ref().ok_or(format!("The v{} network is not available", dna_version))?;
-        let result = if active {
-            read_or_local(client, "get_poll_votes", payload).await?
-        } else {
-            call_zome(client, POLLS_ZOME, "get_poll_votes", payload).await?
-        };
-        crate::hc::records(client.line(), &result)?
-    };
-    // A poll on the active network: add the votes still on an older line
-    // under one of its older hashes (not carried yet), by anyone with no
-    // vote here. A carried vote counts for the voter its proof names.
-    if active {
-        let olds = olds_of(&state, &hash.to_string()).await;
-        if !olds.is_empty() {
-            let mut here: std::collections::HashSet<String> = records
-                .iter()
-                .map(|r| counted_author(r, &decode_entry::<Vote>(r).ok().and_then(|v| v.carried_from)))
-                .collect();
-            for rec in on_older_lines(&state, &olds, "get_poll_votes").await {
-                if here.insert(rec.author.clone()) {
-                    records.push(rec);
-                }
-            }
-        }
-    }
-    // Once per person.
-    let records = once_per_person(state.inner(), records, |r| counted_author(r, &decode_entry::<Vote>(r).ok().and_then(|v| v.carried_from))).await;
-
-    let mut votes = Vec::new();
-    for record in &records {
-        let vote: Vote = decode_entry(record)?;
-        votes.push(VoteData {
-            vote: VoteResponse {
-                hash: record.action_hash.clone(),
-                poll_action_hash: vote.poll_action_hash.to_string(),
-                option_index: vote.option_index,
-            },
-            author: counted_author(record, &vote.carried_from),
-            display_name: vote.display_name,
-            profile_picture: vote.profile_picture,
-        });
-    }
-    Ok(votes)
-}
-
 // ── Identity link persistence (Flowsta infrastructure — keep as-is) ───
 //
 // The identity link is persisted to a JSON file so the app can detect
@@ -1276,7 +505,7 @@ pub struct IdentityLinkData {
     pub linked_at: i64,
 }
 
-fn identity_link_path(data_dir: &std::path::Path) -> PathBuf {
+pub(crate) fn identity_link_path(data_dir: &std::path::Path) -> PathBuf {
     data_dir.join("identity-link.json")
 }
 
@@ -1286,7 +515,7 @@ pub(crate) fn load_identity_link(data_dir: &std::path::Path) -> Option<IdentityL
     serde_json::from_str(&json).ok()
 }
 
-fn save_identity_link(data_dir: &std::path::Path, data: &IdentityLinkData) {
+pub(crate) fn save_identity_link(data_dir: &std::path::Path, data: &IdentityLinkData) {
     let path = identity_link_path(data_dir);
     if let Ok(json) = serde_json::to_string_pretty(data) {
         let _ = std::fs::write(path, json);
@@ -1310,24 +539,24 @@ pub struct CachedProfile {
     pub profile_picture: Option<String>,
 }
 
-fn profile_cache_path(data_dir: &std::path::Path) -> PathBuf {
+pub(crate) fn profile_cache_path(data_dir: &std::path::Path) -> PathBuf {
     data_dir.join("profile-cache.json")
 }
 
-fn load_cached_profile(data_dir: &std::path::Path) -> Option<CachedProfile> {
+pub(crate) fn load_cached_profile(data_dir: &std::path::Path) -> Option<CachedProfile> {
     let path = profile_cache_path(data_dir);
     let json = std::fs::read_to_string(path).ok()?;
     serde_json::from_str(&json).ok()
 }
 
-fn save_cached_profile(data_dir: &std::path::Path, profile: &CachedProfile) {
+pub(crate) fn save_cached_profile(data_dir: &std::path::Path, profile: &CachedProfile) {
     let path = profile_cache_path(data_dir);
     if let Ok(json) = serde_json::to_string_pretty(profile) {
         let _ = std::fs::write(path, json);
     }
 }
 
-fn delete_identity_link(data_dir: &std::path::Path) {
+pub(crate) fn delete_identity_link(data_dir: &std::path::Path) {
     let path = identity_link_path(data_dir);
     let _ = std::fs::remove_file(path);
 }
@@ -1825,7 +1054,7 @@ pub async fn get_export_data(
 /// string parser (BadChecksum), even though its raw bytes are a valid key. The
 /// zome hands keys back as valid bytes, so chaining from those always works.
 /// Locks the app client itself; callers must NOT already hold that lock.
-async fn linked_agent_keys(
+pub(crate) async fn linked_agent_keys(
     state: &std::sync::Arc<AppState>,
     agent: &AgentPubKey,
 ) -> Result<Vec<AgentPubKey>, String> {
@@ -1834,7 +1063,7 @@ async fn linked_agent_keys(
     linked_agent_keys_with(client, agent).await
 }
 
-async fn linked_agent_keys_with(
+pub(crate) async fn linked_agent_keys_with(
     client: &crate::hc::AppClient,
     agent: &AgentPubKey,
 ) -> Result<Vec<AgentPubKey>, String> {
@@ -1848,11 +1077,11 @@ async fn linked_agent_keys_with(
 /// so while those lines run the identity's agent set is the UNION of every
 /// answer. Without it, every vote cast by an older install of the same
 /// person would stop reading as theirs the moment they upgraded.
-const LINK_NETWORKS: [&str; 3] = ["active", "v1.4", "v1.3"];
+pub(crate) const LINK_NETWORKS: [&str; 3] = ["active", "v1.4", "v1.3"];
 
 /// The agents linked to `agent` on one network (on the active one, its own
 /// links and those carried there); `None` when that line is not running.
-async fn linked_on(
+pub(crate) async fn linked_on(
     state: &std::sync::Arc<AppState>,
     network: &str,
     agent: &AgentPubKey,
@@ -1879,7 +1108,7 @@ async fn linked_on(
 /// The hubs (Vault identities) this agent is linked to on one network, or
 /// nothing when that network is not running or not ready yet (logged, not
 /// raised: the caller re-runs on its interval).
-async fn hubs_on(
+pub(crate) async fn hubs_on(
     state: &std::sync::Arc<AppState>,
     local: &AgentPubKey,
     network: &str,
@@ -1899,7 +1128,7 @@ async fn hubs_on(
 /// networks too, or the identity's older installs (linked there before the
 /// upgrade) never read as the same person on the new device (seen on a Mac
 /// on 0.5.0-beta.3, 2026-10-25).
-async fn fold_siblings_on(
+pub(crate) async fn fold_siblings_on(
     state: &std::sync::Arc<AppState>,
     hub: &AgentPubKey,
     network: &str,
@@ -1946,7 +1175,7 @@ pub(crate) async fn identity_linked_on_active_inner(
 
 /// By the key itself: the saved identity key comes from the Vault as text,
 /// and its location bytes need not match the network's copy.
-fn links_this_identity(linked: &[AgentPubKey], identity: Option<&AgentPubKey>) -> bool {
+pub(crate) fn links_this_identity(linked: &[AgentPubKey], identity: Option<&AgentPubKey>) -> bool {
     match identity {
         Some(identity) => linked.iter().any(|k| k.get_raw_32() == identity.get_raw_32()),
         None => !linked.is_empty(),
@@ -1983,7 +1212,7 @@ pub async fn get_linked_agents(
 
 /// Last set logged by `get_my_agent_set`, so we log only when it changes
 /// (the command runs ~every 30s; logging every call would spam the log).
-static LAST_AGENT_SET: std::sync::Mutex<Option<Vec<String>>> = std::sync::Mutex::new(None);
+pub(crate) static LAST_AGENT_SET: std::sync::Mutex<Option<Vec<String>>> = std::sync::Mutex::new(None);
 
 /// Every Holochain agent key that belongs to THIS user: the local conductor
 /// agent plus every other ProofPoll agent linked to the same Flowsta Vault
@@ -2067,184 +1296,6 @@ pub async fn get_my_agent_set(
     Ok(out)
 }
 
-// ── Flag types and commands (v1.1 — replace with your moderation system) ──
-//
-// Community flagging: users can flag content with a reason. The UI hides
-// content that exceeds a configurable flag threshold. Data is never deleted
-// from the DHT — censorship resistance is preserved at the data layer,
-// moderation happens at the UI layer.
-
-#[derive(serde::Serialize, Clone)]
-pub struct FlagData {
-    pub hash: String,
-    pub flag: FlagResponse,
-    pub author: String,
-}
-
-#[derive(serde::Serialize, Clone)]
-pub struct FlagResponse {
-    pub poll_action_hash: String,
-    pub reason: String,
-    pub created_at: i64,
-}
-
-#[derive(serde::Deserialize)]
-struct FlagEntry {
-    poll_action_hash: ActionHash,
-    reason: FlagReason,
-    created_at: i64,
-    /// v1.5: where a carried flag came from.
-    #[serde(default)]
-    carried_from: Option<Origin>,
-}
-
-#[derive(serde::Deserialize, Debug)]
-enum FlagReason {
-    Spam,
-    Misleading,
-    OffTopic,
-    Inappropriate,
-}
-
-impl std::fmt::Display for FlagReason {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            FlagReason::Spam => write!(f, "Spam"),
-            FlagReason::Misleading => write!(f, "Misleading"),
-            FlagReason::OffTopic => write!(f, "OffTopic"),
-            FlagReason::Inappropriate => write!(f, "Inappropriate"),
-        }
-    }
-}
-
-#[derive(serde::Serialize, serde::Deserialize, Debug)]
-struct FlagPollInput {
-    poll_action_hash: ActionHash,
-    reason: String,
-}
-
-#[tauri::command]
-pub async fn flag_poll(
-    state: tauri::State<'_, std::sync::Arc<AppState>>,
-    poll_action_hash: String,
-    reason: String,
-    dna_version: Option<String>,
-) -> Result<String, String> {
-    // Tier-1 gate: signed-in install, no unlock required - but never while
-    // a different identity's Vault is open. See require_identity_link.
-    require_identity_link(&state).await?;
-
-    // On the poll's own network: its coordinator refuses a poll it cannot
-    // find there ("Poll not found" for every v1.3 poll before).
-    let client = client_for(&state, dna_version.as_deref().unwrap_or_default()).lock().await;
-    let client = client.as_ref().ok_or("This poll's network is not available")?;
-
-    let hash = ActionHash::try_from(poll_action_hash)
-        .map_err(|e| format!("Invalid action hash: {:?}", e))?;
-
-    #[derive(serde::Serialize, Debug)]
-    struct ZomeFlagInput {
-        poll_action_hash: ActionHash,
-        reason: serde_json::Value,
-    }
-
-    let zome_input = ZomeFlagInput {
-        poll_action_hash: hash,
-        reason: serde_json::Value::String(reason),
-    };
-
-    let payload = crate::hc::encode(&zome_input)?;
-    let result = call_zome(client, POLLS_ZOME, "flag_poll", payload).await?;
-    if matches!(dna_version.as_deref(), Some("1.3" | "1.4")) {
-        // The move carries it once the poll can come.
-        crate::carry_move::reopen(&state.data_dir);
-    }
-
-    let action_hash: ActionHash = crate::hc::decode(&result)?;
-    Ok(action_hash.to_string())
-}
-
-#[tauri::command]
-pub async fn get_poll_flags(
-    state: tauri::State<'_, std::sync::Arc<AppState>>,
-    poll_action_hash: String,
-    // The poll's dna_version: its flags live on its own network. None =
-    // the active one.
-    dna_version: Option<String>,
-) -> Result<Vec<FlagData>, String> {
-    let hash = ActionHash::try_from(poll_action_hash)
-        .map_err(|e| format!("Invalid action hash: {:?}", e))?;
-    let version = dna_version.unwrap_or_default();
-    let active = !matches!(version.as_str(), "1.0" | "1.1" | "1.2" | "1.3" | "1.4");
-    let mut records = flag_records(client_for(&state, &version), &hash, active).await?;
-    // A poll on the active network: add the flags still on an older line
-    // under one of its older hashes, by anyone with no flag here.
-    if active {
-        let olds = olds_of(&state, &hash.to_string()).await;
-        if !olds.is_empty() {
-            let mut here: std::collections::HashSet<String> = records
-                .iter()
-                .map(|r| counted_author(r, &decode_entry::<FlagEntry>(r).ok().and_then(|f| f.carried_from)))
-                .collect();
-            for rec in on_older_lines(&state, &olds, "get_poll_flags").await {
-                if here.insert(rec.author.clone()) {
-                    records.push(rec);
-                }
-            }
-        }
-    }
-    // Once per person (the hide threshold counts people).
-    let records = once_per_person(state.inner(), records, |r| counted_author(r, &decode_entry::<FlagEntry>(r).ok().and_then(|f| f.carried_from))).await;
-    let mut flags = Vec::new();
-    for record in &records {
-        let flag: FlagEntry = decode_entry(record)?;
-        flags.push(FlagData {
-            hash: record.action_hash.clone(),
-            flag: FlagResponse {
-                poll_action_hash: flag.poll_action_hash.to_string(),
-                reason: format!("{}", flag.reason),
-                created_at: flag.created_at,
-            },
-            author: counted_author(record, &flag.carried_from),
-        });
-    }
-    Ok(flags)
-}
-
-#[tauri::command]
-pub async fn remove_flag(
-    state: tauri::State<'_, std::sync::Arc<AppState>>,
-    flag_action_hash: String,
-    // The flagged poll's dna_version (the flag is on that network).
-    dna_version: Option<String>,
-) -> Result<String, String> {
-    require_identity_link(&state).await?;
-    let client = client_for(&state, dna_version.as_deref().unwrap_or_default()).lock().await;
-    let client = client.as_ref().ok_or("This poll's network is not available")?;
-
-    let hash = ActionHash::try_from(flag_action_hash)
-        .map_err(|e| format!("Invalid action hash: {:?}", e))?;
-    let payload = crate::hc::encode(&hash)?;
-    let result = call_zome(client, POLLS_ZOME, "remove_flag", payload).await?;
-
-    let delete_hash: ActionHash = crate::hc::decode(&result)?;
-    Ok(delete_hash.to_string())
-}
-
-#[tauri::command]
-pub async fn get_flag_threshold(
-    state: tauri::State<'_, std::sync::Arc<AppState>>,
-) -> Result<u32, String> {
-    let client = state.app_client.lock().await;
-    let client = client.as_ref().ok_or("Conductor not ready")?;
-
-    let payload = crate::hc::encode(&())?;
-    let result = call_zome(client, POLLS_ZOME, "get_flag_threshold", payload).await?;
-
-    let threshold: u32 = crate::hc::decode(&result)?;
-    Ok(threshold)
-}
-
 // ── Migration status commands (infrastructure — keep as-is) ───────────
 //
 // These let the frontend show migration progress to the user.
@@ -2256,349 +1307,6 @@ pub async fn get_migration_status(
 ) -> Result<crate::migration::MigrationState, String> {
     let state = state.migration_state.lock().await;
     Ok(state.clone())
-}
-
-// ── Encrypted entry commands (v1.3) ──────────────────────────────────
-
-/// Extract the raw 32-byte Ed25519 public key from the agent key string.
-/// AgentPubKey is 39 bytes: 3-byte prefix + 32-byte key + 4-byte DHT location.
-fn get_agent_ed25519_bytes(state: &AppState) -> Result<[u8; 32], String> {
-    let key_str = state
-        .agent_pub_key
-        .lock()
-        .unwrap()
-        .clone()
-        .ok_or("Agent key not available")?;
-    let agent_key = parse_agent_pub_key_string(&key_str)?;
-    let raw = agent_key.get_raw_39();
-    let mut bytes = [0u8; 32];
-    bytes.copy_from_slice(&raw[3..35]);
-    Ok(bytes)
-}
-
-/// Encrypted entry as decoded from a DHT Record.
-#[derive(serde::Deserialize)]
-struct EncryptedEntryData {
-    cipher: Vec<u8>,
-    nonce: Vec<u8>,
-    entry_type_hint: String,
-    related_hash: Option<ActionHash>,
-}
-
-/// Draft poll as returned to the frontend (decrypted).
-#[derive(serde::Serialize)]
-pub struct DraftPollItem {
-    pub hash: String,
-    pub title: String,
-    pub description: String,
-    pub options: Vec<String>,
-    pub closes_at: Option<i64>,
-    pub poll_type: String,
-    pub created_at: i64,
-}
-
-/// Save a private vote rationale (encrypted on the DHT).
-#[tauri::command]
-pub async fn save_vote_rationale(
-    state: tauri::State<'_, std::sync::Arc<AppState>>,
-    vote_action_hash: String,
-    rationale_text: String,
-) -> Result<String, String> {
-    // Encrypted, but its LINK to the vote is public - "this agent
-    // rationalized this vote" is identity-bearing. Same gate.
-    require_identity_link(&state).await?;
-    let agent_bytes = get_agent_ed25519_bytes(&state)?;
-
-    // Encrypt the rationale — acquire lair first, then app client (lock ordering)
-    let (nonce, cipher) = {
-        let lair = state.lair_client.lock().await;
-        let lair = lair.as_ref().ok_or("Lair not connected")?;
-        crate::crypto::encrypt_to_self(lair, agent_bytes, rationale_text.as_bytes()).await?
-    };
-
-    let vote_hash = parse_action_hash(&vote_action_hash)?;
-
-    #[derive(serde::Serialize, Debug)]
-    struct Input {
-        cipher: Vec<u8>,
-        nonce: Vec<u8>,
-        link_as: String,
-        related_hash: Option<ActionHash>,
-    }
-
-    let input = Input {
-        cipher,
-        nonce: nonce.to_vec(),
-        link_as: "vote_rationale".to_string(),
-        related_hash: Some(vote_hash),
-    };
-
-    let client = state.app_client.lock().await;
-    let client = client.as_ref().ok_or("Conductor not ready")?;
-    let payload = crate::hc::encode(&input)?;
-    let result = call_zome(client, POLLS_ZOME, "create_encrypted_entry", payload).await?;
-    let hash: ActionHash = crate::hc::decode(&result)?;
-    Ok(hash.to_string())
-}
-
-/// Get and decrypt a vote rationale.
-#[tauri::command]
-pub async fn get_vote_rationale(
-    state: tauri::State<'_, std::sync::Arc<AppState>>,
-    vote_action_hash: String,
-) -> Result<Option<String>, String> {
-    let vote_hash = parse_action_hash(&vote_action_hash)?;
-    let payload = crate::hc::encode(&vote_hash)?;
-
-    let record = {
-        let client = state.app_client.lock().await;
-        let client = client.as_ref().ok_or("Conductor not ready")?;
-        let result = call_zome(client, POLLS_ZOME, "get_vote_rationale", payload.clone()).await?;
-        crate::hc::record_opt(client.line(), &result)?
-    };
-    // A vote still on an older network (not carried yet) keeps its reason
-    // there.
-    let mut record = record;
-    for slot in [&state.app_client_v1_4, &state.app_client_v1_3] {
-        if record.is_some() {
-            break;
-        }
-        let client = slot.lock().await;
-        if let Some(c) = client.as_ref() {
-            if let Ok(result) = call_zome(c, POLLS_ZOME, "get_vote_rationale", payload.clone()).await {
-                record = crate::hc::record_opt(c.line(), &result).unwrap_or(None);
-            }
-        }
-    }
-
-    let record = match record {
-        Some(r) => r,
-        None => return Ok(None),
-    };
-
-    // Only decrypt if this install wrote it (under either of its keys: the
-    // 0.7 line's differs when the 0.6 one was conductor-born; the ciphertext
-    // is to the 0.6 key either way).
-    let mine = [state.agent_pub_key.lock().unwrap().clone(), state.agent_pub_key_07.lock().unwrap().clone()];
-    if !mine.iter().any(|k| k.as_deref() == Some(record.author.as_str())) {
-        return Ok(None);
-    }
-
-    let ee: EncryptedEntryData = decode_entry(&record)?;
-    let agent_bytes = get_agent_ed25519_bytes(&state)?;
-
-    let mut nonce = [0u8; 24];
-    if ee.nonce.len() != 24 {
-        return Err("Invalid nonce length".into());
-    }
-    nonce.copy_from_slice(&ee.nonce);
-
-    let lair = state.lair_client.lock().await;
-    let lair = lair.as_ref().ok_or("Lair not connected")?;
-    let plaintext = crate::crypto::decrypt_from_self(lair, agent_bytes, nonce, &ee.cipher).await?;
-    let text = String::from_utf8(plaintext).map_err(|e| format!("Invalid UTF-8: {}", e))?;
-    Ok(Some(text))
-}
-
-/// Save a draft poll (encrypted on the DHT).
-#[tauri::command]
-pub async fn save_draft_poll(
-    state: tauri::State<'_, std::sync::Arc<AppState>>,
-    title: String,
-    description: String,
-    options: Vec<String>,
-    closes_at: Option<i64>,
-    poll_type: Option<String>,
-) -> Result<String, String> {
-    // Encrypted-to-self, but still authored + timestamped on the shared
-    // DHT under this agent key - same gate as every other write.
-    require_identity_link(&state).await?;
-    let agent_bytes = get_agent_ed25519_bytes(&state)?;
-
-    let draft = serde_json::json!({
-        "title": title,
-        "description": description,
-        "options": options,
-        "closes_at": closes_at,
-        "poll_type": poll_type.unwrap_or_else(|| "Anonymous".to_string()),
-    });
-    let plaintext = serde_json::to_vec(&draft).map_err(|e| e.to_string())?;
-
-    let (nonce, cipher) = {
-        let lair = state.lair_client.lock().await;
-        let lair = lair.as_ref().ok_or("Lair not connected")?;
-        crate::crypto::encrypt_to_self(lair, agent_bytes, &plaintext).await?
-    };
-    #[derive(serde::Serialize, Debug)]
-    struct Input {
-        cipher: Vec<u8>,
-        nonce: Vec<u8>,
-        link_as: String,
-        related_hash: Option<ActionHash>,
-    }
-
-    let input = Input {
-        cipher,
-        nonce: nonce.to_vec(),
-        link_as: "draft_poll".to_string(),
-        related_hash: None,
-    };
-
-    let client = state.app_client.lock().await;
-    let client = client.as_ref().ok_or("Conductor not ready")?;
-    let payload = crate::hc::encode(&input)?;
-    let result = call_zome(client, POLLS_ZOME, "create_encrypted_entry", payload).await?;
-    let hash: ActionHash = crate::hc::decode(&result)?;
-    Ok(hash.to_string())
-}
-
-/// Get all draft polls (decrypted).
-#[tauri::command]
-pub async fn get_my_drafts(
-    state: tauri::State<'_, std::sync::Arc<AppState>>,
-) -> Result<Vec<DraftPollItem>, String> {
-    log::info!("get_my_drafts: fetching from DHT...");
-    let records: Vec<crate::hc::RecordView> = {
-        let client = state.app_client.lock().await;
-        let client = client.as_ref().ok_or("Conductor not ready")?;
-        let payload = crate::hc::encode(&())?;
-        let result = call_zome(client, POLLS_ZOME, "get_my_drafts", payload).await?;
-        crate::hc::records(client.line(), &result)?
-    }; // app_client lock released here
-
-    log::info!("get_my_drafts: {} records found, decrypting...", records.len());
-    let agent_bytes = get_agent_ed25519_bytes(&state)?;
-    let lair = state.lair_client.lock().await;
-    let lair = lair.as_ref().ok_or("Lair not connected")?;
-
-    let mut drafts = Vec::new();
-    for record in &records {
-        let hash = record.action_hash.clone();
-        let created_at = record.timestamp_us / 1_000_000;
-
-        let ee: EncryptedEntryData = match decode_entry(record) {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-
-        let mut nonce = [0u8; 24];
-        if ee.nonce.len() != 24 {
-            continue;
-        }
-        nonce.copy_from_slice(&ee.nonce);
-
-        let plaintext = match crate::crypto::decrypt_from_self(lair, agent_bytes, nonce, &ee.cipher).await {
-            Ok(p) => p,
-            Err(e) => {
-                log::warn!("Failed to decrypt draft {}: {}", hash, e);
-                continue;
-            }
-        };
-
-        let draft: serde_json::Value = match serde_json::from_slice(&plaintext) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-
-        drafts.push(DraftPollItem {
-            hash,
-            title: draft["title"].as_str().unwrap_or("").to_string(),
-            description: draft["description"].as_str().unwrap_or("").to_string(),
-            options: draft["options"]
-                .as_array()
-                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-                .unwrap_or_default(),
-            closes_at: draft["closes_at"].as_i64(),
-            poll_type: draft["poll_type"].as_str().unwrap_or("Anonymous").to_string(),
-            created_at,
-        });
-    }
-
-    Ok(drafts)
-}
-
-/// Publish a draft: decrypt it, create a real poll, delete the draft.
-#[tauri::command]
-pub async fn publish_draft(
-    state: tauri::State<'_, std::sync::Arc<AppState>>,
-    draft_action_hash: String,
-) -> Result<String, String> {
-    // Publishing reaches create_poll on the shared DHT - same gate as the
-    // direct path (this command shipped ungated once; never again).
-    require_identity_link(&state).await?;
-    let draft_hash = parse_action_hash(&draft_action_hash)?;
-    let agent_bytes = get_agent_ed25519_bytes(&state)?;
-
-    // Fetch and decrypt the draft
-    let (draft_json, _ee) = {
-        let client = state.app_client.lock().await;
-        let client = client.as_ref().ok_or("Conductor not ready")?;
-        let payload = crate::hc::encode(&draft_hash.clone())?;
-        let result = call_zome(client, POLLS_ZOME, "get_poll", payload).await?;
-        let record = crate::hc::record_opt(client.line(), &result)?;
-        let record = record.ok_or("Draft not found")?;
-
-        let ee: EncryptedEntryData = decode_entry(&record)?;
-        let mut nonce = [0u8; 24];
-        if ee.nonce.len() != 24 {
-            return Err("Invalid nonce".into());
-        }
-        nonce.copy_from_slice(&ee.nonce);
-
-        let lair = state.lair_client.lock().await;
-        let lair = lair.as_ref().ok_or("Lair not connected")?;
-        let plaintext = crate::crypto::decrypt_from_self(lair, agent_bytes, nonce, &ee.cipher).await?;
-        let json: serde_json::Value = serde_json::from_slice(&plaintext)
-            .map_err(|e| format!("Failed to parse draft: {}", e))?;
-        (json, ee)
-    };
-
-    // Create the real poll using the existing CreatePollInput struct
-    let input = CreatePollInput {
-        title: draft_json["title"].as_str().unwrap_or("").to_string(),
-        description: draft_json["description"].as_str().unwrap_or("").to_string(),
-        options: draft_json["options"]
-            .as_array()
-            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-            .unwrap_or_default(),
-        closes_at: draft_json["closes_at"].as_i64(),
-        poll_type: Some(draft_json["poll_type"].as_str().unwrap_or("Anonymous").to_string()),
-    };
-
-    let client = state.app_client.lock().await;
-    let client = client.as_ref().ok_or("Conductor not ready")?;
-    let payload = crate::hc::encode(&input)?;
-    let result = call_zome(client, POLLS_ZOME, "create_poll", payload).await?;
-    let poll_hash: ActionHash = crate::hc::decode(&result)?;
-
-    // Delete the draft
-    let delete_payload = crate::hc::encode(&draft_hash)?;
-    if let Err(e) = call_zome(client, POLLS_ZOME, "delete_encrypted_entry", delete_payload).await {
-        log::warn!("Failed to delete draft after publishing: {}", e);
-    }
-
-    Ok(poll_hash.to_string())
-}
-
-/// Delete a draft poll.
-#[tauri::command]
-pub async fn delete_draft(
-    state: tauri::State<'_, std::sync::Arc<AppState>>,
-    draft_action_hash: String,
-) -> Result<String, String> {
-    require_identity_link(&state).await?;
-    let hash = parse_action_hash(&draft_action_hash)?;
-    let client = state.app_client.lock().await;
-    let client = client.as_ref().ok_or("Conductor not ready")?;
-    let payload = crate::hc::encode(&hash)?;
-    let result = call_zome(client, POLLS_ZOME, "delete_encrypted_entry", payload).await?;
-    let deleted: ActionHash = crate::hc::decode(&result)?;
-    Ok(deleted.to_string())
-}
-
-/// Parse an action hash string into an ActionHash.
-fn parse_action_hash(s: &str) -> Result<ActionHash, String> {
-    ActionHash::try_from(s.to_string()).map_err(|e| format!("Invalid action hash: {:?}", e))
 }
 
 // ── CAL-compliant backup helpers (v0.2.0+) ────────────────────────
@@ -2994,7 +1702,7 @@ pub async fn build_canonical_backup(
 ///   integrity zomes: [0] agent_linking_integrity, [1] polls_integrity
 ///   polls_integrity EntryTypes: [0] Poll [1] Vote [2] Flag [3] MigratedPoll [4] EncryptedEntry
 /// A draft's or reason's (cipher, nonce), for a v1.4 or v1.5 record.
-fn private_of(rec: &holochain_state_types_07::SourceChainDumpRecord) -> Option<(Vec<u8>, Vec<u8>)> {
+pub(crate) fn private_of(rec: &holochain_state_types_07::SourceChainDumpRecord) -> Option<(Vec<u8>, Vec<u8>)> {
     use holochain_integrity_types_07::action::EntryType;
     #[derive(serde::Deserialize)]
     struct Private {
@@ -3010,7 +1718,7 @@ fn private_of(rec: &holochain_state_types_07::SourceChainDumpRecord) -> Option<(
 }
 
 /// A v1.5 poll, vote or flag carried from an older line.
-fn is_carried(rec: &holochain_state_types_07::SourceChainDumpRecord) -> bool {
+pub(crate) fn is_carried(rec: &holochain_state_types_07::SourceChainDumpRecord) -> bool {
     #[derive(serde::Deserialize)]
     struct Carried {
         #[serde(default)]
@@ -3023,7 +1731,7 @@ fn is_carried(rec: &holochain_state_types_07::SourceChainDumpRecord) -> bool {
         .is_some_and(|c| c.carried_from.is_some())
 }
 
-fn classify_dump_record(
+pub(crate) fn classify_dump_record(
     rec: &holochain_state_types_07::SourceChainDumpRecord,
 ) -> (String, serde_json::Value) {
     use holochain_integrity_types_07::action::EntryType;
@@ -3055,7 +1763,7 @@ fn classify_dump_record(
 
 /// The `(zome_index, entry_index)` table of [`classify_dump_record`], the
 /// same on both lines (v1.4 keeps v1.3's zome and entry order).
-fn classify_app_entry(zome: u8, entry_idx: u8, entry_bytes: Option<&[u8]>) -> (String, serde_json::Value) {
+pub(crate) fn classify_app_entry(zome: u8, entry_idx: u8, entry_bytes: Option<&[u8]>) -> (String, serde_json::Value) {
     match (zome, entry_idx) {
         // polls_integrity (zome index 1)
         (1, 0) => decode_named::<Poll>("Poll", entry_bytes),
@@ -3080,7 +1788,7 @@ fn classify_app_entry(zome: u8, entry_idx: u8, entry_bytes: Option<&[u8]>) -> (S
 /// (name, json) on success, or (name, null) if bytes are absent or undecodable
 /// — the record is still kept (with its signed raw_record) so the export stays
 /// a complete copy of the chain.
-fn decode_named<T: serde::de::DeserializeOwned + serde::Serialize>(
+pub(crate) fn decode_named<T: serde::de::DeserializeOwned + serde::Serialize>(
     name: &str,
     entry_bytes: Option<&[u8]>,
 ) -> (String, serde_json::Value) {
@@ -3093,7 +1801,7 @@ fn decode_named<T: serde::de::DeserializeOwned + serde::Serialize>(
 
 /// Best-effort label for a system (entry-less) action, used only for
 /// diagnostics in the backup — never shown as user data.
-fn action_variant_label(action: &holochain_integrity_types_07::action::Action) -> String {
+pub(crate) fn action_variant_label(action: &holochain_integrity_types_07::action::Action) -> String {
     // The 0.7 action model: one Action struct, its kind named by ActionType.
     format!("{:?}", action.action_type())
 }
@@ -3132,7 +1840,7 @@ pub(crate) async fn dump_chain_06(state: &AppState) -> Result<Option<holochain_s
 }
 
 /// [`classify_dump_record`] for a v1.3 record (the 0.6 action model).
-fn classify_dump_record_06(rec: &holochain_state_types::SourceChainDumpRecord) -> (String, serde_json::Value) {
+pub(crate) fn classify_dump_record_06(rec: &holochain_state_types::SourceChainDumpRecord) -> (String, serde_json::Value) {
     use holochain_integrity_types::EntryType;
     let app_def = match rec.action.entry_type() {
         Some(EntryType::App(def)) => def,
@@ -3144,7 +1852,7 @@ fn classify_dump_record_06(rec: &holochain_state_types::SourceChainDumpRecord) -
     classify_app_entry(app_def.zome_index.0, app_def.entry_index.0, app_entry_bytes_06(rec))
 }
 
-fn app_entry_bytes_06(rec: &holochain_state_types::SourceChainDumpRecord) -> Option<&[u8]> {
+pub(crate) fn app_entry_bytes_06(rec: &holochain_state_types::SourceChainDumpRecord) -> Option<&[u8]> {
     rec.entry
         .as_ref()
         .and_then(|e| e.as_app_entry())
@@ -3155,10 +1863,10 @@ fn app_entry_bytes_06(rec: &holochain_state_types::SourceChainDumpRecord) -> Opt
 /// hash), the polls whose votes it cast again on v1.4, and the drafts and
 /// vote reasons. Such a record is on both chains and the backup's summary
 /// counts it on the 0.7 one.
-struct Copied06 {
-    polls: std::collections::HashSet<String>,
-    voted_polls: std::collections::HashSet<String>,
-    private: std::collections::HashSet<String>,
+pub(crate) struct Copied06 {
+    pub(crate) polls: std::collections::HashSet<String>,
+    pub(crate) voted_polls: std::collections::HashSet<String>,
+    pub(crate) private: std::collections::HashSet<String>,
 }
 
 impl Copied06 {
@@ -3178,130 +1886,6 @@ impl Copied06 {
             _ => false,
         }
     }
-}
-
-/// Test harness only (feature `harness`): write the shapes ProofPoll 0.4.x
-/// left on v1.3 - a poll, an encrypted draft or vote reason - so the
-/// migration's tests start from real data. Nothing else writes to v1.3.
-#[cfg(feature = "harness")]
-pub(crate) async fn harness_v13_poll(
-    state: &AppState,
-    title: String,
-    description: String,
-    options: Vec<String>,
-    closes_at: Option<i64>,
-    poll_type: Option<String>,
-) -> Result<String, String> {
-    let client = state.app_client_v1_3.lock().await;
-    let client = client.as_ref().ok_or("v1.3 is not running")?;
-    let input = CreatePollInput { title, description, options, closes_at, poll_type: Some(poll_type.unwrap_or_else(|| "Anonymous".to_string())) };
-    let result = call_zome(client, POLLS_ZOME, "create_poll", crate::hc::encode(&input)?).await?;
-    let action_hash: ActionHash = crate::hc::decode(&result)?;
-    Ok(action_hash.to_string())
-}
-
-/// See `harness_v13_poll`: a vote on a v1.3 poll, cast there with no
-/// identity gate (the carrier's test fixtures need one).
-#[cfg(feature = "harness")]
-pub(crate) async fn harness_v13_vote(state: &AppState, poll: String, option_index: u32, display_name: Option<String>) -> Result<String, String> {
-    let client = state.app_client_v1_3.lock().await;
-    let client = client.as_ref().ok_or("v1.3 is not running")?;
-    let poll_action_hash = ActionHash::try_from(poll).map_err(|e| format!("Invalid action hash: {:?}", e))?;
-    let input = CastVoteInput { poll_action_hash, option_index, display_name, profile_picture: None };
-    let result = call_zome(client, POLLS_ZOME, "cast_vote", crate::hc::encode(&input)?).await?;
-    let action_hash: ActionHash = crate::hc::decode(&result)?;
-    Ok(action_hash.to_string())
-}
-
-/// See `harness_v13_poll`: a sign-in as a 0.4.x install made it, the
-/// identity link written on v1.3 and saved here, so the move's tests start
-/// from an install whose only link is on an older version.
-#[cfg(feature = "harness")]
-pub(crate) async fn harness_v13_link(state: &AppState, vault_agent_pub_key: String, vault_signature: String) -> Result<String, String> {
-    #[derive(serde::Serialize, Debug)]
-    struct CreateExternalLinkInput {
-        external_agent: AgentPubKey,
-        external_signature: Vec<u8>,
-    }
-    use base64::Engine;
-    let external_signature = base64::engine::general_purpose::STANDARD
-        .decode(&vault_signature)
-        .map_err(|e| format!("Invalid signature: {}", e))?;
-    let input = CreateExternalLinkInput { external_agent: parse_agent_pub_key_string(&vault_agent_pub_key)?, external_signature };
-    let client = state.app_client_v1_3.lock().await;
-    let client = client.as_ref().ok_or("v1.3 is not running")?;
-    let result = call_zome(client, AGENT_LINKING_ZOME, "create_external_link", crate::hc::encode(&input)?).await?;
-    let action_hash: ActionHash = crate::hc::decode(&result)?;
-    let linked_at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
-    save_identity_link(
-        &state.data_dir,
-        &IdentityLinkData { vault_agent_pub_key: vault_agent_pub_key.clone(), entry_action_hash: action_hash.to_string(), linked_at },
-    );
-    crate::profiles::bind_profile(&state.device_root, &state.data_dir, &vault_agent_pub_key);
-    Ok(action_hash.to_string())
-}
-
-/// See `harness_v13_poll`: a flag on a v1.3 poll, raised there with no
-/// identity gate.
-#[cfg(feature = "harness")]
-pub(crate) async fn harness_v13_flag(state: &AppState, poll: String, reason: String) -> Result<String, String> {
-    #[derive(serde::Serialize, Debug)]
-    struct Input {
-        poll_action_hash: ActionHash,
-        reason: String,
-    }
-    let client = state.app_client_v1_3.lock().await;
-    let client = client.as_ref().ok_or("v1.3 is not running")?;
-    let poll_action_hash = ActionHash::try_from(poll).map_err(|e| format!("Invalid action hash: {:?}", e))?;
-    let result = call_zome(client, POLLS_ZOME, "flag_poll", crate::hc::encode(&Input { poll_action_hash, reason })?).await?;
-    let action_hash: ActionHash = crate::hc::decode(&result)?;
-    Ok(action_hash.to_string())
-}
-
-/// See `harness_v13_poll`: `f` ("delete_poll" or "remove_flag") on a v1.3
-/// record, as its 0.4.x author does.
-#[cfg(feature = "harness")]
-pub(crate) async fn harness_v13_remove(state: &AppState, f: &str, hash: String) -> Result<String, String> {
-    let client = state.app_client_v1_3.lock().await;
-    let client = client.as_ref().ok_or("v1.3 is not running")?;
-    let hash = ActionHash::try_from(hash).map_err(|e| format!("Invalid action hash: {:?}", e))?;
-    let result = call_zome(client, POLLS_ZOME, f, crate::hc::encode(&hash)?).await?;
-    let action_hash: ActionHash = crate::hc::decode(&result)?;
-    Ok(action_hash.to_string())
-}
-
-/// See `harness_v13_poll`: an entry encrypted to this agent, linked as
-/// `link_as` ("draft_poll" or "vote_rationale"), on v1.3.
-#[cfg(feature = "harness")]
-pub(crate) async fn harness_v13_encrypted(
-    state: &AppState,
-    link_as: &str,
-    related_hash: Option<String>,
-    plaintext: Vec<u8>,
-) -> Result<String, String> {
-    let agent_bytes = get_agent_ed25519_bytes(state)?;
-    let (nonce, cipher) = {
-        let lair = state.lair_client.lock().await;
-        let lair = lair.as_ref().ok_or("Lair not connected")?;
-        crate::crypto::encrypt_to_self(lair, agent_bytes, &plaintext).await?
-    };
-    #[derive(serde::Serialize, Debug)]
-    struct Input {
-        cipher: Vec<u8>,
-        nonce: Vec<u8>,
-        link_as: String,
-        related_hash: Option<ActionHash>,
-    }
-    let related_hash = match related_hash {
-        Some(h) => Some(parse_action_hash(&h)?),
-        None => None,
-    };
-    let input = Input { cipher, nonce: nonce.to_vec(), link_as: link_as.to_string(), related_hash };
-    let client = state.app_client_v1_3.lock().await;
-    let client = client.as_ref().ok_or("v1.3 is not running")?;
-    let result = call_zome(client, POLLS_ZOME, "create_encrypted_entry", crate::hc::encode(&input)?).await?;
-    let action_hash: ActionHash = crate::hc::decode(&result)?;
-    Ok(action_hash.to_string())
 }
 
 #[cfg(test)]

@@ -22,6 +22,7 @@
 //! The startup sequence and migration wiring are reusable as-is.
 
 mod commands;
+mod polls;
 mod conductor;
 mod crypto;
 mod dna;
@@ -325,17 +326,17 @@ pub fn run() {
             updater::dismiss_updated,
             updater::restart_to_update,
             // ── Your app commands (replace these) ─────────────────
-            commands::create_poll,
-            commands::get_poll,
-            commands::get_all_polls,
-            commands::delete_poll,
-            commands::cast_vote,
-            commands::get_poll_votes,
+            polls::create_poll,
+            polls::get_poll,
+            polls::get_all_polls,
+            polls::delete_poll,
+            polls::cast_vote,
+            polls::get_poll_votes,
             // ── Community moderation (keep or adapt) ──────────────
-            commands::flag_poll,
-            commands::get_poll_flags,
-            commands::remove_flag,
-            commands::get_flag_threshold,
+            polls::flag_poll,
+            polls::get_poll_flags,
+            polls::remove_flag,
+            polls::get_flag_threshold,
             // ── Flowsta identity linking (keep as-is) ─────────────
             commands::get_cached_profile,
             commands::save_profile_cache,
@@ -360,12 +361,12 @@ pub fn run() {
             seed_adopt::adopt_escrowed_seed,
             seed_adopt::rekey_device_agent,
             // ── Encrypted entries (v1.3) ───────────────────────────
-            commands::save_vote_rationale,
-            commands::get_vote_rationale,
-            commands::save_draft_poll,
-            commands::get_my_drafts,
-            commands::publish_draft,
-            commands::delete_draft,
+            polls::save_vote_rationale,
+            polls::get_vote_rationale,
+            polls::save_draft_poll,
+            polls::get_my_drafts,
+            polls::publish_draft,
+            polls::delete_draft,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

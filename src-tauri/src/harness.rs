@@ -14,6 +14,7 @@ use std::sync::Arc;
 use tauri::Manager;
 
 use crate::commands::{self, AppState};
+use crate::polls;
 
 pub fn spawn(app: tauri::AppHandle) {
     let Some(port) = std::env::var("PROOFPOLL_HARNESS_PORT").ok().and_then(|v| v.trim().parse::<u16>().ok()) else {
@@ -376,12 +377,12 @@ async fn op(Ax(app): Ax<tauri::AppHandle>, Json(body): Json<Value>) -> Reply {
     let closes_at = body.get("closes_at").and_then(|v| v.as_i64());
     match s(&body, "op").as_str() {
         "create_poll" => to_value(
-            commands::create_poll(state, s(&body, "title"), s(&body, "description"), options(), closes_at, opt_s(&body, "poll_type")).await,
+            polls::create_poll(state, s(&body, "title"), s(&body, "description"), options(), closes_at, opt_s(&body, "poll_type")).await,
         ),
-        "polls" => to_value(commands::get_all_polls(state).await),
-        "poll" => to_value(commands::get_poll(state, s(&body, "poll")).await),
+        "polls" => to_value(polls::get_all_polls(state).await),
+        "poll" => to_value(polls::get_poll(state, s(&body, "poll")).await),
         "vote" => to_value(
-            commands::cast_vote(
+            polls::cast_vote(
                 state,
                 s(&body, "poll"),
                 body.get("option").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
@@ -390,14 +391,14 @@ async fn op(Ax(app): Ax<tauri::AppHandle>, Json(body): Json<Value>) -> Reply {
             )
             .await,
         ),
-        "votes" => to_value(commands::get_poll_votes(state, s(&body, "poll"), opt_s(&body, "dna_version").unwrap_or_else(|| "1.5".into())).await),
+        "votes" => to_value(polls::get_poll_votes(state, s(&body, "poll"), opt_s(&body, "dna_version").unwrap_or_else(|| "1.5".into())).await),
         "save_draft" => to_value(
-            commands::save_draft_poll(state, s(&body, "title"), s(&body, "description"), options(), closes_at, opt_s(&body, "poll_type")).await,
+            polls::save_draft_poll(state, s(&body, "title"), s(&body, "description"), options(), closes_at, opt_s(&body, "poll_type")).await,
         ),
-        "drafts" => to_value(commands::get_my_drafts(state).await),
-        "publish_draft" => to_value(commands::publish_draft(state, s(&body, "draft")).await),
-        "save_rationale" => to_value(commands::save_vote_rationale(state, s(&body, "vote"), s(&body, "text")).await),
-        "rationale" => to_value(commands::get_vote_rationale(state, s(&body, "vote")).await),
+        "drafts" => to_value(polls::get_my_drafts(state).await),
+        "publish_draft" => to_value(polls::publish_draft(state, s(&body, "draft")).await),
+        "save_rationale" => to_value(polls::save_vote_rationale(state, s(&body, "vote"), s(&body, "text")).await),
+        "rationale" => to_value(polls::get_vote_rationale(state, s(&body, "vote")).await),
         "identity" => ok(serde_json::to_value(commands::get_identity_link(state)).unwrap_or(Value::Null)),
         "migration" => to_value(commands::get_migration_status(state).await),
         "link" => link(&app, state, s(&body, "client_id")).await,
@@ -419,10 +420,10 @@ async fn op(Ax(app): Ax<tauri::AppHandle>, Json(body): Json<Value>) -> Reply {
             to_value(commands::get_my_agent_set(state, local).await)
         }
         // ProofPoll 0.4.x's shapes on v1.3, for the migration leg.
-        "v13_poll" => to_value(commands::harness_v13_poll(&state, s(&body, "title"), s(&body, "description"), options(), closes_at, opt_s(&body, "poll_type")).await),
-        "v13_flag" => to_value(commands::harness_v13_flag(&state, s(&body, "poll"), opt_s(&body, "reason").unwrap_or_else(|| "Spam".into())).await),
-        "v13_delete" => to_value(commands::harness_v13_remove(&state, "delete_poll", s(&body, "poll")).await),
-        "v13_unflag" => to_value(commands::harness_v13_remove(&state, "remove_flag", s(&body, "flag")).await),
+        "v13_poll" => to_value(polls::harness_v13_poll(&state, s(&body, "title"), s(&body, "description"), options(), closes_at, opt_s(&body, "poll_type")).await),
+        "v13_flag" => to_value(polls::harness_v13_flag(&state, s(&body, "poll"), opt_s(&body, "reason").unwrap_or_else(|| "Spam".into())).await),
+        "v13_delete" => to_value(polls::harness_v13_remove(&state, "delete_poll", s(&body, "poll")).await),
+        "v13_unflag" => to_value(polls::harness_v13_remove(&state, "remove_flag", s(&body, "flag")).await),
         "v15_records" => v15_records(&state, &s(&body, "fn"), opt_s(&body, "hash")).await,
         // This start's admin ports and origin, so a test can run the node's
         // carrier against this instance's conductors.
@@ -439,10 +440,10 @@ async fn op(Ax(app): Ax<tauri::AppHandle>, Json(body): Json<Value>) -> Reply {
                 "closes_at": closes_at,
                 "poll_type": "Anonymous",
             });
-            to_value(commands::harness_v13_encrypted(&state, "draft_poll", None, draft.to_string().into_bytes()).await)
+            to_value(polls::harness_v13_encrypted(&state, "draft_poll", None, draft.to_string().into_bytes()).await)
         }
         "v13_rationale" => to_value(
-            commands::harness_v13_encrypted(&state, "vote_rationale", Some(s(&body, "vote")), s(&body, "text").into_bytes()).await,
+            polls::harness_v13_encrypted(&state, "vote_rationale", Some(s(&body, "vote")), s(&body, "text").into_bytes()).await,
         ),
         // The migration again, as a start does it: from NotStarted, then the
         // drafts and reasons.
@@ -482,7 +483,7 @@ async fn op(Ax(app): Ax<tauri::AppHandle>, Json(body): Json<Value>) -> Reply {
         }
         "proof_check" => proof_check().await,
         "v13_vote" => to_value(
-            commands::harness_v13_vote(&state, s(&body, "poll"), body.get("option").and_then(|v| v.as_u64()).unwrap_or(0) as u32, opt_s(&body, "display_name")).await,
+            polls::harness_v13_vote(&state, s(&body, "poll"), body.get("option").and_then(|v| v.as_u64()).unwrap_or(0) as u32, opt_s(&body, "display_name")).await,
         ),
         "fixtures" => fixtures().await,
         // What the Vault backup holds for this app: the escrowed seed or none.
@@ -567,7 +568,7 @@ async fn v13_link(state: tauri::State<'_, Arc<AppState>>, client_id: String) -> 
         return failed("no local agent yet");
     };
     match vault_signs_link(&agent, &client_id).await {
-        Ok((key, sig)) => to_value(commands::harness_v13_link(&state, key.clone(), sig).await.map(|h| json!({ "vault_agent_pub_key": key, "link": h }))),
+        Ok((key, sig)) => to_value(polls::harness_v13_link(&state, key.clone(), sig).await.map(|h| json!({ "vault_agent_pub_key": key, "link": h }))),
         Err(e) => failed(e),
     }
 }
