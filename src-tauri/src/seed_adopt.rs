@@ -393,17 +393,10 @@ impl AdoptSeams for AppSeams {
     }
 
     async fn stop_processes(&self) {
-        let handle = self.state.conductor_handle.lock().unwrap().take();
-        match handle {
-            Some(h) => {
-                crate::process_ext::stop_pid(h.conductor_child_07.id());
-                crate::process_ext::stop_pid(h.conductor_child.id());
-                crate::process_ext::stop_pid(h.lair_child_07.id());
-                crate::process_ext::stop_pid(h.lair_child.id());
-                log::info!("[adopt] signalled both conductors + lairs to stop");
-            }
-            None => log::warn!("[adopt] no conductor handle held - nothing to stop"),
-        }
+        // Each conductor asked to shut down, then its key store, and all
+        // four processes gone when this returns.
+        let _ = tokio::task::spawn_blocking(crate::conductor::stop_lines).await;
+        log::info!("[adopt] both conductors and key stores stopped");
     }
 
     async fn sleep_ms(&self, ms: u64) {

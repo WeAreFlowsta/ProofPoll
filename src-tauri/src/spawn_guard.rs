@@ -1,7 +1,8 @@
 //! A guard against console windows on Windows. The app is a GUI process, so
 //! every console program it starts gets a window of its own unless the call
 //! says otherwise: `creation_flags(CREATE_NO_WINDOW)` for a tool call,
-//! `crate::process_ext::SidecarCommand` for a sidecar (it hides its own).
+//! `flowsta_hc_lines::process::SidecarCommand` for a sidecar (it hides its
+//! own; the library starts both lines' sidecars).
 //! This test is what stops the next start added without one.
 
 /// Every `Command::new(` in the crate (sidecar commands aside) that has no
@@ -12,7 +13,6 @@ const WITHOUT_THE_FLAG: &[(&str, usize, &str)] = &[
     ("commands.rs", 3, "opens Flowsta Vault, a window app, on each platform"),
     ("instance_guard.rs", 3, "tests"),
     ("lair.rs", 1, "a test"),
-    ("process_ext.rs", 2, "the Unix sidecar start and kill"),
     ("vault_probe.rs", 1, "lsof: macOS"),
 ];
 

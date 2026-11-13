@@ -30,7 +30,6 @@ mod instance_guard;
 mod device_seed;
 mod lair;
 pub mod migration;
-mod process_ext;
 mod seed_adopt;
 mod sidecar;
 
@@ -90,6 +89,13 @@ fn log_target(app: &tauri::App) -> (tauri_plugin_log::TargetKind, Option<String>
 static WEBVIEW_FIX: std::sync::OnceLock<webview_fix::Outcome> = std::sync::OnceLock::new();
 
 pub fn run() {
+    // Started as the library's stop helper (`--hc-lines-interrupt <pid>`,
+    // Windows): raise Ctrl-C in that sidecar's console and exit, before
+    // anything of the app starts. Otherwise this notes that the executable
+    // can be that helper, and a conductor is asked to shut down before it
+    // is ended on Windows too.
+    flowsta_hc_lines::process::interrupt_helper_or_continue();
+
     // First, before anything starts a thread: on Linux with the NVIDIA driver
     // loaded, WebKitGTK 2.52 segfaults on a page change when NVIDIA's EGL
     // draws the window. The fix sets environment variables for the webview
@@ -271,23 +277,7 @@ pub fn run() {
                             }
                         }
 
-                        let admin_port = result.handle.admin_port_07;
-                        let app_port = result.handle.app_port_07;
-                        let conductor_pid = result.handle.conductor_pid;
-                        let conductor_pid_07 = result.handle.conductor_pid_07;
-
-                        *startup_state.conductor_handle.lock().unwrap() = Some(result.handle);
-                        *startup_state.agent_pub_key.lock().unwrap() = Some(result.agent_key);
-                        *startup_state.agent_pub_key_07.lock().unwrap() = Some(result.agent_key_07);
-                        *startup_state.app_client.lock().await = Some(result.app_client);
-                        *startup_state.app_client_v1_4.lock().await = result.app_client_v1_4;
-                        *startup_state.app_client_v1_3.lock().await = result.app_client_v1_3;
-                        *startup_state.app_client_v1_2.lock().await = result.app_client_v1_2;
-                        *startup_state.app_client_v1_1.lock().await = result.app_client_v1_1;
-                        *startup_state.app_client_v1_0.lock().await = result.app_client_v1_0;
-                        *startup_state.lair_client.lock().await = Some(result.lair_client);
-                        *startup_state.conductor_status.lock().unwrap() =
-                            conductor::ConductorStatus::Ready { admin_port, app_port };
+                        conductor::apply_started(&startup_state, &monitor_handle, result).await;
 
                         // Each line's kit, set aside once a run.
                         kits::refresh_once(kit_device_root.clone(), kit_resources.clone());
@@ -299,17 +289,10 @@ pub fn run() {
                             monitor_handle.clone(),
                         );
 
-                        // Start background health monitor
-                        conductor::spawn_health_monitor(
-                            conductor_pid,
-                            startup_state.clone(),
-                            monitor_handle.clone(),
-                        );
-                        conductor::spawn_health_monitor(
-                            conductor_pid_07,
-                            startup_state.clone(),
-                            monitor_handle,
-                        );
+                        // Both lines watched while the app runs: a conductor
+                        // that stops is started again, and the lines restart
+                        // at a quiet moment when one holds too much memory.
+                        conductor::spawn_watch(startup_state.clone(), monitor_handle);
 
                         // What this install wrote on v1.3 and v1.4 is carried
                         // to v1.5 with its proofs, in the background, until
@@ -396,12 +379,7 @@ pub fn run() {
                 if let Some(state) = app_handle.try_state::<Arc<AppState>>() {
                     updater::install_on_quit(app_handle, &state.device_root);
                 }
-                let handle = app_handle
-                    .try_state::<Arc<AppState>>()
-                    .and_then(|s| s.conductor_handle.lock().ok().and_then(|mut h| h.take()));
-                if let Some(h) = handle {
-                    h.shutdown();
-                }
+                conductor::stop_lines();
             }
         });
 }

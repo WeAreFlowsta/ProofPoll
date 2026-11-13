@@ -17,7 +17,7 @@
 //!
 //! After changing commands, register them in `lib.rs` → `invoke_handler`.
 
-use crate::conductor::{ConductorHandle, ConductorStatus};
+use crate::conductor::ConductorStatus;
 use holochain_types::prelude::{ActionHash, AgentPubKey};
 use lair_keystore_api::prelude::LairClient;
 use std::path::{Path, PathBuf};
@@ -181,7 +181,6 @@ pub struct AppState {
     /// This launch came from "Open as this identity" (the page starts the
     /// sign-in for a profile that is not linked yet; the window refocuses).
     pub relaunched_into_identity: std::sync::atomic::AtomicBool,
-    pub conductor_handle: Mutex<Option<ConductorHandle>>,
     pub conductor_status: Mutex<ConductorStatus>,
     pub agent_pub_key: Mutex<Option<String>>,
     /// The key the 0.7 line (v1.4) runs as: the same as `agent_pub_key`
@@ -277,7 +276,6 @@ impl AppState {
             data_dir,
             device_root,
             relaunched_into_identity: std::sync::atomic::AtomicBool::new(false),
-            conductor_handle: Mutex::new(None),
             conductor_status: Mutex::new(ConductorStatus::Stopped),
             agent_pub_key: Mutex::new(None),
             agent_pub_key_07: Mutex::new(None),
@@ -412,12 +410,26 @@ async fn read_or_local(client: &crate::hc::AppClient, fn_name: &str, payload: Ve
 /// with your zome name and function name from your Tauri commands.
 /// Call a zome function on either line. `payload` and the result are the
 /// msgpack bytes (`hc::encode` / `hc::decode`, `hc::records`).
+/// When the app last asked a conductor for anything (unix seconds).
+static LAST_CALL_SECS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn unix_secs() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+/// A quiet moment: nothing asked of a conductor for a minute. A restart of
+/// the lines for their memory waits for one (`conductor::spawn_watch`).
+pub(crate) fn quiet_now(_state: &AppState) -> bool {
+    unix_secs().saturating_sub(LAST_CALL_SECS.load(std::sync::atomic::Ordering::Relaxed)) >= 60
+}
+
 pub(crate) async fn call_zome(
     client: &crate::hc::AppClient,
     zome: &str,
     fn_name: &str,
     payload: Vec<u8>,
 ) -> Result<Vec<u8>, String> {
+    LAST_CALL_SECS.store(unix_secs(), std::sync::atomic::Ordering::Relaxed);
     let result = client.call_zome(ROLE_NAME, zome, fn_name, payload.clone()).await;
     match result {
         Ok(r) => Ok(r),

@@ -381,9 +381,8 @@ pub fn install_ready(app: &tauri::AppHandle, data_dir: &Path, stage: &dyn Fn(&st
 }
 
 fn stop_conductors(app: &tauri::AppHandle) {
-    if let Some(handle) = app.state::<std::sync::Arc<crate::commands::AppState>>().conductor_handle.lock().unwrap().take() {
-        handle.shutdown();
-    }
+    let _ = app;
+    crate::conductor::stop_lines();
 }
 
 /// On quit: install a waiting update where that needs no one (Windows,

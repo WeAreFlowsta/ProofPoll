@@ -11,7 +11,7 @@
 //! file" and every retry leaked one more key store.
 //!
 //! Linux ties the children to the parent with `PR_SET_PDEATHSIG`
-//! (`process_ext.rs`); macOS and Windows have no equivalent, so the fix is
+//! (`flowsta-hc-lines`); macOS and Windows have no equivalent, so the fix is
 //! to sweep at the NEXT launch, before anything of ours spawns: a sidecar
 //! whose parent is gone, or whose parent is not a live ProofPoll, belongs to
 //! nobody and is stopped. A sidecar whose parent is a live ProofPoll that is

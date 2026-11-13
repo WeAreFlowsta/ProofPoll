@@ -63,13 +63,10 @@ fn rss_mb(pid: u32) -> Option<u64> {
 async fn status(Ax(app): Ax<tauri::AppHandle>) -> Reply {
     let state = app.state::<Arc<AppState>>();
     let app_status = commands::get_app_status(state.clone());
-    let (pids, app_ports) = {
-        let handle = state.conductor_handle.lock().unwrap();
-        match handle.as_ref() {
-            Some(h) => (Some((h.conductor_pid, h.conductor_pid_07)), Some((h.app_port, h.app_port_07))),
-            None => (None, None),
-        }
-    };
+    use crate::hc::Line;
+    let both = |a: Option<_>, b: Option<_>| a.zip(b);
+    let pids = both(crate::conductor::line_pid(Line::V06), crate::conductor::line_pid(Line::V07));
+    let app_ports = both(crate::conductor::line_ports(Line::V06).map(|p| p.1), crate::conductor::line_ports(Line::V07).map(|p| p.1));
     let migration = commands::get_migration_status(state.clone()).await.ok();
     let link = commands::get_identity_link(state.clone());
     let configs_with_auth = ["conductor", crate::conductor::CONDUCTOR_DIR_07]
