@@ -173,20 +173,26 @@ pub fn line_ports(line: Line) -> Option<(u16, u16)> {
     supervisor().ports(line)
 }
 
-/// Stop both lines, each conductor asked to shut down before its key store
-/// (blocking: the app's exit, an update's install, an adopt).
+/// Stop both lines for good in this process, each conductor asked to shut
+/// down before its key store (blocking): the app's exit, an update's
+/// install, an adopt. Each of those ends with the app closing or starting
+/// again as a new process, so nothing here starts the lines again: the
+/// watch stands down and a restart is refused. (Matrix 11-13: after an
+/// adopt's stop the watch brought the conductors back within seconds, and
+/// the relaunched app found its port taken.)
 pub fn stop_lines() {
     log::info!("Shutting down conductors and key stores...");
     CLOSING.store(true, Ordering::SeqCst);
     if supervisor().stop() {
         log::info!("Conductors and key stores stopped");
     }
-    CLOSING.store(false, Ordering::SeqCst);
 }
 
-/// Set while the app stops its lines on purpose, so the watch does not read
-/// the stop as a conductor that died.
+/// Set once the app has stopped its lines on purpose (`stop_lines`).
 static CLOSING: AtomicBool = AtomicBool::new(false);
+
+/// What a restart says when the app has stopped its lines for good.
+const CLOSING_NO_RESTART: &str = "the app is closing: the lines stay stopped";
 
 /// Conductor status reported to the frontend.
 #[derive(Clone, serde::Serialize)]
@@ -576,6 +582,12 @@ impl LineHooks for PpLines {
             self.old_line.notify_waiters();
         }
     }
+
+    /// A start still coming up when the app stops its lines for good stops
+    /// at its next step.
+    fn wanted(&self) -> bool {
+        !CLOSING.load(Ordering::SeqCst)
+    }
 }
 
 /// Public entry point. Runs one full startup; on failure, performs the
@@ -806,6 +818,9 @@ static RESTART: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 /// conductor died, or to give back memory.
 async fn restart_session(state: &std::sync::Arc<crate::commands::AppState>, app_handle: &tauri::AppHandle, message: &str) -> Result<(), String> {
     let _one = RESTART.lock().await;
+    if CLOSING.load(Ordering::SeqCst) {
+        return Err(CLOSING_NO_RESTART.into());
+    }
     // Not Ready while the lines stop: nothing reads the stop as a failure.
     let starting = ConductorStatus::Starting { message: message.into() };
     *state.conductor_status.lock().unwrap() = starting.clone();
@@ -815,6 +830,11 @@ async fn restart_session(state: &std::sync::Arc<crate::commands::AppState>, app_
     let passphrase = state.passphrase.lock().unwrap().clone();
     let resource_dir = crate::resolve_resource_dir(app_handle, &state.device_root);
     let result = start_holochain(app_handle.clone(), state.clone(), data_dir, resource_dir, passphrase).await?;
+    if CLOSING.load(Ordering::SeqCst) {
+        // Stopped for good while this start ran: what it started goes too.
+        let _ = tokio::task::spawn_blocking(|| supervisor().stop()).await;
+        return Err(CLOSING_NO_RESTART.into());
+    }
     apply_started(state, app_handle, result).await;
     Ok(())
 }
@@ -941,6 +961,7 @@ pub fn spawn_watch(state: std::sync::Arc<crate::commands::AppState>, app_handle:
                 log::warn!("[watch] a conductor stopped: starting the lines again");
                 match restart_session(&state, &app_handle, "Reconnecting to Holochain...").await {
                     Ok(()) => log::info!("[watch] the lines are back"),
+                    Err(e) if e == CLOSING_NO_RESTART => {}
                     Err(e) => {
                         log::error!("[watch] the lines did not start again: {}", e);
                         say_stopped(&state, &app_handle);
