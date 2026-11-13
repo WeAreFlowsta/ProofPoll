@@ -471,6 +471,16 @@ async fn op(Ax(app): Ax<tauri::AppHandle>, Json(body): Json<Value>) -> Reply {
         // posts it (it carries this install's escrowed seed).
         "backup" => backup(state, s(&body, "client_id")).await,
         "chain07" => chain07(&opt_s(&body, "dna").unwrap_or_else(|| "1.4".into())).await,
+        // The start screen's "Continue without them" during a restore that
+        // came back shorter than the backup.
+        "restore_try_again" => {
+            crate::dna::RESTORE_TRY_AGAIN.store(true, std::sync::atomic::Ordering::SeqCst);
+            ok(json!({ "asked": true }))
+        }
+        "restore_go_on" => {
+            crate::dna::RESTORE_ACCEPT_SHORT.store(true, std::sync::atomic::Ordering::SeqCst);
+            ok(json!({ "accepted": true }))
+        }
         "proof_check" => proof_check().await,
         "v13_vote" => to_value(
             commands::harness_v13_vote(&state, s(&body, "poll"), body.get("option").and_then(|v| v.as_u64()).unwrap_or(0) as u32, opt_s(&body, "display_name")).await,

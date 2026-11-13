@@ -3372,3 +3372,20 @@ mod active_link_tests {
         assert!(!links_this_identity(&[], None));
     }
 }
+
+/// The start screen's "Continue without them": a restore that came back
+/// shorter than the backup is enabled as it is, without the old device's
+/// last records (`dna::wait_for_restore_07`).
+#[tauri::command]
+pub fn restore_go_on() {
+    log::info!("[restore] the person chose to go on without the records the network does not hold");
+    crate::dna::RESTORE_ACCEPT_SHORT.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// The start screen's "Try again": ask the network once more for the chain
+/// a short restore was set aside for (`conductor.rs`).
+#[tauri::command]
+pub fn restore_try_again() {
+    log::info!("[restore] the person asked to try again");
+    crate::dna::RESTORE_TRY_AGAIN.store(true, std::sync::atomic::Ordering::SeqCst);
+}

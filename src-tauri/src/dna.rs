@@ -724,6 +724,13 @@ async fn install_one_07(
             AppStatus::Unrecoverable(_, reason) => {
                 return Err(unrecoverable_message(&format!("{:?}", reason)));
             }
+            // A restore that finished while ProofPoll was closed: the chain
+            // is there and not yet enabled. `wait_for_restore_07` compares
+            // it with the backup before enabling it.
+            AppStatus::Disabled(_) if restore => {
+                log::info!("ProofPoll v{} finished restoring while ProofPoll was closed (0.7)", v);
+                return Ok(Install07::Restoring);
+            }
             _ => {}
         }
         admin_ws
@@ -778,59 +785,86 @@ fn unrecoverable_message(reason: &str) -> String {
     )
 }
 
+/// Set when the person chose to go on with a restore that is missing the
+/// old device's last records (the start screen's button). Read by
+/// `wait_for_restore_07`; never cleared, the choice holds for this start.
+pub static RESTORE_ACCEPT_SHORT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Set by the start screen's "Try again" while a short restore is set aside;
+/// taken (and cleared) by the start's wait in `conductor.rs`.
+pub static RESTORE_TRY_AGAIN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// What a finished restore came back with (the library's type): `Whole`
+/// is enabled; `Short` is not, the network's copy ending at `have` and the
+/// backup at `want` (the peers a restore asks agreed on a head from before
+/// the old device's last writes reached them).
+pub use flowsta_hc_lines::restore::Restored;
+
 /// Wait for `app`'s restore to finish, then enable it. Holochain retries by
 /// itself (no peers, too few peers agreeing on the chain head, a gap), so
 /// there is no time limit here: `progress` hears the seconds waited every
 /// few seconds, for the start screen.
+///
+/// `backup_head`: the highest seq the backup holds for this version. A
+/// restore that ends before it is not enabled (`Restored::Short`) unless the
+/// person chose to go on: a chain enabled there would be written on from a
+/// point the old device already wrote past.
 pub async fn wait_for_restore_07(
     admin_port: u16,
     app: App07,
+    backup_head: Option<u32>,
     progress: impl Fn(u64),
+) -> Result<Restored, String> {
+    use flowsta_hc_lines::restore::{finish, RestoreError};
+    let admin = admin_07(admin_port).await?;
+    let accept = RESTORE_ACCEPT_SHORT.load(std::sync::atomic::Ordering::SeqCst);
+    match finish(&admin, app.app_id, backup_head, accept, |waited| progress(waited.as_secs())).await {
+        Ok(restored) => Ok(restored),
+        Err(RestoreError::Unrecoverable(reason)) => Err(unrecoverable_message(&reason)),
+        Err(RestoreError::NotInstalled(_)) => Err(format!("v{} is not installed (0.7)", app.dna_version)),
+        Err(e) => Err(format!("v{}: {}", app.dna_version, e)),
+    }
+}
+
+/// The library's admin client on the 0.7 conductor.
+async fn admin_07(admin_port: u16) -> Result<flowsta_hc_lines::AdminClient, String> {
+    flowsta_hc_lines::AdminClient::connect(crate::hc::Line::V07, admin_port, &crate::conductor::node_origin())
+        .await
+        .map_err(|e| format!("Failed to connect to the 0.7 admin WebSocket: {}", e))
+}
+
+/// Set a short restore aside: remove what was restored, which also takes
+/// this device off the network under the key. While it restores, a device
+/// announces itself as the key's agent, and the peers then follow it instead
+/// of the old device (one address per key): the old device's gossip rounds
+/// time out and its last records never leave it (matrix 2026-11-13, twenty
+/// minutes). Away from the network, the old device can hand them over.
+pub async fn set_short_restore_aside_07(admin_port: u16, app: App07) -> Result<(), String> {
+    let admin = admin_07(admin_port).await?;
+    flowsta_hc_lines::restore::set_aside(&admin, app.app_id, "proofpoll_v1_")
+        .await
+        .map_err(|e| format!("Failed to remove the short restore of v{}: {}", app.dna_version, e))?;
+    log::info!("[restore] v{}: the short restore is set aside and this device is off the network under the key", app.dna_version);
+    Ok(())
+}
+
+/// Ask the network again for `app`'s chain after a short restore was set aside.
+pub async fn ask_again_07(
+    admin_port: u16,
+    resource_dir: &Path,
+    agent_key_raw39: &[u8],
+    app: App07,
 ) -> Result<(), String> {
     use holochain_client_07::AdminWebsocket;
-    use holochain_types_07::app::AppStatus;
-
     let admin_ws = AdminWebsocket::connect(
         format!("localhost:{}", admin_port),
         Some(crate::conductor::node_origin()),
     )
     .await
     .map_err(|e| format!("Failed to connect to the 0.7 admin WebSocket: {}", e))?;
-    let v = app.dna_version;
-    let started = std::time::Instant::now();
-    loop {
-        let apps = admin_ws
-            .list_apps(None)
-            .await
-            .map_err(|e| format!("Failed to list apps (0.7): {}", e))?;
-        let status = apps
-            .iter()
-            .find(|a| a.installed_app_id == app.app_id)
-            .map(|a| a.status.clone())
-            .ok_or_else(|| format!("v{} is not installed (0.7)", v))?;
-        match status {
-            AppStatus::AwaitingRestore => {
-                progress(started.elapsed().as_secs());
-                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-            }
-            AppStatus::Unrecoverable(_, reason) => {
-                return Err(unrecoverable_message(&format!("{:?}", reason)));
-            }
-            AppStatus::Enabled => return Ok(()),
-            // Restored (Disabled(NeverStarted)), or a later disable.
-            _ => {
-                admin_ws
-                    .enable_app(app.app_id.to_string())
-                    .await
-                    .map_err(|e| format!("Failed to enable the restored v{}: {}", v, e))?;
-                log::info!(
-                    "ProofPoll v{} chain restored from the network and enabled (0.7, {} s)",
-                    v,
-                    started.elapsed().as_secs()
-                );
-                return Ok(());
-            }
-        }
+    match install_one_07(&admin_ws, &[], resource_dir, agent_key_raw39, app, true).await? {
+        Install07::Restoring => Ok(()),
+        other => Err(format!("v{} did not start restoring again ({:?})", app.dna_version, other)),
     }
 }
 
@@ -935,4 +969,23 @@ pub async fn setup_app_interface_07(admin_port: u16) -> Result<(u16, crate::hc::
         None
     };
     Ok((app_port, active, v1_4))
+}
+
+#[cfg(test)]
+mod restore_tests {
+    use flowsta_hc_lines::restore::short_by as restore_is_short;
+
+    #[test]
+    fn a_restore_is_short_only_when_it_ends_before_the_backup() {
+        // The 11-12 matrix miss: the network agreed on seq 37, the backup held to 39.
+        assert_eq!(restore_is_short(Some(37), Some(39)), Some((37, 39)));
+        // As far as the backup, or further (the old device wrote after its backup).
+        assert_eq!(restore_is_short(Some(39), Some(39)), None);
+        assert_eq!(restore_is_short(Some(44), Some(39)), None);
+        // A marker from before the per-version heads: nothing to compare.
+        assert_eq!(restore_is_short(Some(3), None), None);
+        // An empty chain against a backup with records; against one with none.
+        assert_eq!(restore_is_short(None, Some(5)), Some((0, 5)));
+        assert_eq!(restore_is_short(None, Some(0)), None);
+    }
 }

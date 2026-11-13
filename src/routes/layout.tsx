@@ -40,7 +40,7 @@ interface AppStatus {
   conductor_status:
     | { status: "stopped" }
     | { status: "starting"; message: string }
-    | { status: "restoring"; waited_secs: number }
+    | { status: "restoring"; waited_secs: number; missing?: number }
     | { status: "ready"; admin_port: number; app_port: number }
     | { status: "error"; message: string };
   relaunched_into_identity?: boolean;
@@ -717,7 +717,7 @@ export default component$(() => {
             <div class="text-gray-400">Connecting...</div>
           </div>
         ) : !status.value.ready ? (
-          <div class="flex flex-col items-center justify-center h-64 gap-4">
+          <div class="flex flex-col items-center justify-center min-h-64 py-8 gap-4">
             {status.value.conductor_status.status === "error" ? (
               <>
                 <div class="w-12 h-12 rounded-full bg-red-900/40 flex items-center justify-center">
@@ -746,12 +746,50 @@ export default component$(() => {
                 <div class="text-gray-300" data-testid="nav-restoring">
                   Restoring your polls and votes from the network
                 </div>
-                <p class="text-gray-500 text-sm max-w-sm text-center">
-                  This device now uses your restored key. ProofPoll is fetching
-                  everything that key published from other ProofPoll users and
-                  the ProofPoll node, and opens when it has all of it.
-                </p>
-                {status.value.conductor_status.waited_secs >= 120 && (
+                {(status.value.conductor_status.missing ?? 0) === 0 && (
+                  <p class="text-gray-500 text-sm max-w-sm text-center">
+                    This device now uses your restored key. ProofPoll is fetching
+                    everything that key published from other ProofPoll users and
+                    the ProofPoll node, and opens when it has all of it.
+                  </p>
+                )}
+                {(status.value.conductor_status.missing ?? 0) > 0 && (
+                  <div class="flex flex-col items-center gap-3 max-w-sm" data-testid="nav-restoring-short">
+                    <p class="text-amber-300 text-sm text-center">
+                      {status.value.conductor_status.missing === 1
+                        ? "The last record your other device wrote has not reached the network yet."
+                        : `The last ${status.value.conductor_status.missing} records your other device wrote have not reached the network yet.`}
+                    </p>
+                    <p class="text-gray-400 text-sm text-center">
+                      Open ProofPoll on that device and leave it open for a few
+                      minutes, then press Try again here. If it was already
+                      open, close it and open it again first. If that device is
+                      gone, you can continue without
+                      {status.value.conductor_status.missing === 1 ? " it" : " them"}.
+                    </p>
+                    <div class="flex gap-3">
+                      <button
+                        data-testid="nav-restoring-go-on"
+                        onClick$={async () => {
+                          await invoke("restore_go_on");
+                        }}
+                        class="border border-gray-600 hover:border-gray-400 text-gray-200 px-5 py-2 rounded-full text-sm font-medium"
+                      >
+                        {status.value.conductor_status.missing === 1 ? "Continue without it" : "Continue without them"}
+                      </button>
+                      <button
+                        data-testid="nav-restoring-try-again"
+                        onClick$={async () => {
+                          await invoke("restore_try_again");
+                        }}
+                        class="bg-indigo-600 hover:bg-indigo-500 text-white px-5 py-2 rounded-full text-sm font-medium"
+                      >
+                        Try again
+                      </button>
+                    </div>
+                  </div>
+                )}
+                {status.value.conductor_status.waited_secs >= 120 && (status.value.conductor_status.missing ?? 0) === 0 && (
                   <p class="text-gray-500 text-xs max-w-sm text-center" data-testid="nav-restoring-slow">
                     Still restoring after {Math.floor(status.value.conductor_status.waited_secs / 60)} minutes.
                     It needs other ProofPoll users or the ProofPoll node to be

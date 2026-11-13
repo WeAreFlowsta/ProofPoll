@@ -3,7 +3,9 @@
 # identity (the Vault repo beside this one, its test binary built), ProofPoll
 # test instances A and B (scripts/build-test-binary.sh), the legs in order;
 # C and D join for the restore (its quorum: two peers agreeing on the chain head).
-# Usage: scripts/matrix.sh [log dir]     (LEGS="fresh signin polls migration devices offline adopt")
+# Usage: scripts/matrix.sh [log dir]     (LEGS="fresh signin polls migration devices offline adopt short")
+# `short` (a restore that comes back shorter than the backup, then whole) runs
+# after `adopt`; LEGS="... adopt short-go-on" runs its other ending instead.
 # The node's carrier on its own: LEGS=carrier scripts/matrix.sh (every instance
 # holds its own move, and carrier/target/debug/proofpoll-carrier is built).
 # Runs beside an installed ProofPoll and Vault: its own folders and ports.
@@ -12,7 +14,7 @@ cd "$(dirname "$0")/.."
 PP="$PWD"
 VAULT_REPO="${VAULT_REPO:-$PP/../flowsta-vault}"
 LOGS="${1:-$HOME/.cache/proofpoll-matrix/run-$(date -u +%m%d-%H%M)}"; mkdir -p "$LOGS"
-LEGS="${LEGS:-fresh signin polls migration devices offline adopt}"
+LEGS="${LEGS:-fresh signin polls migration devices offline adopt short}"
 ORIGIN=https://ourtest.flowsta.com
 CLIENT_ID="$(grep -o 'VITE_FLOWSTA_CLIENT_ID=[^ \\]*' scripts/build-test-binary.sh | cut -d= -f2-)"
 rc=0
@@ -25,6 +27,12 @@ stop_all() {
   for pid in $(pgrep -f "flowsta-vault-pp-vault/"); do [ "$pid" != "$$" ] && kill -9 $pid 2>/dev/null; done
 }
 trap stop_all EXIT
+# Stop the test instance whose harness listens on a port, and wait for it.
+stop_instance() {
+  local pid; pid=$(ss -ltnp 2>/dev/null | awk -v p=":$1\$" '$4 ~ p' | grep -o 'pid=[0-9]*' | head -1 | cut -d= -f2)
+  [ -n "$pid" ] && kill -TERM "$pid"
+  for i in $(seq 1 30); do pgrep -f "proofpoll-test-$2/" >/dev/null || break; sleep 1; done
+}
 # Wait until a test instance's harness answers (its window is up).
 wait_harness() { for i in $(seq 1 "${2:-60}"); do curl -s -m 2 "http://127.0.0.1:$1/dev/status" | grep -q '"harness":true' && return 0; sleep 2; done; echo "  (the harness on $1 never answered)"; return 1; }
 
@@ -80,6 +88,31 @@ for leg in $LEGS; do
     for i in $(seq 1 20); do pgrep -f "proofpoll-test-pp-(a|b)/" >/dev/null || break; sleep 1; done
     dbus-run-session -- scripts/run-test-instance.sh pp-b 110 28802 "$VPORT" >> "$LOGS/pp-b.log" 2>&1 &
     PP_STATE="$(cat "$STATE" 2>/dev/null || echo '{}')" node scripts/pp-matrix.mjs --leg=adopted >> "$LOGS/leg-$leg.log" 2>&1 || rc=1
+  elif [ "$leg" = short ] || [ "$leg" = short-go-on ]; then
+    # After `adopt` (B holds the key; C and D are up). B starts again with
+    # no network for good, writes and backs up; A's folder is a new device
+    # that adopts the seed, and its restore comes back shorter than the
+    # backup. `short`: B comes back online and A opens whole.
+    # `short-go-on`: B stays gone and the person goes on. One or the other
+    # in a run: a device that went on must never meet the old one again.
+    stop_instance 28802 pp-b; stop_instance 28801 pp-a
+    PROOFPOLL_TEST_OFFLINE_UNTIL=$(( $(date +%s) + 86400 )) dbus-run-session -- scripts/run-test-instance.sh pp-b 110 28802 "$VPORT" >> "$LOGS/pp-b.log" 2>&1 &
+    PP_STATE="$(cat "$STATE" 2>/dev/null || echo '{}')" PP_STATE_OUT="$STATE" node scripts/pp-matrix.mjs --leg=short-write > "$LOGS/leg-$leg.log" 2>&1 || rc=1
+    rm -rf "$HOME/.local/share/proofpoll-test-pp-a"
+    dbus-run-session -- scripts/run-test-instance.sh pp-a 100 28801 "$VPORT" >> "$LOGS/pp-a.log" 2>&1 &
+    node scripts/pp-matrix.mjs --leg=short-adopt >> "$LOGS/leg-$leg.log" 2>&1 || rc=1
+    for i in $(seq 1 60); do ss -ltn | grep -qE ':28801\b' || break; sleep 1; done
+    for i in $(seq 1 20); do pgrep -f "proofpoll-test-pp-a/" >/dev/null || break; sleep 1; done
+    dbus-run-session -- scripts/run-test-instance.sh pp-a 100 28801 "$VPORT" >> "$LOGS/pp-a.log" 2>&1 &
+    PP_STATE="$(cat "$STATE" 2>/dev/null || echo '{}')" node scripts/pp-matrix.mjs --leg=short-waits >> "$LOGS/leg-$leg.log" 2>&1 || rc=1
+    stop_instance 28802 pp-b
+    if [ "$leg" = short ]; then
+      dbus-run-session -- scripts/run-test-instance.sh pp-b 110 28802 "$VPORT" >> "$LOGS/pp-b.log" 2>&1 &
+      PP_STATE="$(cat "$STATE" 2>/dev/null || echo '{}')" node scripts/pp-matrix.mjs --leg=short-whole >> "$LOGS/leg-$leg.log" 2>&1 || rc=1
+      stop_instance 28802 pp-b
+    else
+      PP_STATE="$(cat "$STATE" 2>/dev/null || echo '{}')" node scripts/pp-matrix.mjs --leg=short-go-on >> "$LOGS/leg-$leg.log" 2>&1 || rc=1
+    fi
   elif [ "$leg" = carrier ]; then
     # B and C vote, D stands for the node; one after the other (their
     # sessions' accessibility bus).

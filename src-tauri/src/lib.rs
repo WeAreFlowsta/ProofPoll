@@ -317,6 +317,8 @@ pub fn run() {
             vault_probe::probe_vault,
             vault_probe::restart_app,
             vault_probe::test_vault_url,
+            commands::restore_go_on,
+            commands::restore_try_again,
             updater::update_status,
             updater::set_update_prefs,
             updater::dismiss_updated,

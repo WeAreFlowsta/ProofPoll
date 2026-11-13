@@ -463,13 +463,106 @@ async function carrier() {
   record("every run closed its connections (no reset in D's conductor logs)", resets() === resets0, `${resets() - resets0} new over ${grants.length} runs`);
 }
 
+/** A restore that comes back shorter than the backup. The device that holds
+ * the key (B, since the adopt leg) writes with no network and backs up, so the
+ * Vault backup holds records no peer has; a new device (A's folder, wiped)
+ * adopts the seed. Its restore must not open on the shorter chain. */
+async function shortWrite(state) {
+  console.log('\n── A short restore: the old device writes with no network, then backs up');
+  record('B: ready with no network', await waitReady(B, 300));
+  const st = await status(B);
+  record('B: started without the network auth', st.started_offline === true, JSON.stringify({ started_offline: st.started_offline }));
+  const before = (await op(B, { op: 'chain07', dna: '1.5' })).data || {};
+  const made = await op(B, { op: 'create_poll', title: `never left the old device ${nowS()}`, description: 'written with no network', options: ['yes', 'no'], closes_at: nowS() + 86400 }, 300);
+  record('B: creates a poll with no network', made.ok && typeof made.data === 'string', made.error || made.data);
+  const after = (await op(B, { op: 'chain07', dna: '1.5' })).data || {};
+  record('B: its v1.5 chain grew', after.head_seq > before.head_seq, JSON.stringify({ before: before.head_seq, after: after.head_seq }));
+  const b = await op(B, { op: 'backup', client_id: CLIENT_ID }, 120);
+  record('B: backs up to the Vault', b.ok, b.error || JSON.stringify(b.data)?.slice(0, 120));
+  await sleep(5000);
+  for (const [name, base] of [['C', C], ['D', D]]) {
+    const has = ((await op(base, { op: 'polls' })).data || []).some((p) => p.hash === made.data);
+    record(`${name}: does not hold that poll`, !has);
+  }
+  if (process.env.PP_STATE_OUT) (await import('node:fs')).writeFileSync(process.env.PP_STATE_OUT, JSON.stringify({ ...state, short_poll: made.data, short_head_before: before.head_seq, short_head: after.head_seq }));
+}
+
+async function shortAdopt() {
+  console.log('\n── A short restore: a new device adopts the seed');
+  record('A: ready as a new install', await waitReady(A, 300));
+  await signin(A, 'A');
+  const esc = await op(A, { op: 'escrow', client_id: CLIENT_ID });
+  record('A: the Vault backup holds an escrowed seed', esc.ok && esc.data?.seed === true, esc.error || JSON.stringify(esc.data));
+  const ad = await op(A, { op: 'adopt', client_id: CLIENT_ID }, 180).catch((e) => ({ ok: true, data: { exited: String(e) } }));
+  record('A: adopts it', ad.ok, ad.error || JSON.stringify(ad.data));
+}
+
+/** The new device waits: it names what is missing, stays closed, and steps
+ * off the network under the key (the short restore is set aside). */
+async function shortWaits(state) {
+  console.log('\n── A short restore: the new device waits, off the network');
+  let cs = null;
+  const named = await until(async () => { cs = (await status(A)).app?.conductor_status; return cs?.status === 'restoring' && cs.missing > 0; }, 600, 2000);
+  record('A: says how many records the network does not hold yet', named, JSON.stringify(cs));
+  record('A: that many are the ones written with no network (or fewer: the backup lists app records)', cs?.missing >= 1 && cs?.missing <= state.short_head - state.short_head_before, JSON.stringify({ missing: cs?.missing, written: state.short_head - state.short_head_before }));
+  record('A: sets the short restore aside', await until(async () => /the short restore is set aside and this device is off the network/.test((await logsSinceStart('pp-a')).app), 60, 3000));
+  const gone = await op(A, { op: 'chain07', dna: '1.5' });
+  record('A: holds no v1.5 chain meanwhile', !gone.ok && /not installed/.test(gone.error || ''), gone.error || JSON.stringify(gone.data));
+  await sleep(45000);
+  record('A: does not ask again by itself', !/asking the network again/.test((await logsSinceStart('pp-a')).app));
+  const st = await status(A);
+  record('A: still not open', st.app?.ready !== true && st.app?.conductor_status?.status === 'restoring', JSON.stringify(st.app?.conductor_status));
+  record('A: the restore marker is kept', !!st.restore_marker && st.restore_marker.heads?.['1.5'] >= 1, JSON.stringify(st.restore_marker));
+}
+
+/** The old device is back online: its last records reach the peers, and the
+ * new device's next ask comes back whole. */
+async function shortWhole(state) {
+  console.log('\n── A short restore: the old device comes back, the new one opens whole');
+  record('B: ready again, with the network', await until(async () => { const s = await status(B); return s.app?.ready === true && s.started_offline === false; }, 300, 5000));
+  for (const [name, base] of [['C', C], ['D', D]]) {
+    record(`${name}: now holds the poll the old device wrote with no network`, await until(async () => ((await op(base, { op: 'polls' })).data || []).some((p) => p.hash === state.short_poll), 900, 10000));
+  }
+  const again = await op(A, { op: 'restore_try_again' });
+  record('A: "Try again"', again.ok, again.error || JSON.stringify(again.data));
+  record('A: opens', await until(async () => (await status(A)).app?.ready === true, 900, 3000));
+  const st = await status(A);
+  record('A: the restore marker is gone', st.restore_marker === null, JSON.stringify(st.restore_marker));
+  const c15 = (await op(A, { op: 'chain07', dna: '1.5' })).data || {};
+  record("A: its v1.5 chain reaches the backup's head, one action per seq", c15.forked_seqs?.length === 0 && c15.actions === c15.head_seq + 1 && c15.head_seq >= state.short_head, JSON.stringify({ ...c15, backup_head: state.short_head }));
+  record('A: lists the poll written with no network', await until(async () => ((await op(A, { op: 'polls' })).data || []).some((p) => p.hash === state.short_poll), 300, 10000));
+  const logs = await logsSinceStart('pp-a');
+  record('A: nobody chose to go on without them', !/chose to go on/.test(logs.app));
+}
+
+/** The old device is gone: the person says to go on, and the new device
+ * opens on what the network holds. */
+async function shortGoOn(state) {
+  console.log('\n── A short restore: the old device is gone, the person goes on without them');
+  const went = await op(A, { op: 'restore_go_on' });
+  record('A: "Continue without them"', went.ok, went.error || JSON.stringify(went.data));
+  record('A: opens', await until(async () => (await status(A)).app?.ready === true, 900, 3000));
+  const c15 = (await op(A, { op: 'chain07', dna: '1.5' })).data || {};
+  record('A: its v1.5 chain is what the network held, one action per seq', c15.forked_seqs?.length === 0 && c15.actions === c15.head_seq + 1, JSON.stringify({ ...c15, backup_head: state.short_head }));
+  const logs = await logsSinceStart('pp-a');
+  record('A: its log says the person chose, and how many records', /is enabled at seq \d+ though the backup holds to seq \d+: the person chose to go on without the last \d+ record/.test(logs.app));
+  record('A: the restore marker is gone', (await status(A)).restore_marker === null);
+  const has = ((await op(A, { op: 'polls' })).data || []).some((p) => p.hash === state.short_poll);
+  record('A: does not list the poll that never left the old device', !has);
+  await signin(A, 'A');
+  const made = await op(A, { op: 'create_poll', title: `after going on ${nowS()}`, description: 'written by the new device', options: ['yes', 'no'], closes_at: nowS() + 86400 });
+  record('A: creates a poll', made.ok && typeof made.data === 'string', made.error || made.data);
+  record("C: sees A's new poll", await until(async () => ((await op(C, { op: 'polls' })).data || []).some((p) => p.hash === made.data), 300, 10000));
+}
+
 // ───────────────────────── main ─────────────────────────
 
 const legs = { fresh, signin: () => signin(), polls, migration, carrier };
 try {
-  if (['devices', 'offline', 'adopt', 'adopted'].includes(LEG)) {
+  const withState = { devices, offline, adopt, adopted, 'short-write': shortWrite, 'short-adopt': shortAdopt, 'short-waits': shortWaits, 'short-whole': shortWhole, 'short-go-on': shortGoOn };
+  if (withState[LEG]) {
     const s = JSON.parse(process.env.PP_STATE || '{}');
-    await ({ devices, offline, adopt, adopted })[LEG](s);
+    await withState[LEG](s);
   } else if (LEG === 'polls') {
     const s = await polls();
     if (process.env.PP_STATE_OUT) (await import('node:fs')).writeFileSync(process.env.PP_STATE_OUT, JSON.stringify(s));
