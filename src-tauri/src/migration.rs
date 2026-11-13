@@ -7,6 +7,14 @@
 //!   4. Re-cast votes (where the target poll has been migrated)
 //!   5. Retry pending votes in a background loop
 //!
+//! **Since 0.6.0 the app no longer runs this.** What an install wrote on
+//! v1.3 and v1.4 is carried to v1.5 with its proofs (`carry_move.rs`), not
+//! written again. `run_migration` and `carry_private` are compiled into the
+//! test build only (feature `harness`): the matrix's `migration` leg uses
+//! them to make the shape a 0.5.0 install left, which `carry_move` must map
+//! for everyone updating from 0.5.0. The state file they wrote is still read
+//! (`MigrationState`): the backup counts what 0.5.0 copied.
+//!
 //! ## For developers forking this app
 //!
 //! The migration pattern works for any data model. To adapt:
@@ -18,6 +26,10 @@
 //! You do NOT need to change version numbers or client variable names —
 //! `run_migration()` takes source and destination clients as parameters,
 //! and the state file name is derived from `ACTIVE_APP_ID` automatically.
+
+// Outside the test build nothing calls the two entry points, so what only
+// they use is unused there (and not in the program at all).
+#![cfg_attr(not(feature = "harness"), allow(dead_code, unused_imports))]
 
 use crate::commands::AppState;
 use holochain_types::prelude::ActionHash;
@@ -260,6 +272,7 @@ async fn call_zome_on(
 /// client (`state.app_client_v1_4`: this module is the v1.3 to v1.4 move;
 /// v1.5 carries records instead, `carry_move.rs`). Everything else is
 /// version-agnostic.
+#[cfg(feature = "harness")]
 pub async fn run_migration(
     state: &Arc<AppState>,
     app_handle: &tauri::AppHandle,
@@ -621,6 +634,7 @@ pub async fn run_migration(
 /// A reason follows its vote only when the vote itself moved (a vote left on
 /// v1.3 keeps its reason there, and `get_vote_rationale` reads it there).
 /// Returns (drafts copied, reasons copied).
+#[cfg(feature = "harness")]
 pub async fn carry_private(state: &Arc<AppState>) -> Result<(usize, usize), String> {
     if state.migration_state.lock().await.private_carried {
         return Ok((0, 0));
