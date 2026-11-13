@@ -39,6 +39,10 @@ describe("the start screen while a history is restored", () => {
 
   it("restoring: one line, one explanation, the spinner below the header", async () => {
     await show({ status: "restoring", waited_secs: 12, missing: 0, retry_in_secs: 0 });
+    // An app that is ready no longer asks for its status; one that opens
+    // does, each second until it is ready. So the window opens again here,
+    // as it does on the start this screen belongs to.
+    await browser.refresh();
     const line = await byId("nav-restoring");
     await line.waitForDisplayed({ timeout: 20_000 });
     expect(await line.getText()).toContain("Restoring your polls and votes from the network");

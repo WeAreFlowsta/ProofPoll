@@ -266,17 +266,50 @@ pub(crate) async fn read_or_local(client: &crate::hc::AppClient, fn_name: &str, 
 /// with your zome name and function name from your Tauri commands.
 /// Call a zome function on either line. `payload` and the result are the
 /// msgpack bytes (`hc::encode` / `hc::decode`, `hc::records`).
-/// When the app last asked a conductor for anything (unix seconds).
-pub(crate) static LAST_CALL_SECS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// When the app last asked a conductor to write (unix seconds), and how many
+/// calls are waiting for their answer now.
+pub(crate) static LAST_WRITE_SECS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub(crate) static CALLS_IN_FLIGHT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A call that only reads: the coordinators name every read `get_...`.
+/// The pages read by themselves (the poll list every 30 s, the sign-in
+/// state every 15 s), so a read is no sign that anyone is at work.
+pub(crate) fn only_reads(fn_name: &str) -> bool {
+    fn_name.starts_with("get_")
+}
+
+/// Whether this is a quiet moment: no call waiting for its answer, and the
+/// last write at least a minute ago.
+pub(crate) fn quiet_at(now_secs: u64, last_write_secs: u64, in_flight: u64) -> bool {
+    in_flight == 0 && now_secs.saturating_sub(last_write_secs) >= 60
+}
+
+/// One call waiting for its answer, until dropped.
+struct InFlight;
+impl InFlight {
+    fn new() -> Self {
+        CALLS_IN_FLIGHT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        InFlight
+    }
+}
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        CALLS_IN_FLIGHT.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
 
 pub(crate) fn unix_secs() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
-/// A quiet moment: nothing asked of a conductor for a minute. A restart of
-/// the lines for their memory waits for one (`conductor::spawn_watch`).
+/// A quiet moment: nothing written for a minute and no call waiting. A
+/// restart of the lines for their memory waits for one
+/// (`conductor::spawn_watch`). The pages' own reads do not count: with a
+/// window open they never leave a minute free (11-14, the matrix's watch
+/// leg: ten minutes over the size and no restart).
 pub(crate) fn quiet_now(_state: &AppState) -> bool {
-    unix_secs().saturating_sub(LAST_CALL_SECS.load(std::sync::atomic::Ordering::Relaxed)) >= 60
+    use std::sync::atomic::Ordering::SeqCst;
+    quiet_at(unix_secs(), LAST_WRITE_SECS.load(SeqCst), CALLS_IN_FLIGHT.load(SeqCst))
 }
 
 pub(crate) async fn call_zome(
@@ -285,7 +318,10 @@ pub(crate) async fn call_zome(
     fn_name: &str,
     payload: Vec<u8>,
 ) -> Result<Vec<u8>, String> {
-    LAST_CALL_SECS.store(unix_secs(), std::sync::atomic::Ordering::Relaxed);
+    let _waiting = InFlight::new();
+    if !only_reads(fn_name) {
+        LAST_WRITE_SECS.store(unix_secs(), std::sync::atomic::Ordering::SeqCst);
+    }
     let result = client.call_zome(ROLE_NAME, zome, fn_name, payload.clone()).await;
     match result {
         Ok(r) => Ok(r),
@@ -1963,4 +1999,28 @@ pub fn restore_try_again() -> bool {
     let taken = crate::dna::ask_to_try_again();
     log::info!("[restore] the person asked to try again{}", if taken { "" } else { ": not yet (the other device needs a few minutes first)" });
     taken
+}
+
+#[cfg(test)]
+mod quiet_tests {
+    use super::{only_reads, quiet_at};
+
+    /// The memory restart waits for a quiet moment. The pages read on their
+    /// own timers, so reads must not hold it off; a write does, for a
+    /// minute, and so does any call still waiting for its answer.
+    #[test]
+    fn a_quiet_moment_ignores_the_pages_own_reads() {
+        for read in ["get_all_polls", "get_all_polls_local", "get_linked_agents", "get_poll_flags", "get_my_drafts", "get_all_migration_mappings"] {
+            assert!(only_reads(read), "{}", read);
+        }
+        for write in ["create_poll", "cast_vote", "flag_poll", "remove_flag", "delete_poll", "create_encrypted_entry", "create_external_link", "register_migrated_poll", "revoke_link"] {
+            assert!(!only_reads(write), "{}", write);
+        }
+        let now = 1_794_600_000;
+        assert!(quiet_at(now, 0, 0), "nothing ever written");
+        assert!(quiet_at(now, now - 60, 0));
+        assert!(!quiet_at(now, now - 59, 0), "a write less than a minute ago");
+        assert!(!quiet_at(now, now - 3600, 1), "a call is waiting for its answer");
+        assert!(quiet_at(now, now + 5, 0) == false, "a clock that stepped back is not quiet");
+    }
 }

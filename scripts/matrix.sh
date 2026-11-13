@@ -85,6 +85,13 @@ for leg in $LEGS; do
     dbus-run-session -- scripts/run-test-instance.sh pp-a 100 28801 "$VPORT" >> "$LOGS/pp-a.log" 2>&1 &
     wait_harness 28801 || true
     for i in $(seq 1 100); do curl -s -m 2 http://127.0.0.1:28801/dev/status | grep -q '"ready":true' && break; sleep 3; done
+    # Every start writes one signing grant at the head of each chain, and a
+    # grant leaves the device only minutes later (nothing else is written on
+    # v1.4 to carry it out sooner). The adopt leg stops A for good about two
+    # minutes after it begins, and its restore must find A's whole chain on
+    # C and D: 11-14, three starts in this leg's last minute left v1.4 three
+    # grants short there. So A gets the time a device normally has.
+    case " $LEGS " in *" adopt "*) sleep 360;; esac
   elif [ "$leg" = adopt ]; then
     # C and D join as peers that stay up (a restore needs two agreeing on
     # A's chain head); A backs up, B adopts its seed and exits; A stops (the
