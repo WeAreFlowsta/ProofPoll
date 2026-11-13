@@ -431,39 +431,50 @@ impl PpLines {
             }
             let restore_began = std::time::Instant::now();
             let missing_now = std::sync::atomic::AtomicU32::new(0);
-            for app in restoring {
-                let backup_head = restore_marker.as_ref().and_then(|m| m.heads.get(app.dna_version).copied());
-                let progress = |_waited_secs: u64| {
-                    self.set_status(ConductorStatus::Restoring { waited_secs: restore_began.elapsed().as_secs(), missing: missing_now.load(Ordering::SeqCst) })
-                };
-                // A restore that comes back shorter than the backup is set aside
-                // (this device leaves the network under the key) until the person
-                // says to try again or to go on without them (the start screen).
-                loop {
-                    match crate::dna::wait_for_restore_07(process.admin_port, app, backup_head, &progress).await? {
-                        crate::dna::Restored::Whole => break,
-                        crate::dna::Restored::Short { have, want } => {
-                            missing_now.store(want.saturating_sub(have), Ordering::SeqCst);
-                            if !crate::dna::RESTORE_ACCEPT_SHORT.load(Ordering::SeqCst) {
-                                crate::dna::set_short_restore_aside_07(process.admin_port, app).await?;
-                                // Until the person says: try again (the old
-                                // device has been opened), or go on without them.
-                                crate::dna::RESTORE_TRY_AGAIN.store(false, Ordering::SeqCst);
-                                loop {
-                                    progress(0);
-                                    if crate::dna::RESTORE_ACCEPT_SHORT.load(Ordering::SeqCst) || crate::dna::RESTORE_TRY_AGAIN.swap(false, Ordering::SeqCst) {
-                                        break;
-                                    }
-                                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                                }
-                                log::info!("[restore] v{}: asking the network again", app.dna_version);
-                                crate::dna::ask_again_07(process.admin_port, &self.resource_dir, agent_07.get_raw_39(), app).await?;
-                            }
-                        }
+            let progress = |_waited_secs: u64| {
+                self.set_status(ConductorStatus::Restoring { waited_secs: restore_began.elapsed().as_secs(), missing: missing_now.load(Ordering::SeqCst) })
+            };
+            // Every restoring app is looked at before anything waits. A
+            // restore that comes back shorter than the backup is set aside
+            // (this device leaves the network under the key in that app) and
+            // the start waits for the person: try again (the old device has
+            // been opened), or go on without the missing records. With two
+            // apps, the first short one used to hold the start before the
+            // second was looked at, which left that one installed (matrix
+            // 11-13).
+            let mut waiting = restoring;
+            loop {
+                let mut short = Vec::new();
+                let mut missing = 0u32;
+                for app in &waiting {
+                    let backup_head = restore_marker.as_ref().and_then(|m| m.heads.get(app.dna_version).copied());
+                    if let crate::dna::Restored::Short { have, want } = crate::dna::wait_for_restore_07(process.admin_port, *app, backup_head, &progress).await? {
+                        missing += want.saturating_sub(have);
+                        short.push(*app);
                     }
                 }
-                missing_now.store(0, Ordering::SeqCst);
+                if short.is_empty() {
+                    break;
+                }
+                missing_now.store(missing, Ordering::SeqCst);
+                for app in &short {
+                    crate::dna::set_short_restore_aside_07(process.admin_port, *app).await?;
+                }
+                crate::dna::RESTORE_TRY_AGAIN.store(false, Ordering::SeqCst);
+                loop {
+                    progress(0);
+                    if crate::dna::RESTORE_ACCEPT_SHORT.load(Ordering::SeqCst) || crate::dna::RESTORE_TRY_AGAIN.swap(false, Ordering::SeqCst) {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                }
+                for app in &short {
+                    log::info!("[restore] v{}: asking the network again", app.dna_version);
+                    crate::dna::ask_again_07(process.admin_port, &self.resource_dir, agent_07.get_raw_39(), *app).await?;
+                }
+                waiting = short;
             }
+            missing_now.store(0, Ordering::SeqCst);
             crate::seed_adopt::clear_restore_marker(&self.data_dir);
             use tauri::Manager;
             if let Some(state) = self.app.try_state::<Arc<crate::commands::AppState>>() {
