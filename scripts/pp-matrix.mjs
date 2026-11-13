@@ -255,7 +255,8 @@ async function shortWhole(state) {
     const due = presses === 0 || Date.now() - pressedAt > 20 * 60 * 1000;
     if (cs?.status === 'restoring' && (presses === 0 || cs.missing > 0) && due) {
       const again = await op(A, { op: 'restore_try_again' });
-      if (again.ok) { presses += 1; pressedAt = Date.now(); console.log(`    (Try again, press ${presses}, ${new Date().toISOString().slice(11, 19)})`); }
+      // Not taken while the app still asks for the wait (its screen says how long).
+      if (again.ok && again.data?.asked) { presses += 1; pressedAt = Date.now(); console.log(`    (Try again, press ${presses}, ${new Date().toISOString().slice(11, 19)})`); }
     }
     return false;
   }, 65 * 60, 10000);

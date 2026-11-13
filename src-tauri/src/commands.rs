@@ -1959,7 +1959,8 @@ pub fn restore_go_on() {
 /// The start screen's "Try again": ask the network once more for the chain
 /// a short restore was set aside for (`conductor.rs`).
 #[tauri::command]
-pub fn restore_try_again() {
-    log::info!("[restore] the person asked to try again");
-    crate::dna::RESTORE_TRY_AGAIN.store(true, std::sync::atomic::Ordering::SeqCst);
+pub fn restore_try_again() -> bool {
+    let taken = crate::dna::ask_to_try_again();
+    log::info!("[restore] the person asked to try again{}", if taken { "" } else { ": not yet (the other device needs a few minutes first)" });
+    taken
 }

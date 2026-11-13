@@ -794,6 +794,46 @@ pub static RESTORE_ACCEPT_SHORT: std::sync::atomic::AtomicBool = std::sync::atom
 /// taken (and cleared) by the start's wait in `conductor.rs`.
 pub static RESTORE_TRY_AGAIN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// When a short restore was last set aside (unix seconds; 0: none is).
+pub static RESTORE_SET_ASIDE_AT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How long after a short restore is set aside "Try again" is taken. Each
+/// try puts this device on the network under the key for a moment, and the
+/// peers then follow it and not the old device until the old device's notes
+/// are back: tried every minute, the old device's last action on one chain
+/// never arrived in twenty (matrix 2026-11-13); tried once after eight, both
+/// chains came back whole.
+pub const RETRY_AFTER_SECS: u64 = 5 * 60;
+
+fn unix_secs() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+/// Seconds until "Try again" is taken; 0 when it is, or nothing is set aside.
+pub fn retry_in_secs() -> u32 {
+    retry_in(RESTORE_SET_ASIDE_AT.load(std::sync::atomic::Ordering::SeqCst), unix_secs())
+}
+
+pub(crate) fn retry_in(set_aside_at: u64, now: u64) -> u32 {
+    if set_aside_at == 0 {
+        return 0;
+    }
+    (set_aside_at + RETRY_AFTER_SECS).saturating_sub(now) as u32
+}
+
+/// The person pressed "Try again": taken once the wait is over.
+pub fn ask_to_try_again() -> bool {
+    if retry_in_secs() > 0 {
+        return false;
+    }
+    RESTORE_TRY_AGAIN.store(true, std::sync::atomic::Ordering::SeqCst);
+    true
+}
+
+pub(crate) fn note_set_aside(now_set_aside: bool) {
+    RESTORE_SET_ASIDE_AT.store(if now_set_aside { unix_secs() } else { 0 }, std::sync::atomic::Ordering::SeqCst);
+}
+
 /// What a finished restore came back with (the library's type): `Whole`
 /// is enabled; `Short` is not, the network's copy ending at `have` and the
 /// backup at `want` (the peers a restore asks agreed on a head from before
@@ -974,6 +1014,16 @@ pub async fn setup_app_interface_07(admin_port: u16) -> Result<(u16, crate::hc::
 #[cfg(test)]
 mod restore_tests {
     use flowsta_hc_lines::restore::short_by as restore_is_short;
+
+    #[test]
+    fn try_again_waits_five_minutes_after_a_short_restore_is_set_aside() {
+        use super::{retry_in, RETRY_AFTER_SECS};
+        assert_eq!(retry_in(0, 1_000), 0, "nothing set aside, nothing to wait for");
+        assert_eq!(retry_in(1_000, 1_000), RETRY_AFTER_SECS as u32);
+        assert_eq!(retry_in(1_000, 1_000 + RETRY_AFTER_SECS - 1), 1);
+        assert_eq!(retry_in(1_000, 1_000 + RETRY_AFTER_SECS), 0);
+        assert_eq!(retry_in(1_000, 9_999), 0);
+    }
 
     #[test]
     fn a_restore_is_short_only_when_it_ends_before_the_backup() {

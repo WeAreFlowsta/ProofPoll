@@ -40,7 +40,7 @@ interface AppStatus {
   conductor_status:
     | { status: "stopped" }
     | { status: "starting"; message: string }
-    | { status: "restoring"; waited_secs: number; missing?: number }
+    | { status: "restoring"; waited_secs: number; missing?: number; retry_in_secs?: number }
     | { status: "ready"; admin_port: number; app_port: number }
     | { status: "error"; message: string };
   relaunched_into_identity?: boolean;
@@ -779,14 +779,20 @@ export default component$(() => {
                       </button>
                       <button
                         data-testid="nav-restoring-try-again"
+                        disabled={(status.value.conductor_status.retry_in_secs ?? 0) > 0}
                         onClick$={async () => {
                           await invoke("restore_try_again");
                         }}
-                        class="bg-indigo-600 hover:bg-indigo-500 text-white px-5 py-2 rounded-full text-sm font-medium"
+                        class="bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 disabled:hover:bg-indigo-600 text-white px-5 py-2 rounded-full text-sm font-medium"
                       >
                         Try again
                       </button>
                     </div>
+                    {(status.value.conductor_status.retry_in_secs ?? 0) > 0 && (
+                      <p class="text-gray-500 text-xs text-center" data-testid="nav-restoring-retry-wait">
+                        {`You can try again in ${Math.ceil((status.value.conductor_status.retry_in_secs ?? 0) / 60)} min. Your other device needs that long to pass its records on.`}
+                      </p>
+                    )}
                   </div>
                 )}
                 {status.value.conductor_status.waited_secs >= 120 && (status.value.conductor_status.missing ?? 0) === 0 && (

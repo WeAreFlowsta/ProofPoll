@@ -206,8 +206,9 @@ pub enum ConductorStatus {
     /// (`restore_from_dht`); the start waits for it, with no time limit.
     /// `missing`: the old device's last records the network does not hold
     /// yet (a restore came back shorter than the backup); 0 while unknown.
+    /// `retry_in_secs`: how long until "Try again" is taken (`dna.rs`).
     #[serde(rename = "restoring")]
-    Restoring { waited_secs: u64, missing: u32 },
+    Restoring { waited_secs: u64, missing: u32, retry_in_secs: u32 },
     #[serde(rename = "ready")]
     Ready { admin_port: u16, app_port: u16 },
     #[serde(rename = "error")]
@@ -432,7 +433,7 @@ impl PpLines {
             let restore_began = std::time::Instant::now();
             let missing_now = std::sync::atomic::AtomicU32::new(0);
             let progress = |_waited_secs: u64| {
-                self.set_status(ConductorStatus::Restoring { waited_secs: restore_began.elapsed().as_secs(), missing: missing_now.load(Ordering::SeqCst) })
+                self.set_status(ConductorStatus::Restoring { waited_secs: restore_began.elapsed().as_secs(), missing: missing_now.load(Ordering::SeqCst), retry_in_secs: crate::dna::retry_in_secs() })
             };
             // Every restoring app is looked at before anything waits. A
             // restore that comes back shorter than the backup is set aside
@@ -461,6 +462,8 @@ impl PpLines {
                     crate::dna::set_short_restore_aside_07(process.admin_port, *app).await?;
                 }
                 crate::dna::RESTORE_TRY_AGAIN.store(false, Ordering::SeqCst);
+                // "Try again" is taken five minutes from now (`dna::RETRY_AFTER_SECS`).
+                crate::dna::note_set_aside(true);
                 loop {
                     progress(0);
                     if crate::dna::RESTORE_ACCEPT_SHORT.load(Ordering::SeqCst) || crate::dna::RESTORE_TRY_AGAIN.swap(false, Ordering::SeqCst) {
@@ -468,6 +471,7 @@ impl PpLines {
                     }
                     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 }
+                crate::dna::note_set_aside(false);
                 for app in &short {
                     log::info!("[restore] v{}: asking the network again", app.dna_version);
                     crate::dna::ask_again_07(process.admin_port, &self.resource_dir, agent_07.get_raw_39(), *app).await?;

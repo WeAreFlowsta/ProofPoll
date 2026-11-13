@@ -430,8 +430,8 @@ async fn op(Ax(app): Ax<tauri::AppHandle>, Json(body): Json<Value>) -> Reply {
         // The start screen's "Continue without them" during a restore that
         // came back shorter than the backup.
         "restore_try_again" => {
-            crate::dna::RESTORE_TRY_AGAIN.store(true, std::sync::atomic::Ordering::SeqCst);
-            ok(json!({ "asked": true }))
+            let asked = crate::dna::ask_to_try_again();
+            ok(json!({ "asked": asked, "retry_in_secs": crate::dna::retry_in_secs() }))
         }
         "restore_go_on" => {
             crate::dna::RESTORE_ACCEPT_SHORT.store(true, std::sync::atomic::Ordering::SeqCst);
