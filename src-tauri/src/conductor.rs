@@ -195,7 +195,7 @@ static CLOSING: AtomicBool = AtomicBool::new(false);
 const CLOSING_NO_RESTART: &str = "the app is closing: the lines stay stopped";
 
 /// Conductor status reported to the frontend.
-#[derive(Clone, serde::Serialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "status")]
 pub enum ConductorStatus {
     #[serde(rename = "stopped")]

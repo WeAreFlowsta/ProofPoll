@@ -291,11 +291,55 @@ async function shortGoOn(state) {
   record("C: sees A's new poll", await until(async () => ((await op(C, { op: 'polls' })).data || []).some((p) => p.hash === made.data), 300, 10000));
 }
 
+/** The watch: the lines restart for their memory at a quiet moment, and a
+ *  conductor that stops is started again (each line in turn). The instance
+ *  runs with PROOFPOLL_TEST_MEMORY_RESTART (matrix.sh). */
+async function watch(state) {
+  console.log('\n── The watch: a memory restart, then each conductor killed');
+  record('A: ready', await waitReady(A, 300));
+  const pidsOf = async () => (await status(A)).conductor_pids || null;
+  const readyWith = (differ) => until(async () => {
+    const st = await status(A);
+    return st.app?.ready === true && Array.isArray(st.conductor_pids) && differ(st.conductor_pids);
+  }, 600, 5000);
+
+  // 1. Memory: both conductors are over the test's size at once; after a
+  //    minute running and a minute with nothing asked, the lines restart.
+  const p0 = await pidsOf();
+  record('A: reports both conductors', Array.isArray(p0) && p0.length === 2 && p0.every((x) => x > 0), JSON.stringify(p0));
+  if (!Array.isArray(p0)) return;
+  const t0 = Date.now();
+  const again = await readyWith((p) => p[0] !== p0[0] && p[1] !== p0[1]);
+  record('A: restarts its lines for their memory at a quiet moment, by itself', again, `${Math.round((Date.now() - t0) / 1000)} s; ${JSON.stringify(await pidsOf())}`);
+  const said = /\[memory\] the (0\.6|0\.7) conductor holds \d+ MB: restarting the lines/.test((await logsSinceStart('pp-a')).app);
+  record('A: its log says why', said);
+
+  // 2. Each conductor killed in turn: the app starts the lines again.
+  for (const [index, line] of [[1, '0.7'], [0, '0.6']]) {
+    const before = await pidsOf();
+    if (!Array.isArray(before)) { record(`A: the ${line} conductor is there to stop`, false); return; }
+    try { process.kill(before[index], 'SIGKILL'); } catch (e) { record(`A: the ${line} conductor is stopped`, false, String(e)); return; }
+    const t1 = Date.now();
+    const back = await readyWith((p) => p[index] !== before[index]);
+    record(`A: a ${line} conductor that stops is started again`, back, `${Math.round((Date.now() - t1) / 1000)} s; ${JSON.stringify({ before, after: await pidsOf() })}`);
+    const listed = await until(async () => { const r = await op(A, { op: 'polls' }); return r.ok && Array.isArray(r.data); }, 300, 5000);
+    record(`A: its polls list after the ${line} conductor came back`, listed);
+    if (state.hash) {
+      const has = ((await op(A, { op: 'polls' })).data || []).some((p) => p.hash === state.hash || p.poll?.hash === state.hash);
+      record(`A: the poll it made earlier is still there`, has);
+    }
+  }
+  const logs = (await logsSinceStart('pp-a')).app;
+  record('A: its log names each stop and each recovery', (logs.match(/\[watch\] a conductor stopped: starting the lines again/g) || []).length >= 2 && (logs.match(/\[watch\] the lines are back/g) || []).length >= 2);
+  const made = await op(A, { op: 'create_poll', title: `after the watch ${nowS()}`, description: 'written after two recoveries', options: ['yes', 'no'], closes_at: nowS() + 86400 }, 300);
+  record('A: creates a poll after the recoveries', made.ok && typeof made.data === 'string', made.error || made.data);
+}
+
 // ───────────────────────── main ─────────────────────────
 
 const legs = { fresh, signin: () => signin(), polls, migration, carrier };
 try {
-  const withState = { devices, offline, adopt, adopted, 'short-write': shortWrite, 'short-adopt': shortAdopt, 'short-waits': shortWaits, 'short-whole': shortWhole, 'short-go-on': shortGoOn };
+  const withState = { devices, offline, watch, adopt, adopted, 'short-write': shortWrite, 'short-adopt': shortAdopt, 'short-waits': shortWaits, 'short-whole': shortWhole, 'short-go-on': shortGoOn };
   if (withState[LEG]) {
     const s = JSON.parse(process.env.PP_STATE || '{}');
     await withState[LEG](s);

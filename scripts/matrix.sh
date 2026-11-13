@@ -3,7 +3,9 @@
 # identity (the Vault repo beside this one, its test binary built), ProofPoll
 # test instances A and B (scripts/build-test-binary.sh), the legs in order;
 # C and D join for the restore (its quorum: two peers agreeing on the chain head).
-# Usage: scripts/matrix.sh [log dir]     (LEGS="fresh signin polls migration devices offline adopt short")
+# Usage: scripts/matrix.sh [log dir]     (LEGS="fresh signin polls migration devices offline watch adopt short")
+# `watch`: A restarts its lines for their memory by itself, and a conductor
+# that is killed is started again (each line in turn).
 # `short` (a restore that comes back shorter than the backup, then whole) runs
 # after `adopt`; LEGS="... adopt short-go-on" runs its other ending instead.
 # The node's carrier on its own: LEGS=carrier scripts/matrix.sh (every instance
@@ -14,7 +16,7 @@ cd "$(dirname "$0")/.."
 PP="$PWD"
 VAULT_REPO="${VAULT_REPO:-$PP/../flowsta-vault}"
 LOGS="${1:-$HOME/.cache/proofpoll-matrix/run-$(date -u +%m%d-%H%M)}"; mkdir -p "$LOGS"
-LEGS="${LEGS:-fresh signin polls migration devices offline adopt short}"
+LEGS="${LEGS:-fresh signin polls migration devices offline watch adopt short}"
 ORIGIN=https://ourtest.flowsta.com
 CLIENT_ID="$(grep -o 'VITE_FLOWSTA_CLIENT_ID=[^ \\]*' scripts/build-test-binary.sh | cut -d= -f2-)"
 rc=0
@@ -71,6 +73,18 @@ for leg in $LEGS; do
     for i in $(seq 1 20); do pgrep -f "proofpoll-test-pp-a/" >/dev/null || break; sleep 1; done
     PROOFPOLL_TEST_OFFLINE_UNTIL=$(( $(date +%s) + 90 )) dbus-run-session -- scripts/run-test-instance.sh pp-a 100 28801 "$VPORT" >> "$LOGS/pp-a.log" 2>&1 &
     PP_STATE="$(cat "$STATE" 2>/dev/null || echo '{}')" node scripts/pp-matrix.mjs --leg=offline > "$LOGS/leg-$leg.log" 2>&1 || rc=1
+  elif [ "$leg" = watch ]; then
+    # A again, its memory restart within reach (a debug switch: over 1 MB,
+    # after 60 s running, once in an hour), then each conductor killed in
+    # turn. A starts once more afterwards, as every later leg expects it.
+    stop_instance 28801 pp-a
+    PROOFPOLL_TEST_MEMORY_RESTART=1,60,3600 dbus-run-session -- scripts/run-test-instance.sh pp-a 100 28801 "$VPORT" >> "$LOGS/pp-a.log" 2>&1 &
+    wait_harness 28801 || true
+    PP_STATE="$(cat "$STATE" 2>/dev/null || echo '{}')" node scripts/pp-matrix.mjs --leg=watch > "$LOGS/leg-$leg.log" 2>&1 || rc=1
+    stop_instance 28801 pp-a
+    dbus-run-session -- scripts/run-test-instance.sh pp-a 100 28801 "$VPORT" >> "$LOGS/pp-a.log" 2>&1 &
+    wait_harness 28801 || true
+    for i in $(seq 1 100); do curl -s -m 2 http://127.0.0.1:28801/dev/status | grep -q '"ready":true' && break; sleep 3; done
   elif [ "$leg" = adopt ]; then
     # C and D join as peers that stay up (a restore needs two agreeing on
     # A's chain head); A backs up, B adopts its seed and exits; A stops (the

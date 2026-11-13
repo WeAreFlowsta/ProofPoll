@@ -429,6 +429,17 @@ async fn op(Ax(app): Ax<tauri::AppHandle>, Json(body): Json<Value>) -> Reply {
         "chain07" => chain07(&opt_s(&body, "dna").unwrap_or_else(|| "1.4".into())).await,
         // The start screen's "Continue without them" during a restore that
         // came back shorter than the backup.
+        // The start screen as a state shows it, without living through it
+        // (the UI suite's restoring screens; the app's own state is put
+        // back by showing its `ready` again).
+        "show_status" => match serde_json::from_value::<crate::conductor::ConductorStatus>(body.get("status").cloned().unwrap_or(Value::Null)) {
+            Ok(status) => {
+                *state.conductor_status.lock().unwrap() = status.clone();
+                let _ = tauri::Emitter::emit(&app, "conductor-status", status);
+                ok(json!({ "shown": true }))
+            }
+            Err(e) => failed(format!("status: {}", e)),
+        },
         "restore_try_again" => {
             let asked = crate::dna::ask_to_try_again();
             ok(json!({ "asked": asked, "retry_in_secs": crate::dna::retry_in_secs() }))
