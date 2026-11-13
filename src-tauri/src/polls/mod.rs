@@ -19,6 +19,8 @@ mod commands;
 mod flags;
 #[cfg_attr(not(feature = "harness"), allow(dead_code, unused_imports))]
 mod harness;
+#[cfg(feature = "harness")]
+mod harness_ops;
 mod private;
 mod types;
 
@@ -26,5 +28,7 @@ pub use commands::*;
 pub use flags::*;
 #[allow(unused_imports)]
 pub(crate) use harness::*;
+#[cfg(feature = "harness")]
+pub(crate) use harness_ops::harness_op;
 pub use private::*;
 pub use types::*;
