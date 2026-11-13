@@ -355,9 +355,9 @@ fn generate_passphrase() -> String {
 /// User-facing app name - shown in Vault dialogs and carried in backup
 /// payloads and data exports. Forks: change once here; the frontend has its
 /// own copies (see the README's rename checklist).
-const APP_NAME: &str = "ProofPoll";
+const APP_NAME: &str = crate::names::APP_NAME;
 /// Must match the role `id` in your happ.yaml.
-const ROLE_NAME: &str = "proofpoll";
+const ROLE_NAME: &str = crate::names::ROLE_NAME;
 /// Your app's coordinator zome name (from dna.yaml).
 const POLLS_ZOME: &str = "polls";
 /// Flowsta agent-linking zome — keep as-is for identity integration.

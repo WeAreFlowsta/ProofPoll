@@ -37,9 +37,9 @@ use tauri::Emitter;
 /// Admin WebSocket port for the local Holochain conductor.
 /// Different from Flowsta Vault's 4455 so both can run simultaneously.
 /// Change this if running alongside other Holochain apps.
-const ADMIN_WS_PORT_BASE: u16 = 4466;
+const ADMIN_WS_PORT_BASE: u16 = crate::names::ADMIN_PORT_06;
 /// Admin websocket of the Holochain 0.7.1 conductor (DNA v1.4+).
-const ADMIN_WS_PORT_07_BASE: u16 = 4467;
+const ADMIN_WS_PORT_07_BASE: u16 = crate::names::ADMIN_PORT_07;
 
 /// The 0.6.1 conductor's admin port.
 pub fn admin_port() -> u16 {
@@ -158,7 +158,7 @@ fn auth_material() -> Option<&'static str> {
 }
 
 /// The library's supervisor: it owns both lines' key stores and conductors.
-static SUPERVISOR: LazyLock<Arc<Supervisor>> = LazyLock::new(|| Arc::new(Supervisor::new("pp")));
+static SUPERVISOR: LazyLock<Arc<Supervisor>> = LazyLock::new(|| Arc::new(Supervisor::new(crate::names::ORIGIN_PREFIX)));
 
 pub fn supervisor() -> &'static Arc<Supervisor> {
     &SUPERVISOR
@@ -243,8 +243,8 @@ pub fn line_dirs(data_dir: &Path, line: Line) -> (PathBuf, PathBuf) {
 /// A line's sidecars: its key store, then its conductor.
 fn sidecars(line: Line) -> (&'static str, &'static str) {
     match line {
-        Line::V06 => ("proofpoll-lair-keystore", "proofpoll-holochain-06"),
-        Line::V07 => ("proofpoll-lair-keystore-07", "proofpoll-holochain"),
+        Line::V06 => (crate::names::LAIR_06, crate::names::CONDUCTOR_06),
+        Line::V07 => (crate::names::LAIR_07, crate::names::CONDUCTOR_07),
     }
 }
 
@@ -1010,8 +1010,8 @@ mod tests {
         let root = Path::new("/p");
         assert_eq!(line_dirs(root, Line::V06), (PathBuf::from("/p/lair"), PathBuf::from("/p/conductor")));
         assert_eq!(line_dirs(root, Line::V07), (PathBuf::from("/p/lair-07"), PathBuf::from("/p/conductor-07")));
-        assert_eq!(sidecars(Line::V06), ("proofpoll-lair-keystore", "proofpoll-holochain-06"));
-        assert_eq!(sidecars(Line::V07), ("proofpoll-lair-keystore-07", "proofpoll-holochain"));
+        assert_eq!(sidecars(Line::V06), (crate::names::LAIR_06, crate::names::CONDUCTOR_06));
+        assert_eq!(sidecars(Line::V07), (crate::names::LAIR_07, crate::names::CONDUCTOR_07));
         assert_ne!(line_admin_port(Line::V06), line_admin_port(Line::V07));
     }
 

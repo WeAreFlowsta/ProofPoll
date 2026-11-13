@@ -15,16 +15,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// go into the next one.
 pub const KIT_06: KitDescriptor = KitDescriptor {
     line: Line::V06,
-    conductor: KitBinary { sidecar: "proofpoll-holochain-06", version: "0.6.1", accepted: &[] },
-    lair: KitBinary { sidecar: "proofpoll-lair-keystore", version: "0.6.3", accepted: &[] },
+    conductor: KitBinary { sidecar: crate::names::CONDUCTOR_06, version: "0.6.1", accepted: &[] },
+    lair: KitBinary { sidecar: crate::names::LAIR_06, version: "0.6.3", accepted: &[] },
     files: &[KitFile { name: "proofpoll_v1_3_happ.happ", sha256: "7cac687ab376a5dbdad453a8b77768edec30c5bd656adb57f7dad5ad69eeb197" }],
 };
 
 /// The 0.7.1 line's kit.
 pub const KIT_07: KitDescriptor = KitDescriptor {
     line: Line::V07,
-    conductor: KitBinary { sidecar: "proofpoll-holochain", version: "0.7.1", accepted: &[] },
-    lair: KitBinary { sidecar: "proofpoll-lair-keystore-07", version: "0.7.1", accepted: &[] },
+    conductor: KitBinary { sidecar: crate::names::CONDUCTOR_07, version: "0.7.1", accepted: &[] },
+    lair: KitBinary { sidecar: crate::names::LAIR_07, version: "0.7.1", accepted: &[] },
     files: &[
         KitFile { name: "proofpoll_v1_4_happ.happ", sha256: "160f768b90a5e5ae27252af472ea95166782c0949f9df137ad3fd96507928dac" },
         KitFile { name: "proofpoll_v1_5_happ.happ", sha256: "5966ce50b950439ce386849e1c6ad3a23d270cbd845997f296a261102b812751" },

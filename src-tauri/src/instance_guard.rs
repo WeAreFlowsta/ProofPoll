@@ -24,12 +24,7 @@
 /// All four sidecars, both lines. With only the first two listed, an
 /// orphaned 0.6 conductor kept port 4466 and the next launch refused with
 /// "Another ProofPoll is already running".
-const SIDECAR_STEMS: &[&str] = &[
-    "proofpoll-holochain",
-    "proofpoll-holochain-06",
-    "proofpoll-lair-keystore",
-    "proofpoll-lair-keystore-07",
-];
+const SIDECAR_STEMS: &[&str] = crate::names::SIDECARS;
 
 /// Stop every orphaned ProofPoll sidecar (the rule and the sweep live in
 /// `flowsta-hc-lines`). Returns how many were stopped. Call before the

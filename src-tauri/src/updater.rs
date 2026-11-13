@@ -18,7 +18,7 @@ use std::time::Duration;
 use tauri::{Emitter, Manager};
 use tauri_plugin_updater::UpdaterExt;
 
-const APP_ID: &str = "com.proofpoll.app";
+const APP_ID: &str = crate::names::APP_IDENTIFIER;
 /// The identities whose signature on a release manifest this build accepts:
 /// Team Flowsta, as for the node manifests.
 const SIGNERS: &[&str] = &["did:flowsta:uhCAkWuA-Ehm9EVzcsPE2Wo_vpc9ImljHN8NMMEXpbtG5BdooOV9a"];

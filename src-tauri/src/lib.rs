@@ -30,6 +30,7 @@ mod instance_guard;
 mod device_seed;
 mod lair;
 pub mod migration;
+mod names;
 mod seed_adopt;
 mod sidecar;
 
@@ -70,10 +71,10 @@ fn test_data_dir() -> Option<std::path::PathBuf> {
 /// there once. The identifier stays: it names the data folder too.
 /// Returns the target and, when the older logs were moved, a line saying so.
 fn log_target(app: &tauri::App) -> (tauri_plugin_log::TargetKind, Option<String>) {
-    let file_name = Some("proofpoll".to_string());
+    let file_name = Some(names::LOG_FILE_NAME.to_string());
     #[cfg(target_os = "macos")]
     if let Some((old, new)) = app.path().app_log_dir().ok().and_then(|old| {
-        let new = old.parent()?.join("ProofPoll");
+        let new = old.parent()?.join(names::LOG_FOLDER_NAME);
         Some((old, new))
     }) {
         let moved = (old.is_dir() && !new.exists()).then(|| match std::fs::rename(&old, &new) {
@@ -139,7 +140,7 @@ pub fn run() {
                     .build(),
             )?;
 
-            log::info!("ProofPoll starting up (v{})", env!("CARGO_PKG_VERSION"));
+            log::info!("{} starting up (v{})", names::APP_NAME, env!("CARGO_PKG_VERSION"));
             if let Some(moved) = log_moved {
                 log::info!("{}", moved);
             }

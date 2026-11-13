@@ -26,7 +26,7 @@ use std::sync::Arc;
 use tauri::Emitter;
 
 /// Role name for zome calls — must match happ.yaml role id.
-const ROLE_NAME: &str = "proofpoll";
+const ROLE_NAME: &str = crate::names::ROLE_NAME;
 
 // ── Migration state (persisted to disk) ───────────────────────────────
 

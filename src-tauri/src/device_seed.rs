@@ -9,8 +9,8 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-pub const RECOVERY_FILE: &str = "proofpoll-recovery.json";
-pub const SEED_TAG: &str = "proofpoll-device-seed";
+pub const RECOVERY_FILE: &str = crate::names::RECOVERY_FILE;
+pub const SEED_TAG: &str = crate::names::SEED_TAG;
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct DeviceSeed {

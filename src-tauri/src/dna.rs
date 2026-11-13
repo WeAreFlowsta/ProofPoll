@@ -841,7 +841,7 @@ async fn admin_07(admin_port: u16) -> Result<flowsta_hc_lines::AdminClient, Stri
 /// minutes). Away from the network, the old device can hand them over.
 pub async fn set_short_restore_aside_07(admin_port: u16, app: App07) -> Result<(), String> {
     let admin = admin_07(admin_port).await?;
-    flowsta_hc_lines::restore::set_aside(&admin, app.app_id, "proofpoll_v1_")
+    flowsta_hc_lines::restore::set_aside(&admin, app.app_id, crate::names::INSTALLED_APP_PREFIX)
         .await
         .map_err(|e| format!("Failed to remove the short restore of v{}: {}", app.dna_version, e))?;
     log::info!("[restore] v{}: the short restore is set aside and this device is off the network under the key", app.dna_version);

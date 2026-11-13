@@ -335,7 +335,7 @@ async fn v15_records(state: &AppState, f: &str, hash: Option<String>) -> Reply {
         None => crate::hc::encode(&()),
     };
     let records = match payload {
-        Ok(p) => client.call_zome("proofpoll", "polls", f, p).await.and_then(|b| crate::hc::records(client.line(), &b)),
+        Ok(p) => client.call_zome(crate::names::ROLE_NAME, "polls", f, p).await.and_then(|b| crate::hc::records(client.line(), &b)),
         Err(e) => Err(e),
     };
     match records {
@@ -524,7 +524,7 @@ async fn backup(state: tauri::State<'_, Arc<AppState>>, client_id: String) -> Re
     let resp = reqwest::Client::new()
         .post(format!("http://127.0.0.1:{}/backup", port))
         .header("Origin", crate::vault_probe::webview_origin())
-        .json(&json!({ "client_id": client_id, "app_name": "ProofPoll", "data": data, "expected_identity": expected }))
+        .json(&json!({ "client_id": client_id, "app_name": crate::names::APP_NAME, "data": data, "expected_identity": expected }))
         .timeout(std::time::Duration::from_secs(60))
         .send()
         .await;
@@ -545,7 +545,7 @@ async fn vault_signs_link(agent: &str, client_id: &str) -> Result<(String, Strin
     let r = reqwest::Client::new()
         .post(format!("{}/link-identity", base))
         .header("Origin", crate::vault_probe::webview_origin())
-        .json(&json!({ "app_name": "ProofPoll", "client_id": client_id, "app_agent_pub_key": agent }))
+        .json(&json!({ "app_name": crate::names::APP_NAME, "client_id": client_id, "app_agent_pub_key": agent }))
         .timeout(std::time::Duration::from_secs(120))
         .send()
         .await
