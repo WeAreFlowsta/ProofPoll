@@ -31,160 +31,38 @@ const SIDECAR_STEMS: &[&str] = &[
     "proofpoll-lair-keystore-07",
 ];
 
-/// What we know about a candidate process's parent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Parent {
-    /// The parent pid is not in the process table (reparented to init /
-    /// launchd, or Windows reused the id for nothing we can see).
-    Gone,
-    /// The parent is this very process: our own child (spawned already).
-    Us,
-    /// The parent is another live ProofPoll main process.
-    OtherProofPoll,
-    /// The parent is some live process that is not ProofPoll.
-    Foreign,
-    /// The parent is itself one of our sidecars: a thread of a running
-    /// sidecar (Linux lists every thread as a process) or its own child.
-    /// Part of something alive - never stopped.
-    Sidecar,
-}
-
-/// The process name without a Windows extension, lower-case.
-pub(crate) fn stem_of(name: &str) -> String {
-    let n = name.to_lowercase();
-    n.strip_suffix(".exe").map(str::to_string).unwrap_or(n)
-}
-
-pub(crate) fn is_sidecar_name(name: &str) -> bool {
-    SIDECAR_STEMS.contains(&stem_of(name).as_str())
-}
-
-/// The one decision: a sidecar is reaped when nothing of ours is holding
-/// it. `Foreign` covers a sidecar adopted by a subreaper (systemd user
-/// session, a terminal that ran the app): its ProofPoll is gone all the
-/// same, so it is reaped too. Only a live ProofPoll parent keeps it.
-pub(crate) fn should_reap(name: &str, parent: Parent) -> bool {
-    is_sidecar_name(name) && matches!(parent, Parent::Gone | Parent::Foreign)
-}
-
-/// Stop every orphaned ProofPoll sidecar. Returns how many were stopped.
-/// Call before the first sidecar of this launch spawns.
+/// Stop every orphaned ProofPoll sidecar (the rule and the sweep live in
+/// `flowsta-hc-lines`). Returns how many were stopped. Call before the
+/// first sidecar of this launch spawns.
 pub fn reap_orphaned_sidecars() -> u32 {
-    use sysinfo::{ProcessRefreshKind, RefreshKind, System, UpdateKind};
-
-    let me = sysinfo::Pid::from_u32(std::process::id());
-    let my_exe = std::env::current_exe().ok();
-    let my_name = my_exe
-        .as_ref()
-        .and_then(|p| p.file_name().map(|n| stem_of(&n.to_string_lossy())));
-
-    let sys = System::new_with_specifics(
-        RefreshKind::nothing()
-            .with_processes(ProcessRefreshKind::nothing().with_exe(UpdateKind::Always)),
-    );
-    let procs = sys.processes();
-    // The kernel's short process name is cut to 15 (Linux) / 16 (macOS)
-    // bytes - "proofpoll-lair-keystore" never fits - so the executable's
-    // file name is the identity, the short name only a fallback (Windows
-    // names are complete).
-    let full_name = |p: &sysinfo::Process| -> String {
-        match p.exe().and_then(|e| e.file_name()) {
-            Some(n) => n.to_string_lossy().to_string(),
-            None => p.name().to_string_lossy().to_string(),
-        }
-    };
-    let is_proofpoll = |pid: &sysinfo::Pid| -> bool {
-        procs.get(pid).map(|p| {
-            match (p.exe(), my_exe.as_deref()) {
-                (Some(e), Some(mine)) => e == mine,
-                _ => Some(stem_of(&full_name(p))) == my_name,
-            }
-        }).unwrap_or(false)
-    };
-
-    let mut reaped = 0u32;
-    for (pid, proc_) in procs {
-        if *pid == me {
-            continue;
-        }
-        let name = full_name(proc_);
-        if !is_sidecar_name(&name) {
-            continue;
-        }
-        // A test instance (debug, `PROOFPOLL_DATA_DIR`) reaps only the
-        // sidecars of its own data folder: the others belong to the
-        // installed ProofPoll or to another test instance.
-        if let Some(dir) = test_data_dir() {
-            let mine = proc_.cmd().iter().any(|a| a.to_string_lossy().contains(&dir));
-            if !mine {
-                continue;
-            }
-        }
-        // Linux lists each thread as a process; stopping a thread's id stops
-        // its whole process, which may be a live sidecar of another app copy.
-        if proc_.thread_kind().is_some() {
-            continue;
-        }
-        let parent = match proc_.parent() {
-            None => Parent::Gone,
-            Some(pp) if pp == me => Parent::Us,
-            Some(pp) if !procs.contains_key(&pp) => Parent::Gone,
-            Some(pp) if procs.get(&pp).map(|q| is_sidecar_name(&full_name(q))).unwrap_or(false) => Parent::Sidecar,
-            Some(pp) if is_proofpoll(&pp) => Parent::OtherProofPoll,
-            Some(_) => Parent::Foreign,
-        };
-        if should_reap(&name, parent) {
-            log::warn!(
-                "[instance] stopping orphaned sidecar {} (pid {}, parent {:?})",
-                name,
-                pid,
-                parent
-            );
-            if proc_.kill() {
-                reaped += 1;
-            } else {
-                log::warn!("[instance] could not stop pid {}", pid);
-            }
-        } else if parent == Parent::OtherProofPoll {
-            log::warn!(
-                "[instance] sidecar {} (pid {}) belongs to another running ProofPoll - left alone",
-                name,
-                pid
-            );
-        }
-    }
-    if reaped > 0 {
-        // Give the kernel a beat to release the conductor port.
-        std::thread::sleep(std::time::Duration::from_millis(400));
-    }
-    reaped
+    flowsta_hc_lines::reap::reap_orphaned_sidecars(SIDECAR_STEMS)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use flowsta_hc_lines::reap::{is_sidecar_name, should_reap, Parent};
 
     #[test]
     fn only_our_sidecar_names_match_with_or_without_exe() {
-        assert!(is_sidecar_name("proofpoll-holochain"));
-        assert!(is_sidecar_name("proofpoll-lair-keystore.exe"));
-        assert!(is_sidecar_name("ProofPoll-Holochain.EXE"));
-        assert!(is_sidecar_name("proofpoll-holochain-06"));
-        assert!(is_sidecar_name("proofpoll-lair-keystore-07.exe"));
-        assert!(!is_sidecar_name("holochain"));
-        assert!(!is_sidecar_name("flowsta-vault-holochain"));
-        assert!(!is_sidecar_name("proofpoll"));
-        assert!(!is_sidecar_name("yourowai-lair-keystore"));
+        let ours = |name: &str| is_sidecar_name(name, SIDECAR_STEMS);
+        assert!(ours("proofpoll-holochain"));
+        assert!(ours("proofpoll-lair-keystore.exe"));
+        assert!(ours("ProofPoll-Holochain.EXE"));
+        assert!(ours("proofpoll-holochain-06"));
+        assert!(ours("proofpoll-lair-keystore-07.exe"));
+        assert!(!ours("holochain"));
+        assert!(!ours("flowsta-vault-holochain"));
+        assert!(!ours("proofpoll"));
+        assert!(!ours("yourowai-lair-keystore"));
     }
 
     #[test]
     fn a_sidecar_is_reaped_only_when_no_live_proofpoll_holds_it() {
-        assert!(should_reap("proofpoll-holochain", Parent::Gone));
-        assert!(should_reap("proofpoll-lair-keystore", Parent::Foreign), "adopted by a subreaper = its app is gone");
-        assert!(!should_reap("proofpoll-holochain", Parent::Us));
-        assert!(!should_reap("proofpoll-holochain", Parent::Sidecar), "a thread of a live sidecar is part of it");
-        assert!(!should_reap("proofpoll-holochain", Parent::OtherProofPoll), "a second running copy keeps its children");
-        assert!(!should_reap("holochain", Parent::Gone), "never anything but our own sidecars");
+        assert!(should_reap("proofpoll-holochain", Parent::Gone, SIDECAR_STEMS));
+        assert!(should_reap("proofpoll-lair-keystore", Parent::Foreign, SIDECAR_STEMS), "adopted by a subreaper = its app is gone");
+        assert!(!should_reap("proofpoll-holochain", Parent::Us, SIDECAR_STEMS));
+        assert!(!should_reap("holochain", Parent::Gone, SIDECAR_STEMS), "never anything but our own sidecars");
     }
 
     /// Live: a process NAMED like our sidecar, double-forked so its parent is
