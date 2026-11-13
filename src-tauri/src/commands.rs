@@ -2258,16 +2258,6 @@ pub async fn get_migration_status(
     Ok(state.clone())
 }
 
-#[tauri::command]
-pub async fn abandon_pending_votes(
-    state: tauri::State<'_, std::sync::Arc<AppState>>,
-) -> Result<(), String> {
-    let mut migration = state.migration_state.lock().await;
-    migration.votes_pending.clear();
-    migration.save(&state.data_dir);
-    Ok(())
-}
-
 // ── Encrypted entry commands (v1.3) ──────────────────────────────────
 
 /// Extract the raw 32-byte Ed25519 public key from the agent key string.

@@ -347,7 +347,6 @@ pub fn run() {
             // ── Data export + migration (keep as-is) ──────────────
             commands::get_export_data,
             commands::get_migration_status,
-            commands::abandon_pending_votes,
             // ── CAL-compliant backup + reinstall recovery ──────────
             // See the lair recovery notes
             commands::decode_record_for_export,
