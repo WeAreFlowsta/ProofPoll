@@ -239,21 +239,26 @@ async function shortWhole(state) {
   for (const [name, base] of [['C', C], ['D', D]]) {
     record(`${name}: now holds the poll the old device wrote with no network`, await until(async () => ((await op(base, { op: 'polls' })).data || []).some((p) => p.hash === state.short_poll), 900, 10000));
   }
-  // As a person does it: "Try again", and again a minute later while the
-  // screen still says records are missing (the old device's last actions
-  // reach the peers one chain at a time).
+  // As a person does it: "Try again" once the old device has been open a
+  // few minutes, and again later while the screen still says records are
+  // missing. Not at once: each try puts this device on the network under
+  // the key for a moment, and the peers then follow it instead of the old
+  // device until the old device signs a new note (up to about 15 minutes;
+  // tried each minute on 11-13, the old device's last action on one chain
+  // never arrived in 20).
   let presses = 0;
+  let pressedAt = 0;
   const opened = await until(async () => {
     const st = await status(A);
     if (st.app?.ready === true) return true;
     const cs = st.app?.conductor_status;
-    if (cs?.status === 'restoring' && (presses === 0 || cs.missing > 0)) {
+    const due = presses === 0 || Date.now() - pressedAt > 20 * 60 * 1000;
+    if (cs?.status === 'restoring' && (presses === 0 || cs.missing > 0) && due) {
       const again = await op(A, { op: 'restore_try_again' });
-      if (again.ok) presses += 1;
-      await sleep(60000);
+      if (again.ok) { presses += 1; pressedAt = Date.now(); console.log(`    (Try again, press ${presses}, ${new Date().toISOString().slice(11, 19)})`); }
     }
     return false;
-  }, 1200, 5000);
+  }, 65 * 60, 10000);
   record('A: "Try again" (as often as the screen still said records were missing)', presses >= 1, JSON.stringify({ presses }));
   record('A: opens', opened);
   const st = await status(A);

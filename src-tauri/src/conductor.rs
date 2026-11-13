@@ -713,6 +713,16 @@ async fn start_holochain_attempt(app_handle: tauri::AppHandle, data_dir: PathBuf
     }
     *LEGACY_AVAILABLE.lock().unwrap() = (install.v1_0_available, install.v1_1_available, install.v1_2_available);
     *HOOKS.lock().unwrap() = Some(hooks.clone());
+    // The library's keeper (once a process): each minute it sees that this
+    // device's own notes are on each line's rendezvous, puts them back when
+    // the conductor's own registration did not reach it, and hands the
+    // conductor the other devices' notes it lacks. A device that was
+    // offline, or stood aside while another restored its key, is found
+    // again without waiting out a note's life.
+    supervisor().start_keeper([
+        vec![(bootstrap_url().to_string(), auth_material().map(str::to_string))],
+        vec![(bootstrap_url_07().to_string(), auth_material().map(str::to_string))],
+    ]);
 
     let (admin_07, app_port_07) = line_ports(Line::V07).ok_or("the 0.7 line is not running")?;
     let (admin_06, app_port_06) = line_ports(Line::V06).ok_or("the 0.6 line is not running")?;
