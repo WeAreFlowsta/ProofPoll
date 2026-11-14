@@ -21,12 +21,15 @@
 //! device's - otherwise a fresh install's first hourly backup would destroy
 //! the very seed the user needs to adopt.
 //!
-//! Effects live behind small traits (`AdoptSeams`, `EscrowProbe`) so the
-//! ordering and the gate decisions are unit-tested - same probe-seam pattern
-//! as Your Own AI's `GateProbes`.
+//! The engine (`run_adopt`), the gate's decisions and the read of the Vault's
+//! backup are `flowsta_vault_client::adopt`, unit-tested there. Here: what
+//! ProofPoll wipes, its words for each refusal, the marker that tells the
+//! next start which chains to restore from the network, and the commands.
 
 use crate::commands::AppState;
 use crate::device_seed::{self, DeviceSeed};
+use flowsta_vault_client::adopt::{self as sdk, AdoptError, AdoptSeams, Held};
+pub(crate) use flowsta_vault_client::adopt::{classify_escrow_payload, clear_relink_marker, relink_marker_path, EscrowProbe, EscrowedSeed};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -39,23 +42,6 @@ use std::sync::Arc;
 /// Both lines' directories are listed: the 0.7 store is encrypted under the
 /// same passphrase and holds the same outgoing key.
 pub(crate) const WIPE_TARGETS: &[&str] = &["conductor", "lair", "conductor-07", "lair-07", "lair-passphrase"];
-/// 20 attempts x 500 ms = 10 s per target for Windows to release file locks.
-pub(crate) const WIPE_ATTEMPTS: usize = 20;
-pub(crate) const SETTLE_MS: u64 = 1500;
-const WIPE_RETRY_MS: u64 = 500;
-
-/// Written when an adopt/re-key commits; tells the post-restart UI to walk
-/// the user through step 2 (sign back in). Cleared by `commit_identity_link`.
-pub const RELINK_MARKER: &str = "adopt-relink-pending";
-
-pub(crate) fn relink_marker_path(data_dir: &Path) -> PathBuf {
-    data_dir.join(RELINK_MARKER)
-}
-
-pub(crate) fn clear_relink_marker(data_dir: &Path) {
-    let _ = std::fs::remove_file(relink_marker_path(data_dir));
-}
-
 /// Written by an adopt whose Vault backup shows the key already has chains
 /// on the Holochain 0.7 line (DNA v1.4, and v1.5 once installed). The next
 /// start rebuilds each from the network (`restore_from_dht`) instead of
@@ -192,112 +178,43 @@ pub(crate) fn backup_chain(data: &serde_json::Value) -> BackupChain {
     }
 }
 
-// ── The adopt engine (ordering under test) ─────────────────────────────
+// ── ProofPoll's words and its Vault ────────────────────────────────────
 
-pub(crate) trait AdoptSeams {
-    /// Revoke this install's own identity-link entry while the conductor can
-    /// still sign as the outgoing agent (the superseded link is revoked as
-    /// active but retained as history - delete_entry tombstones, it never
-    /// erases).
-    async fn revoke_outgoing_link(&self) -> Result<(), String>;
-    /// Stop conductor + lair, platform-correct (`taskkill /T /F` on Windows -
-    /// plain `kill` is a silent no-op there).
-    async fn stop_processes(&self);
-    async fn sleep_ms(&self, ms: u64);
-    fn target_exists(&self, target: &str) -> bool;
-    fn remove_target(&self, target: &str) -> Result<(), String>;
-    /// Commit the incoming seed as the recovery file (old file preserved
-    /// with a timestamp).
-    fn commit_seed(&self, seed: &DeviceSeed) -> Result<(), String>;
-    /// Drop the outgoing identity binding (identity-link.json +
-    /// profile-cache.json) and leave the step-2 relink marker.
-    fn finish_binding_swap(&self);
+/// The read of this app's backup in the person's Vault.
+pub(crate) fn escrow_probe(client_id: String) -> sdk::VaultEscrowProbe {
+    sdk::VaultEscrowProbe { vault: crate::vault_probe::client().clone(), client_id }
 }
 
-pub(crate) async fn run_adopt<S: AdoptSeams>(
-    seams: &S,
-    incoming: &DeviceSeed,
-    local: Option<&DeviceSeed>,
-) -> Result<(), String> {
-    // Validate before touching anything.
-    incoming.seed_bytes()?;
-    if local == Some(incoming) {
-        return Err("This device already uses that key - nothing to restore.".into());
+fn adopt_refusal(e: AdoptError) -> String {
+    match e {
+        AdoptError::SameKey => "This device already uses that key - nothing to restore.".into(),
+        AdoptError::BadSeed(e) | AdoptError::Commit(e) => e,
+        AdoptError::NotReleased { target, why } => format!(
+            "Could not release this device's Holochain state ({}: {}). \
+             Close and reopen ProofPoll, then try again - your current key \
+             and sign-in are unchanged.",
+            target, why
+        ),
     }
-
-    // 1. Supersede the outgoing agent's link while it can still sign the
-    //    revocation. Best-effort: a failed revocation leaves an orphaned
-    //    link entry (recoverable, known-deferred cleanup); blocking a
-    //    machine-death restore on it is worse.
-    if let Err(e) = seams.revoke_outgoing_link().await {
-        log::warn!("[adopt] could not revoke the outgoing identity link: {}", e);
-    }
-
-    // 2. Stop conductor + lair so their databases aren't held open, then
-    //    give the OS a beat - Windows releases file locks a moment after
-    //    the processes die.
-    seams.stop_processes().await;
-    seams.sleep_ms(SETTLE_MS).await;
-
-    // 3. Wipe the key-derived state BEFORE committing the new seed, retrying
-    //    while locks release and VERIFYING each removal - remove_dir_all can
-    //    report success on Windows while children are still pending-delete.
-    //    On persistent failure abort with the old seed and sign-in intact.
-    for target in WIPE_TARGETS {
-        let mut removed = false;
-        let mut last_err = String::from("still present");
-        for _ in 0..WIPE_ATTEMPTS {
-            if !seams.target_exists(target) {
-                removed = true;
-                break;
-            }
-            match seams.remove_target(target) {
-                Ok(()) => {
-                    if !seams.target_exists(target) {
-                        removed = true;
-                        break;
-                    }
-                    last_err = "removal reported success but the target is still present".into();
-                }
-                Err(e) => last_err = e,
-            }
-            seams.sleep_ms(WIPE_RETRY_MS).await;
-        }
-        if !removed {
-            return Err(format!(
-                "Could not release this device's Holochain state ({}: {}). \
-                 Close and reopen ProofPoll, then try again - your current key \
-                 and sign-in are unchanged.",
-                target, last_err
-            ));
-        }
-    }
-
-    // 4. Only now commit the new seed, then swap the identity binding and
-    //    leave the step-2 marker for the post-restart sign-in prompt.
-    seams.commit_seed(incoming)?;
-    seams.finish_binding_swap();
-    Ok(())
 }
 
-// ── The backup escrow gate (decisions under test) ──────────────────────
-
-/// What the Vault's backup slot holds, seed-wise.
-pub(crate) enum EscrowedSeed {
-    /// A seed is escrowed (hex string as stored - validity is the
-    /// comparison's problem, and an invalid stored seed can never equal a
-    /// valid local one, so it refuses).
-    Seed(String),
-    /// No backup stored at all - an empty slot is safe to write into.
-    NoBackup,
-    /// A backup exists but carries no adoptable seed (a legacy install's
-    /// explicit null, or a pre-seed backup format). Data-only backups were
-    /// always overwritten hourly; nothing key-shaped is at risk.
-    DataOnly,
-}
-
-pub(crate) trait EscrowProbe {
-    async fn escrowed_seed(&self) -> Result<EscrowedSeed, String>;
+fn held(e: Held) -> String {
+    match e {
+        Held::CheckFailed(e) => format!("backup held: could not check the Vault's escrowed key first ({}) - when in doubt, never write", e),
+        Held::OtherKey => "backup held: your Vault backup escrows a different authorship key than this \
+                           device's. Restore the key from the Identity page first - overwriting would \
+                           destroy it."
+            .into(),
+        Held::NoLocalKey => "backup held: your Vault backup escrows an authorship key this install does \
+                             not have. Restore the key from the Identity page first - overwriting would \
+                             destroy it."
+            .into(),
+        Held::LocalUnreadable(e) => format!(
+            "backup held: this device's recovery file is unreadable ({}) - refusing to \
+             overwrite the escrowed key",
+            e
+        ),
+    }
 }
 
 /// Refuse a canonical-backup write whenever it would destroy an escrowed
@@ -305,103 +222,8 @@ pub(crate) trait EscrowProbe {
 /// safe: a fresh install links, its hourly backup fires, and without this
 /// gate that backup would replace the lost machine's escrowed seed before
 /// the user ever saw the restore offer.
-pub(crate) async fn backup_escrow_gate<P: EscrowProbe>(
-    probe: &P,
-    local: Result<Option<DeviceSeed>, String>,
-) -> Result<(), String> {
-    let escrowed = probe
-        .escrowed_seed()
-        .await
-        .map_err(|e| format!("backup held: could not check the Vault's escrowed key first ({}) - when in doubt, never write", e))?;
-    match escrowed {
-        EscrowedSeed::NoBackup | EscrowedSeed::DataOnly => Ok(()),
-        EscrowedSeed::Seed(theirs) => match local {
-            Ok(Some(mine)) if mine.device_seed_hex == theirs => Ok(()),
-            Ok(Some(_)) => Err(
-                "backup held: your Vault backup escrows a different authorship key than this \
-                 device's. Restore the key from the Identity page first - overwriting would \
-                 destroy it."
-                    .into(),
-            ),
-            Ok(None) => Err(
-                "backup held: your Vault backup escrows an authorship key this install does \
-                 not have. Restore the key from the Identity page first - overwriting would \
-                 destroy it."
-                    .into(),
-            ),
-            Err(e) => Err(format!(
-                "backup held: this device's recovery file is unreadable ({}) - refusing to \
-                 overwrite the escrowed key",
-                e
-            )),
-        },
-    }
-}
-
-/// Classify a retrieved canonical-backup payload's `app_keys` block.
-/// A payload that isn't even an object is an error, never "safe to
-/// overwrite" - when in doubt, never write.
-pub(crate) fn classify_escrow_payload(data: &serde_json::Value) -> Result<EscrowedSeed, String> {
-    if !data.is_object() {
-        return Err("escrow_unreadable: backup payload is not an object".into());
-    }
-    match data.get("app_keys") {
-        None => Ok(EscrowedSeed::DataOnly),
-        Some(keys) => match keys.get("device_seed_hex") {
-            Some(serde_json::Value::String(s)) => Ok(EscrowedSeed::Seed(s.clone())),
-            Some(serde_json::Value::Null) => Ok(EscrowedSeed::DataOnly),
-            _ => Err("escrow_unreadable: app_keys carries no recognisable seed".into()),
-        },
-    }
-}
-
-// ── Production implementations ─────────────────────────────────────────
-
-use crate::vault_probe::webview_origin;
-
-pub(crate) struct VaultEscrowProbe {
-    pub client_id: String,
-}
-
-impl VaultEscrowProbe {
-    /// The app's backup payload in the linked Vault; None when there is none.
-    pub(crate) async fn retrieve(&self) -> Result<Option<serde_json::Value>, String> {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(5))
-            .build()
-            .map_err(|e| e.to_string())?;
-        let resp = client
-            .post(format!("{}/backup/retrieve", crate::vault_probe::vault_base_url().await))
-            .header("Origin", webview_origin())
-            .json(&serde_json::json!({ "client_id": self.client_id }))
-            .send()
-            .await
-            .map_err(|e| format!("vault unreachable: {}", e))?;
-        if resp.status() == reqwest::StatusCode::NOT_FOUND {
-            return Ok(None);
-        }
-        if !resp.status().is_success() {
-            let body: serde_json::Value = resp.json().await.unwrap_or_default();
-            return Err(body["error"]
-                .as_str()
-                .unwrap_or("retrieve_failed")
-                .to_string());
-        }
-        let mut v: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| format!("bad retrieve response: {}", e))?;
-        Ok(Some(v["data"].take()))
-    }
-}
-
-impl EscrowProbe for VaultEscrowProbe {
-    async fn escrowed_seed(&self) -> Result<EscrowedSeed, String> {
-        match self.retrieve().await? {
-            None => Ok(EscrowedSeed::NoBackup),
-            Some(data) => classify_escrow_payload(&data),
-        }
-    }
+pub(crate) async fn backup_escrow_gate<P: EscrowProbe>(probe: &P, local: Result<Option<DeviceSeed>, String>) -> Result<(), String> {
+    sdk::backup_escrow_gate(probe, local).await.map_err(held)
 }
 
 struct AppSeams {
@@ -435,21 +257,11 @@ impl AdoptSeams for AppSeams {
     }
 
     fn target_exists(&self, target: &str) -> bool {
-        self.state.data_dir.join(target).exists()
+        sdk::target_exists(&self.state.data_dir, target)
     }
 
     fn remove_target(&self, target: &str) -> Result<(), String> {
-        let p = self.state.data_dir.join(target);
-        let res = if p.is_dir() {
-            std::fs::remove_dir_all(&p)
-        } else {
-            std::fs::remove_file(&p)
-        };
-        match res {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(e.to_string()),
-        }
+        sdk::remove_target(&self.state.data_dir, target)
     }
 
     fn commit_seed(&self, seed: &DeviceSeed) -> Result<(), String> {
@@ -457,12 +269,7 @@ impl AdoptSeams for AppSeams {
     }
 
     fn finish_binding_swap(&self) {
-        let dir = &self.state.data_dir;
-        let _ = std::fs::remove_file(dir.join("identity-link.json"));
-        let _ = std::fs::remove_file(dir.join("profile-cache.json"));
-        if let Err(e) = std::fs::write(relink_marker_path(dir), b"") {
-            log::warn!("[adopt] could not write the relink marker: {}", e);
-        }
+        sdk::finish_binding_swap(&self.state.data_dir);
     }
 }
 
@@ -564,7 +371,7 @@ pub async fn adopt_escrowed_seed(
     let client_id = client_id.ok_or(
         "restore held: no client_id supplied, so the backup's chain cannot be checked first",
     )?;
-    let backup = VaultEscrowProbe { client_id }
+    let backup = escrow_probe(client_id)
         .retrieve()
         .await
         .map_err(|e| format!("Could not read your Vault backup ({}). Try again in a moment - nothing was changed.", e))?
@@ -593,9 +400,9 @@ pub async fn adopt_escrowed_seed(
     }
 
     let seams = AppSeams { state: state.inner().clone() };
-    if let Err(e) = run_adopt(&seams, &incoming, local.as_ref()).await {
+    if let Err(e) = sdk::run_adopt(&seams, WIPE_TARGETS, &incoming, local.as_ref()).await {
         clear_restore_marker(&state.data_dir);
-        return Err(e);
+        return Err(adopt_refusal(e));
     }
     log::info!("[adopt] escrowed seed committed - relaunching");
     restart_app(app)
@@ -634,7 +441,7 @@ pub async fn rekey_device_agent(
 
     let incoming = device_seed::generate()?;
     let seams = AppSeams { state: state.inner().clone() };
-    run_adopt(&seams, &incoming, None).await?;
+    sdk::run_adopt(&seams, WIPE_TARGETS, &incoming, None).await.map_err(adopt_refusal)?;
     log::info!("[rekey] new escrowable seed committed - relaunching");
     restart_app(app)
 }
@@ -652,275 +459,36 @@ fn restart_app(app: tauri::AppHandle) -> Result<(), String> {
     }
 }
 
-// ── Tests (the GateProbes pattern: scripted seams + ordered call logs) ──
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::RefCell;
-    use std::collections::{HashSet, VecDeque};
 
-    fn seed(byte: &str) -> DeviceSeed {
-        DeviceSeed { device_seed_hex: byte.repeat(32), version: 1 }
-    }
-
-    struct Scripted {
-        /// Targets currently "on disk".
-        present: RefCell<HashSet<String>>,
-        /// Scripted outcome per remove_target call (one shared queue, in call
-        /// order); exhausted queue defaults to Ok.
-        removals: RefCell<VecDeque<Result<(), String>>>,
-        /// When false, a successful removal does NOT clear `present` - the
-        /// lying-remove case (Windows remove_dir_all returning Ok with
-        /// children still pending-delete).
-        honest_removals: bool,
-        revoke: RefCell<VecDeque<Result<(), String>>>,
-        commit: RefCell<VecDeque<Result<(), String>>>,
-        calls: RefCell<Vec<String>>,
-        retry_sleeps: RefCell<usize>,
-    }
-
-    impl Scripted {
-        fn new(present: &[&str]) -> Self {
-            Self {
-                present: RefCell::new(present.iter().map(|s| s.to_string()).collect()),
-                removals: RefCell::new(VecDeque::new()),
-                honest_removals: true,
-                revoke: RefCell::new(VecDeque::new()),
-                commit: RefCell::new(VecDeque::new()),
-                calls: RefCell::new(Vec::new()),
-                retry_sleeps: RefCell::new(0),
-            }
-        }
-        fn calls(&self) -> Vec<String> {
-            self.calls.borrow().clone()
-        }
-    }
-
-    impl AdoptSeams for Scripted {
-        async fn revoke_outgoing_link(&self) -> Result<(), String> {
-            self.calls.borrow_mut().push("revoke".into());
-            self.revoke.borrow_mut().pop_front().unwrap_or(Ok(()))
-        }
-        async fn stop_processes(&self) {
-            self.calls.borrow_mut().push("stop".into());
-        }
-        async fn sleep_ms(&self, ms: u64) {
-            if ms == SETTLE_MS {
-                self.calls.borrow_mut().push("settle".into());
-            } else {
-                *self.retry_sleeps.borrow_mut() += 1;
-            }
-        }
-        fn target_exists(&self, target: &str) -> bool {
-            self.present.borrow().contains(target)
-        }
-        fn remove_target(&self, target: &str) -> Result<(), String> {
-            self.calls.borrow_mut().push(format!("remove:{}", target));
-            let r = self.removals.borrow_mut().pop_front().unwrap_or(Ok(()));
-            if r.is_ok() && self.honest_removals {
-                self.present.borrow_mut().remove(target);
-            }
-            r
-        }
-        fn commit_seed(&self, _seed: &DeviceSeed) -> Result<(), String> {
-            self.calls.borrow_mut().push("commit".into());
-            self.commit.borrow_mut().pop_front().unwrap_or(Ok(()))
-        }
-        fn finish_binding_swap(&self) {
-            self.calls.borrow_mut().push("swap".into());
-        }
-    }
-
-    #[tokio::test]
-    async fn happy_path_order_is_revoke_stop_settle_wipe_commit_swap() {
-        let s = Scripted::new(&["conductor", "lair", "lair-passphrase"]);
-        run_adopt(&s, &seed("aa"), Some(&seed("bb"))).await.unwrap();
-        assert_eq!(
-            s.calls(),
-            vec![
-                "revoke",
-                "stop",
-                "settle",
-                "remove:conductor",
-                "remove:lair",
-                "remove:lair-passphrase",
-                "commit",
-                "swap",
-            ]
-        );
-    }
-
-    #[tokio::test]
-    async fn the_07_line_is_wiped_with_the_06_line() {
-        let s = Scripted::new(&["conductor", "lair", "conductor-07", "lair-07", "lair-passphrase"]);
-        run_adopt(&s, &seed("aa"), Some(&seed("bb"))).await.unwrap();
-        let removed: Vec<String> = s.calls().into_iter().filter(|c| c.starts_with("remove:")).collect();
-        assert_eq!(
-            removed,
-            vec!["remove:conductor", "remove:lair", "remove:conductor-07", "remove:lair-07", "remove:lair-passphrase"]
-        );
-    }
-
-    #[tokio::test]
-    async fn same_seed_refuses_before_touching_anything() {
-        let s = Scripted::new(&["conductor", "lair", "lair-passphrase"]);
-        let err = run_adopt(&s, &seed("aa"), Some(&seed("aa"))).await.unwrap_err();
-        assert!(err.contains("nothing to restore"), "{}", err);
-        assert!(s.calls().is_empty(), "must not touch anything: {:?}", s.calls());
-    }
-
-    #[tokio::test]
-    async fn invalid_incoming_seed_refuses_before_touching_anything() {
-        let s = Scripted::new(&["conductor"]);
-        let bad = DeviceSeed { device_seed_hex: "not-hex".into(), version: 1 };
-        assert!(run_adopt(&s, &bad, None).await.is_err());
-        assert!(s.calls().is_empty());
-    }
-
-    #[tokio::test]
-    async fn revoke_failure_is_nonfatal_and_order_continues() {
-        let s = Scripted::new(&["conductor", "lair", "lair-passphrase"]);
-        s.revoke.borrow_mut().push_back(Err("conductor not ready".into()));
-        run_adopt(&s, &seed("aa"), None).await.unwrap();
-        let calls = s.calls();
-        assert_eq!(calls.first().map(String::as_str), Some("revoke"));
-        assert!(calls.contains(&"commit".to_string()));
-        assert!(calls.contains(&"swap".to_string()));
-    }
-
-    #[tokio::test]
-    async fn locked_target_retries_until_the_lock_releases() {
-        let s = Scripted::new(&["conductor", "lair", "lair-passphrase"]);
-        s.removals.borrow_mut().push_back(Err("locked".into()));
-        s.removals.borrow_mut().push_back(Err("locked".into()));
-        // Third attempt (default Ok) succeeds; later targets default Ok too.
-        run_adopt(&s, &seed("aa"), None).await.unwrap();
-        let calls = s.calls();
-        let conductor_removes = calls.iter().filter(|c| *c == "remove:conductor").count();
-        assert_eq!(conductor_removes, 3, "{:?}", calls);
-        assert!(*s.retry_sleeps.borrow() >= 2);
-        assert!(calls.contains(&"commit".to_string()));
-    }
-
-    #[tokio::test]
-    async fn unwipeable_target_aborts_with_nothing_committed() {
-        let s = Scripted::new(&["conductor", "lair", "lair-passphrase"]);
-        for _ in 0..WIPE_ATTEMPTS {
-            s.removals.borrow_mut().push_back(Err("held open".into()));
-        }
-        let err = run_adopt(&s, &seed("aa"), Some(&seed("bb"))).await.unwrap_err();
-        assert!(err.contains("unchanged"), "abort copy must say nothing changed: {}", err);
-        let calls = s.calls();
-        assert!(!calls.contains(&"commit".to_string()), "commit must never run: {:?}", calls);
-        assert!(!calls.contains(&"swap".to_string()));
-        // It kept retrying the first target and never advanced to the next.
-        assert!(!calls.contains(&"remove:lair".to_string()));
-    }
-
-    #[tokio::test]
-    async fn lying_removal_is_caught_by_verification() {
-        // Every removal reports Ok but the target never leaves the disk -
-        // the real Windows failure mode. The exists() verification must
-        // catch it and abort without committing.
-        let mut s = Scripted::new(&["conductor", "lair", "lair-passphrase"]);
-        s.honest_removals = false;
-        let err = run_adopt(&s, &seed("aa"), None).await.unwrap_err();
-        assert!(err.contains("still present"), "{}", err);
-        let calls = s.calls();
-        assert_eq!(
-            calls.iter().filter(|c| *c == "remove:conductor").count(),
-            WIPE_ATTEMPTS
-        );
-        assert!(!calls.contains(&"commit".to_string()));
-    }
-
-    #[tokio::test]
-    async fn absent_targets_skip_removal_and_commit_runs() {
-        let s = Scripted::new(&[]);
-        run_adopt(&s, &seed("aa"), None).await.unwrap();
-        assert_eq!(s.calls(), vec!["revoke", "stop", "settle", "commit", "swap"]);
-    }
-
-    #[tokio::test]
-    async fn commit_failure_propagates_and_swap_never_runs() {
-        let s = Scripted::new(&[]);
-        s.commit.borrow_mut().push_back(Err("disk full".into()));
-        let err = run_adopt(&s, &seed("aa"), None).await.unwrap_err();
-        assert!(err.contains("disk full"));
-        assert!(!s.calls().contains(&"swap".to_string()));
-    }
-
-    // ── The backup escrow gate ──────────────────────────────────────────
-
-    struct ScriptedProbe {
-        result: RefCell<VecDeque<Result<EscrowedSeed, String>>>,
-    }
-    impl ScriptedProbe {
-        fn one(r: Result<EscrowedSeed, String>) -> Self {
-            Self { result: RefCell::new(VecDeque::from([r])) }
-        }
-    }
-    impl EscrowProbe for ScriptedProbe {
-        async fn escrowed_seed(&self) -> Result<EscrowedSeed, String> {
-            self.result
-                .borrow_mut()
-                .pop_front()
-                .expect("gate probed the escrow more often than scripted")
-        }
-    }
-
-    #[tokio::test]
-    async fn gate_allows_matching_seed_empty_slot_and_data_only() {
-        for escrowed in [
-            Ok(EscrowedSeed::Seed("aa".repeat(32))),
-            Ok(EscrowedSeed::NoBackup),
-            Ok(EscrowedSeed::DataOnly),
-        ] {
-            let p = ScriptedProbe::one(escrowed);
-            backup_escrow_gate(&p, Ok(Some(seed("aa")))).await.unwrap();
-        }
-    }
-
-    #[tokio::test]
-    async fn gate_refuses_foreign_seed_missing_local_and_unreadable_local() {
-        let cases: Vec<Result<Option<DeviceSeed>, String>> = vec![
-            Ok(Some(seed("bb"))),
-            Ok(None),
-            Err("corrupt".into()),
-        ];
-        for local in cases {
-            let p = ScriptedProbe::one(Ok(EscrowedSeed::Seed("aa".repeat(32))));
-            let err = backup_escrow_gate(&p, local).await.unwrap_err();
-            assert!(err.contains("backup held"), "{}", err);
-        }
-    }
-
-    #[tokio::test]
-    async fn gate_refuses_when_the_probe_fails() {
-        let p = ScriptedProbe::one(Err("vault unreachable".into()));
-        let err = backup_escrow_gate(&p, Ok(Some(seed("aa")))).await.unwrap_err();
-        assert!(err.contains("never write"), "{}", err);
-    }
-
+    /// The words the person reads are ProofPoll's, whatever the engine calls
+    /// the reason.
     #[test]
-    fn classify_escrow_payload_matrix() {
-        let seeded = serde_json::json!({"app_keys": {"device_seed_hex": "ab"}});
-        assert!(matches!(
-            classify_escrow_payload(&seeded),
-            Ok(EscrowedSeed::Seed(s)) if s == "ab"
-        ));
-        let legacy_null = serde_json::json!({"app_keys": {"device_seed_hex": null}});
-        assert!(matches!(classify_escrow_payload(&legacy_null), Ok(EscrowedSeed::DataOnly)));
-        let pre_seed = serde_json::json!({"version": 1, "cells": []});
-        assert!(matches!(classify_escrow_payload(&pre_seed), Ok(EscrowedSeed::DataOnly)));
-        let not_object = serde_json::json!(null);
-        assert!(classify_escrow_payload(&not_object).is_err());
-        let weird = serde_json::json!({"app_keys": {"device_seed_hex": 7}});
-        assert!(classify_escrow_payload(&weird).is_err());
+    fn refusals_keep_this_app_s_words() {
+        assert!(adopt_refusal(AdoptError::SameKey).contains("nothing to restore"));
+        let stuck = adopt_refusal(AdoptError::NotReleased { target: "lair".into(), why: "still present".into() });
+        assert!(stuck.contains("(lair: still present)") && stuck.contains("Close and reopen ProofPoll") && stuck.contains("unchanged"), "{stuck}");
+        assert_eq!(adopt_refusal(AdoptError::Commit("disk full".into())), "disk full");
+        for h in [Held::OtherKey, Held::NoLocalKey, Held::LocalUnreadable("x".into()), Held::CheckFailed("x".into())] {
+            assert!(held(h).starts_with("backup held"));
+        }
+        assert!(held(Held::OtherKey).contains("from the Identity page"));
+        assert!(held(Held::CheckFailed("x".into())).contains("never write"));
     }
-    /// A 0.7 dump record (`action` = `{header, data}`) and a 0.6 one (a
-    /// tagged `{type, ..}`), in the shapes `build_canonical_backup` writes.
+
+    /// Both lines' folders and the key store's passphrase are wiped: the 0.7
+    /// store holds the same outgoing key.
+    #[test]
+    fn the_07_line_is_wiped_with_the_06_line() {
+        for dir in crate::conductor::LINE_DIRS {
+            assert!(WIPE_TARGETS.contains(dir), "{dir} is wiped");
+        }
+        assert!(WIPE_TARGETS.contains(&"lair-passphrase"));
+        assert!(!WIPE_TARGETS.contains(&crate::device_seed::RECOVERY_FILE), "the seed file is the commit's, not the wipe's");
+    }
+
     fn rec07(seq: u64) -> serde_json::Value {
         serde_json::json!({"entryType": "Poll", "raw_record": {"action": {
             "header": {"author": [1, 2], "timestamp": 1, "action_seq": seq, "prev_action": null},

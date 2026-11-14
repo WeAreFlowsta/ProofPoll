@@ -1734,6 +1734,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "flowsta-vault-client"
+version = "0.1.0"
+source = "git+https://github.com/WeAreFlowsta/flowsta-rust-sdk?rev=e25f1afb6f31fee1ce5ea0de0d1265f073f02eed#e25f1afb6f31fee1ce5ea0de0d1265f073f02eed"
+dependencies = [
+ "base64 0.22.1",
+ "ed25519-dalek",
+ "hex",
+ "log",
+ "rand 0.8.5",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+]
+
+[[package]]
 name = "fnv"
 version = "1.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5270,6 +5287,7 @@ dependencies = [
  "ed25519-dalek",
  "flowsta-hc-lines",
  "flowsta-update-check",
+ "flowsta-vault-client",
  "hex",
  "holo_hash 0.7.1",
  "holochain_client 0.8.1",

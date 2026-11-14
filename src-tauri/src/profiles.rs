@@ -1,9 +1,6 @@
 //! Identity profiles: one ProofPoll agent, key store, conductor and set of
 //! link files per Flowsta identity that has connected to this install.
 //!
-//! Layout (Phase 2 of the identity switcher, the 1.4.0 phase 2 build
-//! notes, step 8):
-//!
 //!   <app data dir>/profiles.json                 device-level index
 //!   <app data dir>/profiles/<folder>/             one profile:
 //!       lair-passphrase, lair/, conductor/, lair-07/, conductor-07/,
@@ -11,375 +8,59 @@
 //!       identity-link.json, profile-cache.json, migration-*-state.json,
 //!       adopt-relink-pending
 //!
-//! `<folder>` is the partition key of the Flowsta identity the profile is
-//! bound to (first 16 hex chars of sha256 over the 39-byte agent key - the
-//! same key the Vault uses for its own partitions), or `local` for an install
-//! that has not linked to any identity yet; `local` binds to an identity the
-//! first time it links and keeps its folder name.
-//!
-//! Installs from before this module keep everything at the app data dir
-//! root. The first start with this code moves that layout into a profile
-//! folder, all-or-nothing, by same-filesystem renames. The key store moves
-//! WITH its files and its config's absolute paths are rewritten - unlike the
-//! Vault it is never set aside, because `AppState::new` treats a passphrase
-//! without a store as corruption and wipes the conductor.
-use std::collections::BTreeMap;
+//! The index, the folder naming, the move of an install from before
+//! profiles and the setting aside of an older copy's data are
+//! `flowsta_vault_client::profiles`; here is what ProofPoll keeps in a
+//! profile. The key store moves WITH its files and its config's absolute
+//! paths are rewritten - it is never set aside, because `AppState::new`
+//! treats a passphrase without a store as corruption and wipes the conductor.
+use flowsta_vault_client::profiles as sdk;
 use std::path::{Path, PathBuf};
 
-pub const PROFILES_FILE: &str = "profiles.json";
-pub const PROFILES_DIR: &str = "profiles";
-pub const LOCAL_PROFILE: &str = "local";
-pub const PARTITION_KEY_LEN: usize = 16;
-
-/// Single files that belong to a profile (directories: `conductor::LINE_DIRS`).
-pub const PROFILE_FILES: &[&str] = &[
-    "lair-passphrase",
-    crate::device_seed::RECOVERY_FILE,
-    "identity-link.json",
-    "profile-cache.json",
-    "adopt-relink-pending",
-];
-
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default, PartialEq)]
-pub struct ProfileInfo {
-    /// Flowsta agent key this profile is bound to; None until it links.
-    pub identity: Option<String>,
-    pub created_at: i64,
-    pub last_used: i64,
-}
-
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default, PartialEq)]
-pub struct Profiles {
-    pub version: u32,
-    /// Folder name of the profile in use.
-    pub active: Option<String>,
-    pub profiles: BTreeMap<String, ProfileInfo>,
-}
-
-fn now() -> i64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
-}
-
-pub fn profiles_path(device_root: &Path) -> PathBuf { device_root.join(PROFILES_FILE) }
-pub fn profiles_dir(device_root: &Path) -> PathBuf { device_root.join(PROFILES_DIR) }
-pub fn profile_root(device_root: &Path, folder: &str) -> PathBuf { profiles_dir(device_root).join(folder) }
-
-/// First 16 hex chars of sha256 over the decoded 39-byte agent key.
-/// Identical to the Vault's partition key. None if the string is not a key.
-pub fn partition_key(agent_pub_key: &str) -> Option<String> {
-    use base64::Engine;
-    use sha2::{Digest, Sha256};
-    let b64 = agent_pub_key.trim().strip_prefix('u')?;
-    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(b64).ok()?;
-    if raw.len() != 39 { return None; }
-    Some(hex::encode(Sha256::digest(&raw))[..PARTITION_KEY_LEN].to_string())
-}
-
-impl Profiles {
-    pub fn load(device_root: &Path) -> Profiles {
-        let p = profiles_path(device_root);
-        match std::fs::read_to_string(&p) {
-            Ok(s) => serde_json::from_str(&s).unwrap_or_else(|e| {
-                log::warn!("profiles.json unreadable ({}), starting a fresh index", e);
-                Profiles { version: 1, ..Default::default() }
-            }),
-            Err(_) => Profiles { version: 1, ..Default::default() },
-        }
-    }
-
-    pub fn save(&self, device_root: &Path) -> Result<(), String> {
-        let p = profiles_path(device_root);
-        let tmp = p.with_extension("json.tmp");
-        let json = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
-        std::fs::write(&tmp, json).map_err(|e| e.to_string())?;
-        std::fs::rename(&tmp, &p).map_err(|e| e.to_string())
-    }
-
-    pub fn folder_for_identity(&self, agent_pub_key: &str) -> Option<String> {
-        self.profiles.iter().find(|(_, i)| i.identity.as_deref() == Some(agent_pub_key)).map(|(f, _)| f.clone())
-    }
-
-    pub fn unbound_folder(&self) -> Option<String> {
-        self.profiles.iter().find(|(_, i)| i.identity.is_none()).map(|(f, _)| f.clone())
-    }
-
-    fn touch(&mut self, folder: &str, identity: Option<&str>) {
-        let e = self.profiles.entry(folder.to_string()).or_insert_with(|| ProfileInfo { identity: None, created_at: now(), last_used: now() });
-        if let Some(id) = identity { e.identity = Some(id.to_string()); }
-        e.last_used = now();
-        self.active = Some(folder.to_string());
-    }
-}
-
-/// True when this install still keeps its identity files at the root.
-pub fn legacy_layout_present(device_root: &Path) -> bool {
-    device_root.join("lair").is_dir()
-        || device_root.join("conductor").is_dir()
-        || device_root.join(crate::device_seed::RECOVERY_FILE).exists()
-        || device_root.join("identity-link.json").exists()
-}
-
-/// Unix-socket path budget for the key store: Linux 108, macOS 104, minus
-/// a safety margin. Windows key stores use named pipes (no limit).
+#[allow(unused_imports)]
+pub use flowsta_vault_client::profiles::{bind_profile, lair_socket_path_fits, partition_key, profile_root, Profiles, LOCAL_PROFILE};
 #[cfg(not(windows))]
-pub fn socket_path_budget() -> usize {
-    let limit: usize = if cfg!(target_os = "macos") { 104 } else { 108 };
-    limit.saturating_sub(4)
-}
+#[allow(unused_imports)]
+pub use flowsta_vault_client::profiles::{in_root_socket_fits, short_socket_path};
 
-#[cfg(not(windows))]
-pub fn socket_fits(path: &Path) -> bool { path.as_os_str().len() + 1 <= socket_path_budget() }
-
-/// Whether lair's default socket (inside its own directory under `root`)
-/// fits. On macOS `~/Library/Application Support/com.proofpoll.app/profiles/
-/// <key>/lair/socket` is ~95 bytes with a 3-letter username, so a longer
-/// username alone pushes it over the 104 limit.
-#[cfg(not(windows))]
-pub fn in_root_socket_fits(root: &Path) -> bool { socket_fits(&root.join("lair").join("socket")) }
-
-/// A short, per-user, private directory for key store sockets whose
-/// in-root path does not fit: macOS `$TMPDIR` (per-user, mode 700), Linux
-/// `$XDG_RUNTIME_DIR`, else `/tmp/fv-<uid>` (created mode 700). Shared
-/// with the Vault's own sockets by design: one name per root, see below.
-#[cfg(not(windows))]
-pub fn short_socket_dir() -> PathBuf {
-    let base = if cfg!(target_os = "macos") { std::env::var_os("TMPDIR") } else { std::env::var_os("XDG_RUNTIME_DIR") };
-    if let Some(b) = base {
-        let b = PathBuf::from(b);
-        if b.is_absolute() && b.is_dir() { return b.join("fv"); }
-    }
-    PathBuf::from(format!("/tmp/fv-{}", current_uid()))
-}
-
-/// The user's id, read off the home directory (no libc on macOS builds);
-/// a hash of $HOME if that cannot be read.
-#[cfg(not(windows))]
-fn current_uid() -> String {
-    use std::os::unix::fs::MetadataExt;
-    match std::env::var_os("HOME") {
-        Some(h) => match std::fs::metadata(&h) {
-            Ok(m) => m.uid().to_string(),
-            Err(_) => {
-                use sha2::{Digest, Sha256};
-                hex::encode(Sha256::digest(h.to_string_lossy().as_bytes()))[..8].to_string()
-            }
-        },
-        None => "u".to_string(),
-    }
-}
-
-/// The short socket path for the key store under `root`: one name per
-/// root (16 hex of sha256 over the root path), so two profiles, or
-/// ProofPoll and the Vault, never share a socket.
-#[cfg(not(windows))]
-pub fn short_socket_path(root: &Path) -> PathBuf {
-    use sha2::{Digest, Sha256};
-    let h = hex::encode(Sha256::digest(root.to_string_lossy().as_bytes()));
-    short_socket_dir().join(format!("{}.sock", &h[..16]))
-}
-
-/// Whether a key store under `root` can be started at all: its default
-/// socket fits, or the short runtime socket does (`lair::ensure_socket_fits`
-/// moves it there). A root where neither fits stays on the legacy layout
-/// rather than producing a key store that cannot start ("path must be
-/// shorter than SUN_LEN").
-pub fn lair_socket_path_fits(root: &Path) -> bool {
-    #[cfg(windows)]
-    { let _ = root; true }
-    #[cfg(not(windows))]
-    { in_root_socket_fits(root) || socket_fits(&short_socket_path(root)) }
-}
-
-fn profile_entries(root: &Path) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    for name in PROFILE_FILES {
-        let p = root.join(name);
-        if p.exists() { out.push(p); }
-    }
-    if let Ok(rd) = std::fs::read_dir(root) {
-        for e in rd.flatten() {
-            let name = e.file_name().to_string_lossy().to_string();
-            let is_migration_state = name.starts_with("migration-") && name.ends_with("-state.json");
-            let is_replaced_recovery = name.starts_with("proofpoll-recovery.replaced-");
-            if (is_migration_state || is_replaced_recovery) && e.path().is_file() { out.push(e.path()); }
-        }
-    }
-    for dir in crate::conductor::LINE_DIRS {
-        let p = root.join(dir);
-        if p.is_dir() { out.push(p); }
-    }
-    out
+fn is_migration_state(name: &str) -> bool {
+    name.starts_with("migration-") && name.ends_with("-state.json")
 }
 
 /// Lair's config pins absolute paths (connectionUrl, pidFile, storeFile).
 /// After the directory moved, point them at the new location. The socket
 /// address is a percent-encoded URL, so this goes through the URL-aware
 /// repoint, never a plain text replace.
-fn rewrite_lair_paths(new_lair_dir: &Path, _old_lair_dir: &Path) -> Result<(), String> {
+fn repoint(new_lair_dir: &Path) -> Result<(), String> {
     crate::lair::repoint_config(new_lair_dir).map(|_| ())
 }
 
-/// Move the legacy root layout into `profiles/<folder>/`, all-or-nothing.
-pub fn relocate_legacy(device_root: &Path, folder: &str) -> Result<PathBuf, String> {
-    let root = profile_root(device_root, folder);
-    if !lair_socket_path_fits(&root) {
-        return Err(format!("profile path too long for the key store socket ({} bytes)", root.as_os_str().len()));
-    }
-    if root.join("lair").exists() || root.join(crate::device_seed::RECOVERY_FILE).exists() {
-        return Err(format!("{:?} already holds a profile", root));
-    }
-    std::fs::create_dir_all(&root).map_err(|e| format!("cannot create {:?}: {}", root, e))?;
-    let mut done: Vec<(PathBuf, PathBuf)> = Vec::new();
-    for from in profile_entries(device_root) {
-        let to = root.join(from.file_name().unwrap());
-        if to.exists() {
-            rollback(&done);
-            return Err(format!("{:?} already exists in the profile", to));
-        }
-        if let Err(e) = std::fs::rename(&from, &to) {
-            rollback(&done);
-            return Err(format!("could not move {:?}: {}", from, e));
-        }
-        done.push((from, to));
-    }
-    for lair in ["lair", crate::conductor::LAIR_DIR_07] {
-        if let Err(e) = rewrite_lair_paths(&root.join(lair), &device_root.join(lair)) {
-            rollback(&done);
-            return Err(format!("could not rewrite the key store paths: {}", e));
-        }
-    }
-    Ok(root)
-}
-
-fn rollback(done: &[(PathBuf, PathBuf)]) {
-    for (from, to) in done.iter().rev() {
-        if let Err(e) = std::fs::rename(to, from) {
-            log::error!("profile relocation rollback: could not restore {:?}: {}", from, e);
-        }
-    }
-}
-
-/// Where data written by an OLDER copy of the app is kept once profiles
-/// exist. Outside `profiles/` on purpose: it is never a profile.
-pub const OLDER_COPY_DIR: &str = "older-copy-data";
-
-/// Identity-named files and folders at the device root while profiles ALREADY
-/// exist were not left behind by a move - an older copy of the app (one that
-/// knows nothing of profiles) ran, found its old location empty and set
-/// itself up there as a brand new install. Treating that as "a legacy install
-/// to move" promoted the empty newcomer to the active profile and the
-/// person's real data vanished from view (seen in Your Own AI, 2026-09-19:
-/// an installed older version opened once beside a newer build).
-///
-/// So it is moved ASIDE: kept whole under `older-copy-data/<unix time>/`,
-/// never listed in `profiles.json`, never made active, its key store config
-/// left pointing where the older copy expects it. All-or-nothing like the
-/// real move.
-pub fn set_aside_older_copy(device_root: &Path) -> Result<PathBuf, String> {
-    let entries = profile_entries(device_root);
-    if entries.is_empty() {
-        return Err("nothing to set aside".into());
-    }
-    let mut dir = device_root.join(OLDER_COPY_DIR).join(now().to_string());
-    let mut n = 1;
-    while dir.exists() {
-        dir = device_root.join(OLDER_COPY_DIR).join(format!("{}-{}", now(), n));
-        n += 1;
-    }
-    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {:?}: {}", dir, e))?;
-    let mut done: Vec<(PathBuf, PathBuf)> = Vec::new();
-    for from in entries {
-        let to = dir.join(from.file_name().unwrap());
-        if let Err(e) = std::fs::rename(&from, &to) {
-            rollback(&done);
-            let _ = std::fs::remove_dir(&dir);
-            return Err(format!("could not move {:?}: {}", from, e));
-        }
-        done.push((from, to));
-    }
-    Ok(dir)
-}
+/// What a ProofPoll profile holds.
+const LAYOUT: sdk::Layout<'static> = sdk::Layout {
+    recovery_file: crate::device_seed::RECOVERY_FILE,
+    files: &["lair-passphrase"],
+    also: &is_migration_state,
+    dirs: crate::conductor::LINE_DIRS,
+    key_stores: &["lair", crate::conductor::LAIR_DIR_07],
+    conductor: "conductor",
+    repoint_key_store: &repoint,
+};
 
 /// Decide which profile this launch runs, moving a legacy layout first if
 /// there is one. `live_identity` = the Vault's unlocked agent key when the
 /// Vault is reachable and unlocked at launch, else None.
 pub fn select_profile_root(device_root: &Path, live_identity: Option<&str>) -> PathBuf {
-    let mut profiles = Profiles::load(device_root);
-
-    if legacy_layout_present(device_root) && !profiles.profiles.is_empty() {
-        // The move already happened on this machine. What sits at the root
-        // now came from an older copy of the app - keep it, never use it.
-        match set_aside_older_copy(device_root) {
-            Ok(dir) => log::warn!(
-                "Data written by an older copy of the app was found beside the profiles - kept at {:?}, not used; the active profile is unchanged",
-                dir
-            ),
-            Err(e) => log::warn!("Older-copy data could not be set aside ({}) - continuing with the profile", e),
-        }
-    } else if legacy_layout_present(device_root) {
-        let link = crate::commands::load_identity_link(device_root);
-        let bound = link.as_ref().map(|l| l.vault_agent_pub_key.clone());
-        let folder = bound.as_deref().and_then(partition_key).unwrap_or_else(|| LOCAL_PROFILE.to_string());
-        match relocate_legacy(device_root, &folder) {
-            Ok(root) => {
-                profiles.touch(&folder, bound.as_deref());
-                if let Err(e) = profiles.save(device_root) { log::warn!("profiles.json not saved: {}", e); }
-                log::info!("Identity files moved into profile {:?}", root);
-            }
-            Err(e) if profile_root(device_root, &folder).join("lair").exists() => {
-                // The move already happened; something recreated a legacy
-                // name at the device root. The profile is the truth - the
-                // legacy root would open as an empty identity.
-                log::warn!("Legacy names at the device root beside a finished profile ({}) - using the profile", e);
-            }
-            Err(e) => {
-                log::warn!("Profile relocation skipped: {} - staying on the legacy layout", e);
-                return device_root.to_path_buf();
-            }
-        }
-    }
-
-    let folder = match live_identity {
-        Some(id) => profiles
-            .folder_for_identity(id)
-            .or_else(|| profiles.unbound_folder())
-            .or_else(|| partition_key(id))
-            .unwrap_or_else(|| LOCAL_PROFILE.to_string()),
-        None => profiles
-            .active
-            .clone()
-            .or_else(|| profiles.profiles.keys().next().cloned())
-            .unwrap_or_else(|| LOCAL_PROFILE.to_string()),
-    };
-    let root = profile_root(device_root, &folder);
-    if !lair_socket_path_fits(&root) {
-        log::warn!("Profile path {:?} too long for the key store socket - using the legacy root", root);
-        return device_root.to_path_buf();
-    }
-    if let Err(e) = std::fs::create_dir_all(&root) {
-        log::warn!("cannot create profile {:?}: {} - using the legacy root", root, e);
-        return device_root.to_path_buf();
-    }
-    // Only record a binding the profile already has; linking binds later.
-    let known = profiles.profiles.get(&folder).and_then(|p| p.identity.clone());
-    profiles.touch(&folder, known.as_deref());
-    if let Err(e) = profiles.save(device_root) { log::warn!("profiles.json not saved: {}", e); }
-    root
-}
-
-/// Record that the profile at `profile_root` now belongs to `agent_pub_key`
-/// (called when an identity link is saved).
-pub fn bind_profile(device_root: &Path, profile_root_path: &Path, agent_pub_key: &str) {
-    let Some(folder) = profile_root_path.file_name().map(|f| f.to_string_lossy().to_string()) else { return };
-    if profile_root_path.parent() != Some(&profiles_dir(device_root)) { return; } // legacy root: nothing to record
-    let mut profiles = Profiles::load(device_root);
-    profiles.touch(&folder, Some(agent_pub_key));
-    if let Err(e) = profiles.save(device_root) { log::warn!("profiles.json not saved: {}", e); }
+    sdk::select_profile_root(device_root, live_identity, &LAYOUT)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use flowsta_vault_client::profiles::legacy_layout_present as legacy_present;
+
+    fn legacy_layout_present(root: &Path) -> bool {
+        legacy_present(root, &LAYOUT)
+    }
 
     const KEY_A: &str = "uhCAk75qJ5oobyfm3Lh-akZIQSe2zpSTtG1Pcxs23qTFoQwY_GDWY";
     const KEY_B: &str = "uhCAk0O4EJ97RZ7eX2wf9x08PWjNj3Avt2K1SdU8tgPzWoQBwWk0s";
@@ -397,41 +78,6 @@ mod tests {
         if let Some(k) = linked_to {
             std::fs::write(root.join("identity-link.json"), serde_json::json!({"vault_agent_pub_key": k, "entry_action_hash": "h", "linked_at": 1}).to_string()).unwrap();
         }
-    }
-
-    /// The move happened; later an OLDER copy of the app ran once and set
-    /// itself up at the old location as a new install. The next launch must
-    /// keep the person's real profile, not promote the newcomer.
-    #[test]
-    fn data_left_by_an_older_copy_is_set_aside_and_never_becomes_the_profile() {
-        let tmp = tempfile::tempdir().unwrap();
-        let device = tmp.path();
-        legacy_install(device, Some(KEY_A));
-        let real = select_profile_root(device, None);
-        let folder = partition_key(KEY_A).unwrap();
-        assert_eq!(real, profile_root(device, &folder));
-        assert!(!legacy_layout_present(device));
-
-        legacy_install(device, None); // the older copy's fresh install
-        let chosen = select_profile_root(device, None);
-        assert_eq!(chosen, real, "the real profile stays in charge");
-        let profiles = Profiles::load(device);
-        assert_eq!(profiles.active.as_deref(), Some(folder.as_str()));
-        assert_eq!(profiles.profiles.len(), 1, "the newcomer is not a profile");
-        assert!(!profile_root(device, LOCAL_PROFILE).exists());
-        assert!(!legacy_layout_present(device));
-        let kept: Vec<_> = std::fs::read_dir(device.join(OLDER_COPY_DIR)).unwrap().flatten().collect();
-        assert_eq!(kept.len(), 1);
-        assert!(kept[0].path().join("lair/store_file").exists() && kept[0].path().join("conductor/databases/x").exists());
-    }
-
-    #[test]
-    fn partition_key_matches_the_vaults_shape() {
-        let k = partition_key(KEY_A).unwrap();
-        assert_eq!(k.len(), PARTITION_KEY_LEN);
-        assert_eq!(k, k.to_lowercase());
-        assert_ne!(partition_key(KEY_B).unwrap(), k);
-        assert_eq!(partition_key("not a key"), None);
     }
 
     #[test]
@@ -475,27 +121,6 @@ mod tests {
     }
 
     #[test]
-    fn unlinked_legacy_install_becomes_local_and_binds_on_link() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        legacy_install(root, None);
-        let chosen = select_profile_root(root, None);
-        assert_eq!(chosen, profile_root(root, LOCAL_PROFILE));
-        assert!(Profiles::load(root).profiles[LOCAL_PROFILE].identity.is_none());
-        // the Vault appears with identity A: the unbound local profile is reused, then binds
-        assert_eq!(select_profile_root(root, Some(KEY_A)), chosen);
-        bind_profile(root, &chosen, KEY_A);
-        let p = Profiles::load(root);
-        assert_eq!(p.folder_for_identity(KEY_A).as_deref(), Some(LOCAL_PROFILE));
-        // a different identity gets its own new profile
-        let other = select_profile_root(root, Some(KEY_B));
-        assert_eq!(other, profile_root(root, &partition_key(KEY_B).unwrap()));
-        assert!(other.is_dir());
-        // and A still resolves to local
-        assert_eq!(select_profile_root(root, Some(KEY_A)), chosen);
-    }
-
-    #[test]
     fn a_failed_move_rolls_back_and_stays_legacy() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
@@ -510,14 +135,5 @@ mod tests {
         }
         let yaml = std::fs::read_to_string(root.join("lair/lair-keystore-config.yaml")).unwrap();
         assert!(yaml.contains(&root.join("lair").display().to_string()), "yaml untouched on rollback");
-    }
-
-    #[test]
-    fn fresh_install_starts_in_local_or_the_live_identity() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        assert_eq!(select_profile_root(root, None), profile_root(root, LOCAL_PROFILE));
-        let dir2 = tempfile::tempdir().unwrap();
-        assert_eq!(select_profile_root(dir2.path(), Some(KEY_B)), profile_root(dir2.path(), &partition_key(KEY_B).unwrap()));
     }
 }

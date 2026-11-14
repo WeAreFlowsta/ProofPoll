@@ -10,10 +10,8 @@
 /// for a reason: it never runs on Windows, it is test code, or it opens a
 /// window app.
 const WITHOUT_THE_FLAG: &[(&str, usize, &str)] = &[
-    ("commands.rs", 3, "opens Flowsta Vault, a window app, on each platform"),
     ("instance_guard.rs", 3, "tests"),
     ("lair.rs", 1, "a test"),
-    ("vault_probe.rs", 1, "lsof: macOS"),
 ];
 
 #[test]

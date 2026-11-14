@@ -412,21 +412,7 @@ pub(crate) fn friendly_error(raw: &str) -> String {
 /// Decodes the base64url body and preserves the exact 39 bytes (including
 /// DHT location) so the key matches what the external signer used.
 pub(crate) fn parse_agent_pub_key_string(s: &str) -> Result<AgentPubKey, String> {
-    // Strip the "u" multibase prefix
-    let b64 = s.strip_prefix('u').ok_or("Agent key must start with 'u'")?;
-
-    // Decode base64url (no padding)
-    use base64::Engine;
-    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(b64)
-        .map_err(|e| format!("Invalid base64 in agent key: {}", e))?;
-
-    // Expect 39 bytes: 3 prefix + 32 key + 4 location
-    if raw.len() != 39 {
-        return Err(format!("Agent key wrong length: {} (expected 39)", raw.len()));
-    }
-
-    Ok(AgentPubKey::from_raw_39(raw))
+    Ok(AgentPubKey::from_raw_39(flowsta_vault_client::identity::parse_agent_key(s)?))
 }
 
 // ── Status command (infrastructure — keep as-is) ──────────────────────
@@ -471,55 +457,9 @@ pub fn get_app_status(state: tauri::State<'_, std::sync::Arc<AppState>>) -> AppS
 /// can't find/launch it (the UI then just asks the user to open it manually).
 #[tauri::command]
 pub fn launch_vault() -> Result<(), String> {
-    use std::process::Command;
-
-    #[cfg(target_os = "macos")]
-    {
-        Command::new("open")
-            .args(["-a", "Flowsta Vault"])
-            .spawn()
-            .map(|_| ())
-            .map_err(|e| format!("Could not open Flowsta Vault: {e}"))
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        // Packaged installs (.deb/.rpm) put `flowsta-vault` on PATH.
-        // The Vault decides its own window's drawing: it never inherits
-        // what this app's webview fix set.
-        let mut vault = Command::new("flowsta-vault");
-        for var in crate::webview_fix::set_here() {
-            vault.env_remove(var);
-        }
-        vault
-            .spawn()
-            .map(|_| ())
-            .map_err(|e| format!("Could not open Flowsta Vault: {e}"))
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        // Tauri's NSIS installer puts the app under <install root>/Flowsta Vault.
-        for var in ["LOCALAPPDATA", "ProgramFiles", "ProgramFiles(x86)"] {
-            if let Ok(base) = std::env::var(var) {
-                let path = std::path::Path::new(&base)
-                    .join("Flowsta Vault")
-                    .join("Flowsta Vault.exe");
-                if path.exists() {
-                    return Command::new(&path)
-                        .spawn()
-                        .map(|_| ())
-                        .map_err(|e| format!("Could not open Flowsta Vault: {e}"));
-                }
-            }
-        }
-        Err("Could not find Flowsta Vault. Please open it manually.".into())
-    }
-
-    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-    {
-        Err("Unsupported platform".into())
-    }
+    // The Vault decides its own window's drawing: it never inherits what
+    // this app's webview fix set.
+    flowsta_vault_client::vault::launch_vault(crate::webview_fix::set_here())
 }
 
 // ── Identity link persistence (Flowsta infrastructure — keep as-is) ───
@@ -534,29 +474,9 @@ pub fn launch_vault() -> Result<(), String> {
 //   - profile-cache.json — stores display_name + profile_picture
 //     (allows the app to show the user's identity without Vault running)
 
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
-pub struct IdentityLinkData {
-    pub vault_agent_pub_key: String,
-    pub entry_action_hash: String,
-    pub linked_at: i64,
-}
-
-pub(crate) fn identity_link_path(data_dir: &std::path::Path) -> PathBuf {
-    data_dir.join("identity-link.json")
-}
-
-pub(crate) fn load_identity_link(data_dir: &std::path::Path) -> Option<IdentityLinkData> {
-    let path = identity_link_path(data_dir);
-    let json = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str(&json).ok()
-}
-
-pub(crate) fn save_identity_link(data_dir: &std::path::Path, data: &IdentityLinkData) {
-    let path = identity_link_path(data_dir);
-    if let Ok(json) = serde_json::to_string_pretty(data) {
-        let _ = std::fs::write(path, json);
-    }
-}
+// The files and their formats are `flowsta_vault_client::identity`.
+pub use flowsta_vault_client::identity::{CachedProfile, IdentityLinkData};
+pub(crate) use flowsta_vault_client::identity::{delete_identity_link, load_cached_profile, load_identity_link, save_cached_profile, save_identity_link};
 
 // ── Profile persistence (survives Vault being closed/locked) ──────────
 //
@@ -568,34 +488,6 @@ pub(crate) fn save_identity_link(data_dir: &std::path::Path, data: &IdentityLink
 // The cache is refreshed whenever the Vault is available (layout.tsx
 // polls /status every 3s). If the user changes their name or picture
 // in the Vault, the cache updates automatically on next poll.
-
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
-pub struct CachedProfile {
-    pub display_name: Option<String>,
-    pub profile_picture: Option<String>,
-}
-
-pub(crate) fn profile_cache_path(data_dir: &std::path::Path) -> PathBuf {
-    data_dir.join("profile-cache.json")
-}
-
-pub(crate) fn load_cached_profile(data_dir: &std::path::Path) -> Option<CachedProfile> {
-    let path = profile_cache_path(data_dir);
-    let json = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str(&json).ok()
-}
-
-pub(crate) fn save_cached_profile(data_dir: &std::path::Path, profile: &CachedProfile) {
-    let path = profile_cache_path(data_dir);
-    if let Ok(json) = serde_json::to_string_pretty(profile) {
-        let _ = std::fs::write(path, json);
-    }
-}
-
-pub(crate) fn delete_identity_link(data_dir: &std::path::Path) {
-    let path = identity_link_path(data_dir);
-    let _ = std::fs::remove_file(path);
-}
 
 // ── Write authorization (the ONE chokepoint, two tiers) ───────────────
 //
@@ -638,28 +530,26 @@ pub(crate) const ERR_IDENTITY_MISMATCH: &str =
 /// the unlocked one preferred (`vault_probe`); a slow Vault reads as
 /// unconfirmable, which refuses (never allows).
 pub(crate) async fn vault_live_identity() -> Option<(bool, Option<String>)> {
-    let p = crate::vault_probe::find_vault(std::time::Duration::from_secs(3)).await?;
-    Some((p.unlocked, p.agent_pub_key))
+    crate::vault_probe::client().live_identity().await
+}
+
+/// A refusal in this app's words (the decisions are
+/// `flowsta_vault_client::identity`).
+fn refusal(why: flowsta_vault_client::identity::Refusal) -> String {
+    use flowsta_vault_client::identity::Refusal;
+    match why {
+        Refusal::NotLinked => ERR_NOT_LINKED,
+        Refusal::VaultNotRunning => ERR_VAULT_UNCONFIRMED,
+        Refusal::VaultLocked => ERR_VAULT_LOCKED,
+        Refusal::OtherIdentity => ERR_IDENTITY_MISMATCH,
+    }
+    .to_string()
 }
 
 pub(crate) async fn require_identity_match(
     state: &std::sync::Arc<AppState>,
 ) -> Result<IdentityLinkData, String> {
-    let link = load_identity_link(&state.data_dir).ok_or(ERR_NOT_LINKED)?;
-    let (unlocked, live) = vault_live_identity()
-        .await
-        .ok_or(ERR_VAULT_UNCONFIRMED)?;
-    if !unlocked {
-        return Err(ERR_VAULT_LOCKED.into());
-    }
-    // Both sides come from the Vault's construct_agent_pub_key_string, so
-    // plain string equality is exact - no re-parsing (and no holo_hash
-    // checksum surprises).
-    match live {
-        Some(ref key) if *key == link.vault_agent_pub_key => Ok(link),
-        Some(_) => Err(ERR_IDENTITY_MISMATCH.into()),
-        None => Err(ERR_VAULT_LOCKED.into()),
-    }
+    flowsta_vault_client::identity::require_identity_match(crate::vault_probe::client(), &state.data_dir).await.map_err(refusal)
 }
 
 /// Tier-1 gate: the install must be signed in (identity link on disk), but
@@ -669,13 +559,7 @@ pub(crate) async fn require_identity_match(
 pub(crate) async fn require_identity_link(
     state: &std::sync::Arc<AppState>,
 ) -> Result<IdentityLinkData, String> {
-    let link = load_identity_link(&state.data_dir).ok_or(ERR_NOT_LINKED)?;
-    if let Some((unlocked, Some(ref live))) = vault_live_identity().await {
-        if unlocked && *live != link.vault_agent_pub_key {
-            return Err(ERR_IDENTITY_MISMATCH.into());
-        }
-    }
-    Ok(link)
+    flowsta_vault_client::identity::require_identity_link(crate::vault_probe::client(), &state.data_dir).await.map_err(refusal)
 }
 
 #[tauri::command]
@@ -849,7 +733,7 @@ pub async fn revoke_identity_link(
     // link under a different identity could publish the previous person's
     // name/photo on their first public vote.
     delete_identity_link(&state.data_dir);
-    let _ = std::fs::remove_file(profile_cache_path(&state.data_dir));
+    flowsta_vault_client::identity::delete_cached_profile(&state.data_dir);
 
     // The Vault-side notification happens from the WEBVIEW (identity page),
     // not here: the Vault authorizes /revoke-identity by the caller's
@@ -1484,7 +1368,7 @@ pub async fn build_canonical_backup(
         "backup held: no client_id supplied, so the Vault's escrowed key cannot be checked \
          first - pass clientId when invoking build_canonical_backup",
     )?;
-    let probe = crate::seed_adopt::VaultEscrowProbe { client_id };
+    let probe = crate::seed_adopt::escrow_probe(client_id);
     crate::seed_adopt::backup_escrow_gate(&probe, crate::device_seed::load(&state.data_dir))
         .await?;
 

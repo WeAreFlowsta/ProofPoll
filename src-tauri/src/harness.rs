@@ -453,7 +453,7 @@ async fn op(Ax(app): Ax<tauri::AppHandle>, Json(body): Json<Value>) -> Reply {
         // What the Vault backup holds for this app: the escrowed seed or none.
         "escrow" => {
             use crate::seed_adopt::EscrowProbe;
-            let probe = crate::seed_adopt::VaultEscrowProbe { client_id: s(&body, "client_id") };
+            let probe = crate::seed_adopt::escrow_probe(s(&body, "client_id"));
             match probe.escrowed_seed().await {
                 Ok(crate::seed_adopt::EscrowedSeed::Seed(_)) => ok(json!({ "seed": true })),
                 Ok(crate::seed_adopt::EscrowedSeed::NoBackup) => ok(json!({ "seed": false, "backup": "none" })),
@@ -465,7 +465,7 @@ async fn op(Ax(app): Ax<tauri::AppHandle>, Json(body): Json<Value>) -> Reply {
         // backup. A debug build exits after it (the script relaunches).
         "adopt" => {
             use crate::seed_adopt::EscrowProbe;
-            let probe = crate::seed_adopt::VaultEscrowProbe { client_id: s(&body, "client_id") };
+            let probe = crate::seed_adopt::escrow_probe(s(&body, "client_id"));
             let hex = match probe.escrowed_seed().await {
                 Ok(crate::seed_adopt::EscrowedSeed::Seed(hex)) => hex,
                 Ok(_) => return failed("no escrowed seed in the Vault backup"),
