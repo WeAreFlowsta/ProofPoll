@@ -7,7 +7,7 @@ name: Carrier
 
 on:
   push:
-    branches: [main, "proofpoll-*", "carrier-*"]
+    branches: [main, stable-channel-release, "proofpoll-*", "carrier-*"]
     paths:
       - "carrier/**"
       - "src-tauri/src/carried.rs"

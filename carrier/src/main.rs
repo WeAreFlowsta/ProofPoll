@@ -24,6 +24,30 @@
 //! (whatever it carried), 2 when it stopped early (memory, the write limit,
 //! a read that failed), 1 when it could not run.
 
+// `hc.rs` names the Holochain line through the lines library
+// (`flowsta_hc_lines::Line`), which the app links and this binary does not
+// (it starts no conductor). Here that name is this crate, and the type the
+// same two lines with the same serde names.
+extern crate self as flowsta_hc_lines;
+
+/// Which Holochain line a conductor, a client or a record belongs to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+pub enum Line {
+    /// Holochain 0.6: conductor 0.6.1.
+    V06,
+    /// Holochain 0.7: conductor 0.7.1.
+    V07,
+}
+
+impl std::fmt::Display for Line {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Line::V06 => "0.6",
+            Line::V07 => "0.7",
+        })
+    }
+}
+
 #[allow(dead_code)]
 #[path = "../../src-tauri/src/hc.rs"]
 mod hc;
