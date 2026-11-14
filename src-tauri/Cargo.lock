@@ -1685,7 +1685,7 @@ dependencies = [
 [[package]]
 name = "flowsta-hc-lines"
 version = "0.1.0"
-source = "git+https://github.com/WeAreFlowsta/flowsta-hc-lines?rev=c97ff29df6843f1abf94bf28f39c303cb2c41e89#c97ff29df6843f1abf94bf28f39c303cb2c41e89"
+source = "git+https://github.com/WeAreFlowsta/flowsta-hc-lines?rev=565537b37cc8f02abfa082227a043b730a4647b9#565537b37cc8f02abfa082227a043b730a4647b9"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2492,6 +2492,7 @@ dependencies = [
  "holochain_websocket 0.6.1",
  "holochain_zome_types 0.6.1",
  "kitsune2_api 0.4.1",
+ "lair_keystore_api 0.6.3",
  "parking_lot",
  "rand 0.8.5",
  "serde",
@@ -2517,6 +2518,7 @@ dependencies = [
  "holochain_websocket 0.7.1",
  "holochain_zome_types 0.7.1",
  "kitsune2_api 0.5.2",
+ "lair_keystore_api 0.7.1",
  "parking_lot",
  "rand 0.8.5",
  "serde",

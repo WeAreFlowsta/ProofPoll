@@ -16,9 +16,8 @@
 //! The installation and WebSocket logic is otherwise app-agnostic.
 
 use holochain_client::{
-    AdminWebsocket, AllowedOrigins, AppStatusFilter, AppWebsocket,
-    AuthorizeSigningCredentialsPayload, CellInfo, ClientAgentSigner, InstallAppPayload,
-    IssueAppAuthenticationTokenPayload,
+    AdminWebsocket, AllowedOrigins, AppStatusFilter, AppWebsocket, CellInfo, InstallAppPayload,
+    IssueAppAuthenticationTokenPayload, LairAgentSigner,
 };
 use holochain_types::app::AppBundleSource;
 use holochain_types::prelude::AgentPubKey;
@@ -276,6 +275,7 @@ pub async fn install_dnas(
 /// Returns (app_port, v1.3_active_client, optional_v1_2_client, optional_v1_1_client, optional_v1_0_client).
 pub async fn setup_app_interface(
     admin_port: u16,
+    lair_client: &lair_keystore_api::LairClient,
     v1_0_available: bool,
     v1_1_available: bool,
     v1_2_available: bool,
@@ -295,98 +295,29 @@ pub async fn setup_app_interface(
 
     log::info!("App interface attached on port {}", app_port);
 
-    // Ensure all cells are actually ready before we try to authorize them.
-    // The conductor can report Enabled status while cells are still
-    // initializing after a restart — calling authorize_signing_credentials
-    // too early returns CellDisabled. This pre-check waits up to ~18s with
-    // periodic re-enable attempts so the per-cell loop below sees ready
-    // cells. Without this, dev sessions left idle for a while come back to
-    // life with disabled cells and zome calls silently fail.
-    ensure_apps_enabled(&admin_ws).await;
+    // Enabled before anything is asked of them: a conductor can come back
+    // from a restart with its apps disabled.
+    let enabled = ensure_apps_enabled(&admin_ws).await;
 
-    // Authorize signing credentials for ALL provisioned cells (both versions).
-    let signer = ClientAgentSigner::default();
+    // Calls are signed with the device's own key in the key store. A cell
+    // takes its own agent's calls, so no signing grant is written to any
+    // chain (a grant is a chain action that then has to reach the network,
+    // one per cell at every start).
+    let mut signer = LairAgentSigner::new(std::sync::Arc::new(lair_client.clone()));
     let apps = admin_ws
         .list_apps(Some(AppStatusFilter::Enabled))
         .await
         .map_err(|e| format!("Failed to list apps: {}", e))?;
-
     for app in &apps {
         for cells in app.cell_info.values() {
             for cell in cells {
                 if let CellInfo::Provisioned(provisioned) = cell {
-                    let cell_id = provisioned.cell_id.clone();
-                    match admin_ws
-                        .authorize_signing_credentials(AuthorizeSigningCredentialsPayload {
-                            cell_id: cell_id.clone(),
-                            functions: None,
-                        })
-                        .await
-                    {
-                        Ok(creds) => {
-                            signer.add_credentials(cell_id, creds);
-                            log::info!(
-                                "Signing credentials authorized for cell in {}",
-                                app.installed_app_id
-                            );
-                        }
-                        Err(e) => {
-                            let e_str = e.to_string();
-                            if e_str.contains("CellDisabled") {
-                                // Cell is disabled even though the app showed as Enabled —
-                                // this can happen after conductor restarts. Re-enable and retry.
-                                log::warn!(
-                                    "Cell disabled in {}, re-enabling and retrying...",
-                                    app.installed_app_id
-                                );
-                                if let Err(enable_err) = admin_ws
-                                    .enable_app(app.installed_app_id.clone())
-                                    .await
-                                {
-                                    log::warn!(
-                                        "Could not re-enable {}: {}. Signing skipped.",
-                                        app.installed_app_id, enable_err
-                                    );
-                                } else {
-                                    match admin_ws
-                                        .authorize_signing_credentials(
-                                            AuthorizeSigningCredentialsPayload {
-                                                cell_id: cell_id.clone(),
-                                                functions: None,
-                                            },
-                                        )
-                                        .await
-                                    {
-                                        Ok(creds) => {
-                                            signer.add_credentials(cell_id, creds);
-                                            log::info!(
-                                                "Signing credentials authorized for cell in {} (after re-enable)",
-                                                app.installed_app_id
-                                            );
-                                        }
-                                        Err(retry_err) => {
-                                            log::warn!(
-                                                "Still could not authorize signing for cell in {} after re-enable: {}. Skipping.",
-                                                app.installed_app_id, retry_err
-                                            );
-                                        }
-                                    }
-                                }
-                            } else {
-                                // Non-CellDisabled error — log and skip.
-                                log::warn!(
-                                    "Could not authorize signing for cell in {}: {}. Skipping.",
-                                    app.installed_app_id, e
-                                );
-                            }
-                        }
-                    }
+                    signer.add_credentials(provisioned.cell_id.clone(), provisioned.cell_id.agent_pubkey().clone());
                 }
             }
         }
     }
-
-    let signer_arc: std::sync::Arc<dyn holochain_client::AgentSigner + Send + Sync> = signer.into();
+    let signer_arc: std::sync::Arc<dyn holochain_client::AgentSigner + Send + Sync> = std::sync::Arc::new(signer);
 
     // Connect the active (v1.3) AppWebsocket.
     let token_v1_3 = admin_ws
@@ -409,6 +340,29 @@ pub async fn setup_app_interface(
     .map_err(|e| format!("Failed to connect v1.3 app WebSocket: {}", e))?;
 
     log::info!("v1.3 App WebSocket connected on port {}", app_port);
+
+    // The conductor can list an app as enabled while its cells still start:
+    // wait until the active cell answers, enabling the apps again between
+    // tries. The question writes nothing.
+    for attempt in 1..=READY_TRIES {
+        match cell_answer(&app_ws_v1_3.call_zome(crate::names::ROLE_NAME, crate::commands::POLLS_ZOME, IS_THE_CELL_RUNNING, vec![0xc0]).await) {
+            CellAnswer::Runs => {
+                log::info!("cells ready{}", if attempt > 1 { format!(" after {} s", (attempt - 1) * 3) } else { String::new() });
+                break;
+            }
+            CellAnswer::NotYet if attempt < READY_TRIES => {
+                log::info!("cells not ready yet (attempt {}), waiting 3 s", attempt);
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                for id in &enabled {
+                    let _ = admin_ws.enable_app(id.clone()).await;
+                }
+            }
+            other => {
+                log::warn!("the cell readiness check ended without an answer ({:?})", other);
+                break;
+            }
+        }
+    }
 
     // Connect the v1.2 AppWebsocket if available (for migration reads).
     let app_ws_v1_2 = if v1_2_available {
@@ -527,94 +481,48 @@ pub async fn setup_app_interface(
     Ok((app_port, Some(app_ws_v1_3), app_ws_v1_2, app_ws_v1_1, app_ws_v1_0))
 }
 
-/// Re-enable any disabled apps + verify cells are actually ready before
-/// callers try to authorize signing credentials.
-///
-/// The conductor can report Enabled status while cells are still
-/// initializing after a restart — calling authorize_signing_credentials too
-/// early returns CellDisabled. This helper waits up to ~18 seconds with
-/// periodic re-enable attempts, retrying until a probe authorize succeeds
-/// or we run out of attempts.
-///
-/// Idempotent and safe to call multiple times. Failures here are logged but
-/// don't propagate — the per-cell auth loop in the caller handles the
-/// remaining cell-by-cell skip behaviour.
-pub async fn ensure_apps_enabled(admin_ws: &AdminWebsocket) {
+/// Enable every installed app (a conductor can come back from a restart
+/// with them disabled) and say which. Safe to call more than once; a
+/// failure is logged and the app left as it is.
+pub async fn ensure_apps_enabled(admin_ws: &AdminWebsocket) -> Vec<String> {
     let apps = match admin_ws.list_apps(None).await {
         Ok(a) => a,
         Err(e) => {
             log::warn!("ensure_apps_enabled: list_apps failed: {}", e);
-            return;
+            return Vec::new();
         }
     };
-
     for app in &apps {
         if let Err(e) = admin_ws.enable_app(app.installed_app_id.clone()).await {
-            log::warn!(
-                "ensure_apps_enabled: failed to enable {}: {}",
-                app.installed_app_id,
-                e,
-            );
+            log::warn!("ensure_apps_enabled: failed to enable {}: {}", app.installed_app_id, e);
         }
     }
+    apps.into_iter().map(|a| a.installed_app_id).collect()
+}
 
-    // Pick the active version's cell as the probe. authorize_signing_credentials
-    // will return CellDisabled until cells are truly ready.
-    let probe_cell = apps
-        .iter()
-        .find(|a| a.installed_app_id == ACTIVE_APP_ID_06)
-        .and_then(|app| {
-            app.cell_info.values().flat_map(|cells| cells.iter()).find_map(|c| {
-                if let CellInfo::Provisioned(p) = c {
-                    Some(p.cell_id.clone())
-                } else {
-                    None
-                }
-            })
-        });
+/// A function no zome has. Calling it asks whether the cell runs without
+/// writing anything: a running cell answers that the function is missing,
+/// one that is not running says so (0.6: CellDisabled, 0.7: CellNotRunning).
+const IS_THE_CELL_RUNNING: &str = "__is_the_cell_running";
+/// Tries of that question, 3 s apart.
+const READY_TRIES: u32 = 6;
 
-    let Some(cell_id) = probe_cell else {
-        return;
-    };
+#[derive(Debug, PartialEq)]
+enum CellAnswer {
+    Runs,
+    NotYet,
+    Other(String),
+}
 
-    for attempt in 1..=6 {
-        match admin_ws
-            .authorize_signing_credentials(AuthorizeSigningCredentialsPayload {
-                cell_id: cell_id.clone(),
-                functions: None,
-            })
-            .await
-        {
-            Ok(_) => {
-                if attempt > 1 {
-                    log::info!(
-                        "ensure_apps_enabled: cells ready after {}s wait",
-                        (attempt - 1) * 3,
-                    );
-                } else {
-                    log::info!("ensure_apps_enabled: cells ready");
-                }
-                return;
-            }
-            Err(e) => {
-                let err_str = format!("{}", e);
-                if err_str.contains("CellDisabled") && attempt < 6 {
-                    log::info!(
-                        "ensure_apps_enabled: cells not ready yet (attempt {}), waiting 3s...",
-                        attempt,
-                    );
-                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                    // Re-enable all apps before retrying — sometimes the
-                    // conductor needs the enable_app nudge more than once.
-                    for app in &apps {
-                        let _ = admin_ws.enable_app(app.installed_app_id.clone()).await;
-                    }
-                } else {
-                    log::warn!("ensure_apps_enabled: cell readiness check failed: {}", e);
-                    return;
-                }
-            }
-        }
+fn cell_answer(result: &Result<Vec<u8>, String>) -> CellAnswer {
+    use flowsta_hc_lines::client::{kind_of_message, ZomeErrorKind};
+    match result {
+        Ok(_) => CellAnswer::Runs,
+        Err(e) => match kind_of_message(e) {
+            ZomeErrorKind::MissingFunction => CellAnswer::Runs,
+            ZomeErrorKind::CellNotRunning => CellAnswer::NotYet,
+            _ => CellAnswer::Other(e.chars().take(200).collect()),
+        },
     }
 }
 
@@ -908,15 +816,12 @@ pub async fn ask_again_07(
     }
 }
 
-/// Attach the 0.7 conductor's app interface, authorize signing for the v1.4
-/// cell and connect the v1.4 app websocket.
 /// The 0.7 app interface: the port, the active (v1.5) client, and the v1.4
 /// client when v1.4 is installed.
-pub async fn setup_app_interface_07(admin_port: u16) -> Result<(u16, crate::hc::AppClient, Option<crate::hc::AppClient>), String> {
+pub async fn setup_app_interface_07(admin_port: u16, lair_client: &lair_keystore_api_07::LairClient) -> Result<(u16, crate::hc::AppClient, Option<crate::hc::AppClient>), String> {
     use holochain_client_07::{
-        AdminWebsocket, AllowedOrigins, AppStatusFilter, AppWebsocket,
-        AuthorizeSigningCredentialsPayload, CellInfo, ClientAgentSigner,
-        IssueAppAuthenticationTokenPayload,
+        AdminWebsocket, AllowedOrigins, AppStatusFilter, AppWebsocket, CellInfo,
+        IssueAppAuthenticationTokenPayload, LairAgentSigner,
     };
 
     let admin_ws = AdminWebsocket::connect(
@@ -931,7 +836,9 @@ pub async fn setup_app_interface_07(admin_port: u16) -> Result<(u16, crate::hc::
         .map_err(|e| format!("Failed to attach the 0.7 app interface: {}", e))?;
     log::info!("0.7 app interface attached on port {}", app_port);
 
-    let signer = ClientAgentSigner::default();
+    // Signed with the device's own key in the 0.7 key store: no signing
+    // grant is written to any chain (see `setup_app_interface`).
+    let mut signer = LairAgentSigner::new(std::sync::Arc::new(lair_client.clone()));
     let apps = admin_ws
         .list_apps(Some(AppStatusFilter::Enabled))
         .await
@@ -940,43 +847,12 @@ pub async fn setup_app_interface_07(admin_port: u16) -> Result<(u16, crate::hc::
         for cells in app.cell_info.values() {
             for cell in cells {
                 if let CellInfo::Provisioned(provisioned) = cell {
-                    let cell_id = provisioned.cell_id.clone();
-                    // Cells can take a few seconds after install; CellNotRunning
-                    // is 0.7's "not yet".
-                    let mut authorized = false;
-                    for attempt in 1..=6 {
-                        match admin_ws
-                            .authorize_signing_credentials(AuthorizeSigningCredentialsPayload {
-                                cell_id: cell_id.clone(),
-                                functions: None,
-                            })
-                            .await
-                        {
-                            Ok(creds) => {
-                                signer.add_credentials(cell_id.clone(), creds);
-                                authorized = true;
-                                break;
-                            }
-                            Err(e) => {
-                                let s = e.to_string();
-                                if (s.contains("CellNotRunning") || s.contains("CellDisabled")) && attempt < 6 {
-                                    let _ = admin_ws.enable_app(app.installed_app_id.clone()).await;
-                                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                                } else {
-                                    log::warn!("Could not authorize signing for a cell in {} (0.7): {}", app.installed_app_id, s);
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    if authorized {
-                        log::info!("Signing credentials authorized for cell in {} (0.7)", app.installed_app_id);
-                    }
+                    signer.add_credentials(provisioned.cell_id.clone(), provisioned.cell_id.agent_pubkey().clone());
                 }
             }
         }
     }
-    let signer_arc: std::sync::Arc<dyn holochain_client_07::AgentSigner + Send + Sync> = signer.into();
+    let signer_arc: std::sync::Arc<dyn holochain_client_07::AgentSigner + Send + Sync> = std::sync::Arc::new(signer);
     // One app websocket per app: a token names one installed app.
     let connect = |app_id: &'static str| {
         let (admin_ws, signer) = (&admin_ws, signer_arc.clone());
@@ -993,7 +869,22 @@ pub async fn setup_app_interface_07(admin_port: u16) -> Result<(u16, crate::hc::
                 .await
                 .map_err(|e| format!("Failed to connect the {} app WebSocket: {}", app_id, e))?;
             log::info!("{} App WebSocket connected on port {} (0.7)", app_id, app_port);
-            Ok::<_, String>(crate::hc::AppClient::V07(ws))
+            let client = crate::hc::AppClient::V07(ws);
+            // Cells can take a few seconds after an install or a restart.
+            for attempt in 1..=READY_TRIES {
+                match cell_answer(&client.call_zome(crate::names::ROLE_NAME, crate::commands::POLLS_ZOME, IS_THE_CELL_RUNNING, vec![0xc0]).await) {
+                    CellAnswer::Runs => break,
+                    CellAnswer::NotYet if attempt < READY_TRIES => {
+                        let _ = admin_ws.enable_app(app_id.to_string()).await;
+                        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    }
+                    other => {
+                        log::warn!("the {} cell did not say it runs ({:?})", app_id, other);
+                        break;
+                    }
+                }
+            }
+            Ok::<_, String>(client)
         }
     };
     let active = connect(ACTIVE_APP_ID).await?;
@@ -1014,6 +905,19 @@ pub async fn setup_app_interface_07(admin_port: u16) -> Result<(u16, crate::hc::
 #[cfg(test)]
 mod restore_tests {
     use flowsta_hc_lines::restore::short_by as restore_is_short;
+
+    #[test]
+    fn the_readiness_question_reads_each_line_s_answer() {
+        use super::{cell_answer, CellAnswer};
+        assert_eq!(cell_answer(&Ok(vec![0xc0])), CellAnswer::Runs);
+        let missing = "ExternalApiWireError(InternalError(\"Attempted to call a zome function that doesn't exist: Zome: polls Fn __is_the_cell_running\"))";
+        assert_eq!(cell_answer(&Err(missing.to_string())), CellAnswer::Runs);
+        let off_07 = "ExternalApiWireError(InternalError(\"Conductor returned an error while using a ConductorApi: CellNotRunning(CellId(DnaHash(uhC0k), AgentPubKey(uhCAk)))\"))";
+        assert_eq!(cell_answer(&Err(off_07.to_string())), CellAnswer::NotYet);
+        let off_06 = "ExternalApiWireError(InternalError(\"Conductor returned an error while using a ConductorApi: CellDisabled(CellId(DnaHash(uhC0k), AgentPubKey(uhCAk)))\"))";
+        assert_eq!(cell_answer(&Err(off_06.to_string())), CellAnswer::NotYet);
+        assert!(matches!(cell_answer(&Err("Websocket closed".to_string())), CellAnswer::Other(_)));
+    }
 
     #[test]
     fn try_again_waits_five_minutes_after_a_short_restore_is_set_aside() {

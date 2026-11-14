@@ -383,7 +383,7 @@ impl PpLines {
         }
         self.say("Setting up app interface...");
         let (app_port, v1_3, v1_2, v1_1, v1_0) =
-            crate::dna::setup_app_interface(process.admin_port, install.v1_0_available, install.v1_1_available, install.v1_2_available)
+            crate::dna::setup_app_interface(process.admin_port, &lair_client, install.v1_0_available, install.v1_1_available, install.v1_2_available)
                 .await
                 .map_err(|e| format!("App interface setup failed: {}", e))?;
         let mut out = self.out.lock().await;
@@ -494,7 +494,7 @@ impl PpLines {
             return Ok(Setup { app_port: 0, restart: true });
         }
         let (app_port, client, client_v1_4) =
-            crate::dna::setup_app_interface_07(process.admin_port).await.map_err(|e| format!("App interface setup (0.7) failed: {}", e))?;
+            crate::dna::setup_app_interface_07(process.admin_port, &lair_client_07).await.map_err(|e| format!("App interface setup (0.7) failed: {}", e))?;
         let mut out = self.out.lock().await;
         out.agent_07 = Some(agent_07);
         out.clients_07 = Some((client, client_v1_4));
