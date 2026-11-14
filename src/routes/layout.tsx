@@ -4,7 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { linkedContext, linkStateContext, displayNameContext, profilePictureContext, type LinkState } from "~/lib/context";
 import { sanitizeImageSrc } from "~/lib/sanitize";
-import { setSignInIntent, vaultLinkOptions } from "~/lib/signin";
+import { bindOpenProfile, setSignInIntent, vaultLinkOptions } from "~/lib/signin";
 import {
   getLinkedAgents,
   identityLinkedOnActive,
@@ -497,6 +497,8 @@ export default component$(() => {
     disconnecting.value = true;
     try {
       await revokeIdentityLink().catch(() => {});
+      // The profile has no link now: the SDK's binding goes with it.
+      await bindOpenProfile();
       await saveProfileCache(null, null).catch(() => {});
       displayName.value = null;
       profilePicture.value = null;
