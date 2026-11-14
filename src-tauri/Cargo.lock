@@ -1685,7 +1685,7 @@ dependencies = [
 [[package]]
 name = "flowsta-hc-lines"
 version = "0.1.0"
-source = "git+https://github.com/WeAreFlowsta/flowsta-hc-lines?rev=c97ff29df6843f1abf94bf28f39c303cb2c41e89#c97ff29df6843f1abf94bf28f39c303cb2c41e89"
+source = "git+https://github.com/WeAreFlowsta/flowsta-hc-lines?rev=06b1318f4a10e6093a170476fba32e38b2641fc8#06b1318f4a10e6093a170476fba32e38b2641fc8"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1731,6 +1731,23 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+]
+
+[[package]]
+name = "flowsta-vault-client"
+version = "0.1.0"
+source = "git+https://github.com/WeAreFlowsta/flowsta-rust-sdk?rev=695b1895b56b499a58dd42c58ccdd2e1f9c1e055#695b1895b56b499a58dd42c58ccdd2e1f9c1e055"
+dependencies = [
+ "base64 0.22.1",
+ "ed25519-dalek",
+ "hex",
+ "log",
+ "rand 0.8.5",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
 ]
 
 [[package]]
@@ -2492,6 +2509,7 @@ dependencies = [
  "holochain_websocket 0.6.1",
  "holochain_zome_types 0.6.1",
  "kitsune2_api 0.4.1",
+ "lair_keystore_api 0.6.3",
  "parking_lot",
  "rand 0.8.5",
  "serde",
@@ -2517,6 +2535,7 @@ dependencies = [
  "holochain_websocket 0.7.1",
  "holochain_zome_types 0.7.1",
  "kitsune2_api 0.5.2",
+ "lair_keystore_api 0.7.1",
  "parking_lot",
  "rand 0.8.5",
  "serde",
@@ -5268,6 +5287,7 @@ dependencies = [
  "ed25519-dalek",
  "flowsta-hc-lines",
  "flowsta-update-check",
+ "flowsta-vault-client",
  "hex",
  "holo_hash 0.7.1",
  "holochain_client 0.8.1",

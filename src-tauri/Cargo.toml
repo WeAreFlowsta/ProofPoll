@@ -30,7 +30,7 @@ lair_keystore_api = "=0.6.3"
 
 # Holochain conductor client (AdminWebsocket + AppWebsocket). Conductor 0.6.1
 # → Rust client 0.8.1 (released 2026-05-12 for Holochain 0.6.1).
-holochain_client = { version = "=0.8.1", default-features = false }
+holochain_client = { version = "=0.8.1", default-features = false, features = ["lair_signing"] }
 holochain_types = "=0.6.1"
 
 # Used by build_canonical_backup to dump + classify the full source chain
@@ -43,7 +43,7 @@ holochain_integrity_types = "=0.6.1"
 # the 0.6 crates read v1.0-v1.3 cells on the 0.6.1 conductor, the 0.7 crates
 # read v1.4 on the 0.7.1 conductor. A Record from one line does not decode
 # with the other; our own entry structs are msgpack and cross freely.
-holochain_client_07 = { package = "holochain_client", version = "=0.9.1", default-features = false }
+holochain_client_07 = { package = "holochain_client", version = "=0.9.1", default-features = false, features = ["lair_signing"] }
 holochain_types_07 = { package = "holochain_types", version = "=0.7.1" }
 holochain_integrity_types_07 = { package = "holochain_integrity_types", version = "=0.7.1" }
 holochain_state_types_07 = { package = "holochain_state_types", version = "=0.7.1" }
@@ -90,7 +90,9 @@ url = "2"
 # The kit cache (and, from 0.5.2, the rest of the lines library): the same
 # rev as Flowsta Vault; its Holochain client pins are ProofPoll's own.
 async-trait = "0.1"
-flowsta-hc-lines = { git = "https://github.com/WeAreFlowsta/flowsta-hc-lines", rev = "c97ff29df6843f1abf94bf28f39c303cb2c41e89" }
+flowsta-hc-lines = { git = "https://github.com/WeAreFlowsta/flowsta-hc-lines", rev = "06b1318f4a10e6093a170476fba32e38b2641fc8" }
+# The Flowsta side: finding the Vault, the identity link, the device key, adopt, profiles.
+flowsta-vault-client = { git = "https://github.com/WeAreFlowsta/flowsta-rust-sdk", rev = "695b1895b56b499a58dd42c58ccdd2e1f9c1e055" }
 
 # The test harness's localhost server (feature `harness`, test builds only).
 axum = { version = "0.7", optional = true, default-features = false, features = ["http1", "json", "tokio"] }
