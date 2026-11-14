@@ -18,7 +18,7 @@ use std::time::Duration;
 use tauri::{Emitter, Manager};
 use tauri_plugin_updater::UpdaterExt;
 
-const APP_ID: &str = "com.proofpoll.app";
+const APP_ID: &str = crate::names::APP_IDENTIFIER;
 /// The identities whose signature on a release manifest this build accepts:
 /// Team Flowsta, as for the node manifests.
 const SIGNERS: &[&str] = &["did:flowsta:uhCAkWuA-Ehm9EVzcsPE2Wo_vpc9ImljHN8NMMEXpbtG5BdooOV9a"];
@@ -381,9 +381,8 @@ pub fn install_ready(app: &tauri::AppHandle, data_dir: &Path, stage: &dyn Fn(&st
 }
 
 fn stop_conductors(app: &tauri::AppHandle) {
-    if let Some(handle) = app.state::<std::sync::Arc<crate::commands::AppState>>().conductor_handle.lock().unwrap().take() {
-        handle.shutdown();
-    }
+    let _ = app;
+    crate::conductor::stop_lines();
 }
 
 /// On quit: install a waiting update where that needs no one (Windows,

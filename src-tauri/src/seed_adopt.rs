@@ -76,6 +76,12 @@ pub struct RestoreMarker {
     /// from before v1.5 names v1.4 alone.
     #[serde(default = "only_v1_4")]
     pub dnas: Vec<String>,
+    /// The highest action seq the backup holds for each DNA version. A
+    /// restore that comes back shorter than this is missing records the old
+    /// device wrote (`conductor.rs` asks again instead of enabling it). A
+    /// marker from before this field has none, and nothing is compared.
+    #[serde(default)]
+    pub heads: std::collections::BTreeMap<String, u32>,
 }
 
 fn only_v1_4() -> Vec<String> {
@@ -108,6 +114,22 @@ pub fn clear_restore_marker(data_dir: &Path) {
     let _ = std::fs::remove_file(restore_marker_path(data_dir));
 }
 
+/// What the next start restores from the network for the key in `backup`:
+/// each 0.7 chain the backup shows, up to the seq it holds. None for a
+/// backup from ProofPoll 0.3 or 0.4 (its chain is on the 0.6 line only, so
+/// the key has no 0.7 chain anywhere: the 0.7 apps start their chains here,
+/// and what the key wrote on v1.3 is read from the 0.6 line and carried),
+/// and for a backup with no records to tell from.
+pub(crate) fn marker_for(backup: &serde_json::Value) -> Result<Option<RestoreMarker>, String> {
+    match backup_chain(backup) {
+        BackupChain::Line07 { head_seq, dnas, heads } => {
+            let agent = backup["agent_pub_key"].as_str().ok_or("Your Vault backup does not name its key - nothing was changed.")?;
+            Ok(Some(RestoreMarker { agent: agent.to_string(), backup_head_seq: head_seq, dnas, heads }))
+        }
+        BackupChain::Line06 | BackupChain::Unknown => Ok(None),
+    }
+}
+
 /// Which Holochain line a canonical backup's chain comes from: the cell's
 /// `line` (backups from 0.6.0 on), else the records' shape (a 0.7 dump's
 /// action is `{header, data}`, a 0.6 dump's a tagged `{type, ..}`).
@@ -116,7 +138,8 @@ pub(crate) enum BackupChain {
     /// The key has 0.7 chains: the highest seq the backup holds, and each
     /// chain's DNA version (the cell's `dna_version`; before 0.6.0, v1.4).
     /// A cell is a chain even with no records listed: the app was installed.
-    Line07 { head_seq: u32, dnas: Vec<String> },
+    /// `heads`: the highest seq per DNA version, for the versions with records.
+    Line07 { head_seq: u32, dnas: Vec<String>, heads: std::collections::BTreeMap<String, u32> },
     Line06,
     /// No records to tell from.
     Unknown,
@@ -126,9 +149,11 @@ pub(crate) fn backup_chain(data: &serde_json::Value) -> BackupChain {
     let mut line06 = false;
     let mut head_seq = 0u32;
     let mut dnas: Vec<String> = Vec::new();
+    let mut heads: std::collections::BTreeMap<String, u32> = std::collections::BTreeMap::new();
     let cells = data.get("cells").and_then(|c| c.as_array()).map(|c| c.as_slice()).unwrap_or(&[]);
     for cell in cells {
         let mut cell07 = false;
+        let mut cell_head: Option<u32> = None;
         match cell.get("line").and_then(|l| l.as_str()) {
             Some("holochain-0.7") => cell07 = true,
             Some("holochain-0.6") => line06 = true,
@@ -140,20 +165,26 @@ pub(crate) fn backup_chain(data: &serde_json::Value) -> BackupChain {
             if let Some(header) = action.get("header").filter(|h| h.is_object()) {
                 cell07 = true;
                 let seq = header.get("action_seq").and_then(|s| s.as_u64()).unwrap_or(0);
-                head_seq = head_seq.max(u32::try_from(seq).unwrap_or(u32::MAX));
+                let seq = u32::try_from(seq).unwrap_or(u32::MAX);
+                head_seq = head_seq.max(seq);
+                cell_head = Some(cell_head.map_or(seq, |h| h.max(seq)));
             } else if action.get("type").is_some() {
                 line06 = true;
             }
         }
         if cell07 {
             let dna = cell.get("dna_version").and_then(|v| v.as_str()).unwrap_or("1.4").to_string();
+            if let Some(h) = cell_head {
+                let e = heads.entry(dna.clone()).or_insert(h);
+                *e = (*e).max(h);
+            }
             if !dnas.contains(&dna) {
                 dnas.push(dna);
             }
         }
     }
     if !dnas.is_empty() {
-        BackupChain::Line07 { head_seq, dnas }
+        BackupChain::Line07 { head_seq, dnas, heads }
     } else if line06 {
         BackupChain::Line06
     } else {
@@ -393,17 +424,10 @@ impl AdoptSeams for AppSeams {
     }
 
     async fn stop_processes(&self) {
-        let handle = self.state.conductor_handle.lock().unwrap().take();
-        match handle {
-            Some(h) => {
-                crate::process_ext::stop_pid(h.conductor_child_07.id());
-                crate::process_ext::stop_pid(h.conductor_child.id());
-                crate::process_ext::stop_pid(h.lair_child_07.id());
-                crate::process_ext::stop_pid(h.lair_child.id());
-                log::info!("[adopt] signalled both conductors + lairs to stop");
-            }
-            None => log::warn!("[adopt] no conductor handle held - nothing to stop"),
-        }
+        // Each conductor asked to shut down, then its key store, and all
+        // four processes gone when this returns.
+        let _ = tokio::task::spawn_blocking(crate::conductor::stop_lines).await;
+        log::info!("[adopt] both conductors and key stores stopped");
     }
 
     async fn sleep_ms(&self, ms: u64) {
@@ -551,15 +575,7 @@ pub async fn adopt_escrowed_seed(
             return Err("Your Vault backup no longer holds that key. Reopen the Identity page and try again - nothing was changed.".into())
         }
     }
-    let marker = match backup_chain(&backup) {
-        BackupChain::Line07 { head_seq, dnas } => {
-            let agent = backup["agent_pub_key"]
-                .as_str()
-                .ok_or("Your Vault backup does not name its key - nothing was changed.")?;
-            Some(RestoreMarker { agent: agent.to_string(), backup_head_seq: head_seq, dnas })
-        }
-        BackupChain::Line06 | BackupChain::Unknown => None,
-    };
+    let marker = marker_for(&backup)?;
     // Before the commit, so a marker that cannot be written leaves nothing
     // changed; a marker left by an adopt that aborts names a key the next
     // start does not use, and is ignored there.
@@ -920,30 +936,63 @@ mod tests {
         // 0.5.0's backups: v1.4 records, no `line`; the highest seq counts.
         let b050 = serde_json::json!({"cells": [{"role_name": "polls", "records": [rec07(0), rec07(31), rec07(7)]}]});
         let v14 = || vec!["1.4".to_string()];
-        assert_eq!(backup_chain(&b050), BackupChain::Line07 { head_seq: 31, dnas: v14() });
+        let heads = |pairs: &[(&str, u32)]| pairs.iter().map(|(v, s)| (v.to_string(), *s)).collect::<std::collections::BTreeMap<String, u32>>();
+        assert_eq!(backup_chain(&b050), BackupChain::Line07 { head_seq: 31, dnas: v14(), heads: heads(&[("1.4", 31)]) });
         // 0.3/0.4's backups: v1.3 records from the 0.6 line.
         let b040 = serde_json::json!({"cells": [{"records": [rec06(0), rec06(12)]}]});
         assert_eq!(backup_chain(&b040), BackupChain::Line06);
         // From 0.6.0 the cell names its line.
         let b060 = serde_json::json!({"cells": [{"line": "holochain-0.7", "records": [rec07(4)]}]});
-        assert_eq!(backup_chain(&b060), BackupChain::Line07 { head_seq: 4, dnas: v14() });
+        assert_eq!(backup_chain(&b060), BackupChain::Line07 { head_seq: 4, dnas: v14(), heads: heads(&[("1.4", 4)]) });
         let named_only = serde_json::json!({"cells": [{"line": "holochain-0.7", "records": []}]});
-        assert_eq!(backup_chain(&named_only), BackupChain::Line07 { head_seq: 0, dnas: v14() });
+        assert_eq!(backup_chain(&named_only), BackupChain::Line07 { head_seq: 0, dnas: v14(), heads: heads(&[]) });
         // From v1.5 each 0.7 cell names its DNA version; the 0.6 one does not count.
         let b15 = serde_json::json!({"cells": [
             {"line": "holochain-0.7", "dna_version": "1.4", "records": [rec07(9)]},
             {"line": "holochain-0.7", "dna_version": "1.5", "records": [rec07(3)]},
             {"line": "holochain-0.6", "dna_version": "1.3", "records": [rec06(40)]}]});
-        assert_eq!(backup_chain(&b15), BackupChain::Line07 { head_seq: 9, dnas: vec!["1.4".into(), "1.5".into()] });
+        // Each version keeps its own head: v1.5's is 3, not the 9 of v1.4.
+        assert_eq!(backup_chain(&b15), BackupChain::Line07 { head_seq: 9, dnas: vec!["1.4".into(), "1.5".into()], heads: heads(&[("1.4", 9), ("1.5", 3)]) });
         // v1.5 installed with only its genesis listed is still a chain to restore.
         let genesis_only = serde_json::json!({"cells": [
             {"line": "holochain-0.7", "dna_version": "1.4", "records": [rec07(9)]},
             {"line": "holochain-0.7", "dna_version": "1.5", "records": []}]});
-        assert_eq!(backup_chain(&genesis_only), BackupChain::Line07 { head_seq: 9, dnas: vec!["1.4".into(), "1.5".into()] });
+        assert_eq!(backup_chain(&genesis_only), BackupChain::Line07 { head_seq: 9, dnas: vec!["1.4".into(), "1.5".into()], heads: heads(&[("1.4", 9)]) });
         // Nothing to tell from.
         assert_eq!(backup_chain(&serde_json::json!({"cells": [{"records": []}]})), BackupChain::Unknown);
         assert_eq!(backup_chain(&serde_json::json!({"version": 1})), BackupChain::Unknown);
         assert_eq!(backup_chain(&serde_json::json!(null)), BackupChain::Unknown);
+    }
+
+    /// What a restore does with each age of backup. From 0.3 or 0.4 (v1.3
+    /// on the 0.6 line): nothing is restored on 0.7, where the key never
+    /// had a chain, so no second chain can be started under it there. From
+    /// 0.5.0 (v1.4, no line named): v1.4 is restored to the backup's head.
+    /// From 0.6.0: each 0.7 chain to its own head.
+    #[test]
+    fn a_restore_asks_the_network_only_for_chains_the_backup_shows() {
+        let key = "uhCAkf5HNWEmQnKbf-3x-4i-Lmu9U1rC2XbcE0x8qVEKJLvODocb0";
+        let b040 = serde_json::json!({"agent_pub_key": key, "cells": [{"records": [rec06(0), rec06(12)]}]});
+        assert_eq!(marker_for(&b040), Ok(None), "a 0.3 or 0.4 backup: the 0.7 apps start their chains here");
+        let empty = serde_json::json!({"agent_pub_key": key, "cells": []});
+        assert_eq!(marker_for(&empty), Ok(None));
+
+        let b050 = serde_json::json!({"agent_pub_key": key, "cells": [{"role_name": "polls", "records": [rec07(0), rec07(31)]}]});
+        let m = marker_for(&b050).unwrap().expect("a 0.5.0 backup names a v1.4 chain");
+        assert_eq!((m.agent.as_str(), m.backup_head_seq, m.dnas.clone(), m.heads.get("1.4").copied()), (key, 31, vec!["1.4".to_string()], Some(31)));
+
+        let b060 = serde_json::json!({"agent_pub_key": key, "cells": [
+            {"records": [rec06(0), rec06(40)]},
+            {"line": "holochain-0.7", "dna_version": "1.4", "records": [rec07(18)]},
+            {"line": "holochain-0.7", "dna_version": "1.5", "records": [rec07(48)]},
+        ]});
+        let m = marker_for(&b060).unwrap().expect("a 0.6.0 backup names both 0.7 chains");
+        assert_eq!(m.dnas, vec!["1.4".to_string(), "1.5".to_string()]);
+        assert_eq!((m.heads.get("1.4").copied(), m.heads.get("1.5").copied(), m.backup_head_seq), (Some(18), Some(48), 48));
+
+        // A backup with 0.7 records and no key named is refused, not guessed.
+        let nameless = serde_json::json!({"cells": [{"line": "holochain-0.7", "records": [rec07(4)]}]});
+        assert!(marker_for(&nameless).is_err());
     }
 
     #[test]
@@ -955,6 +1004,7 @@ mod tests {
             agent: "uhCAkf5HNWEmQnKbf-3x-4i-Lmu9U1rC2XbcE0x8qVEKJLvODocb0".into(),
             backup_head_seq: 31,
             dnas: vec!["1.4".into(), "1.5".into()],
+            heads: [("1.4".to_string(), 31u32), ("1.5".to_string(), 12u32)].into_iter().collect(),
         };
         write_restore_marker(&dir, &m).unwrap();
         assert_eq!(read_restore_marker(&dir), Some(m));
@@ -966,6 +1016,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(read_restore_marker(&dir).map(|m| m.dnas), Some(vec!["1.4".to_string()]));
+        // ... and holds no per-version heads, so nothing is compared.
+        assert_eq!(read_restore_marker(&dir).map(|m| m.heads.len()), Some(0));
         // A damaged marker is ignored, never trusted.
         std::fs::write(dir.join(RESTORE_MARKER), b"{not json").unwrap();
         assert_eq!(read_restore_marker(&dir), None);

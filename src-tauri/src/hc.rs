@@ -14,14 +14,9 @@
 use holochain_types::prelude::ExternIO as ExternIO06;
 use holochain_types_07::prelude::ExternIO as ExternIO07;
 
-/// Which Holochain line a conductor speaks.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
-pub enum Line {
-    /// Holochain 0.6.1: DNA v1.0 to v1.3.
-    V06,
-    /// Holochain 0.7.1: DNA v1.4 and later.
-    V07,
-}
+/// Which Holochain line a conductor speaks (the library's type): `V06` is
+/// Holochain 0.6.1 (DNA v1.0 to v1.3), `V07` is 0.7.1 (v1.4 and later).
+pub use flowsta_hc_lines::Line;
 
 /// An app websocket on one of the two lines (a handle: clones share it).
 #[derive(Clone)]

@@ -22,6 +22,7 @@
 //! The startup sequence and migration wiring are reusable as-is.
 
 mod commands;
+mod polls;
 mod conductor;
 mod crypto;
 mod dna;
@@ -30,7 +31,7 @@ mod instance_guard;
 mod device_seed;
 mod lair;
 pub mod migration;
-mod process_ext;
+mod names;
 mod seed_adopt;
 mod sidecar;
 
@@ -71,10 +72,10 @@ fn test_data_dir() -> Option<std::path::PathBuf> {
 /// there once. The identifier stays: it names the data folder too.
 /// Returns the target and, when the older logs were moved, a line saying so.
 fn log_target(app: &tauri::App) -> (tauri_plugin_log::TargetKind, Option<String>) {
-    let file_name = Some("proofpoll".to_string());
+    let file_name = Some(names::LOG_FILE_NAME.to_string());
     #[cfg(target_os = "macos")]
     if let Some((old, new)) = app.path().app_log_dir().ok().and_then(|old| {
-        let new = old.parent()?.join("ProofPoll");
+        let new = old.parent()?.join(names::LOG_FOLDER_NAME);
         Some((old, new))
     }) {
         let moved = (old.is_dir() && !new.exists()).then(|| match std::fs::rename(&old, &new) {
@@ -90,6 +91,13 @@ fn log_target(app: &tauri::App) -> (tauri_plugin_log::TargetKind, Option<String>
 static WEBVIEW_FIX: std::sync::OnceLock<webview_fix::Outcome> = std::sync::OnceLock::new();
 
 pub fn run() {
+    // Started as the library's stop helper (`--hc-lines-interrupt <pid>`,
+    // Windows): raise Ctrl-C in that sidecar's console and exit, before
+    // anything of the app starts. Otherwise this notes that the executable
+    // can be that helper, and a conductor is asked to shut down before it
+    // is ended on Windows too.
+    flowsta_hc_lines::process::interrupt_helper_or_continue();
+
     // First, before anything starts a thread: on Linux with the NVIDIA driver
     // loaded, WebKitGTK 2.52 segfaults on a page change when NVIDIA's EGL
     // draws the window. The fix sets environment variables for the webview
@@ -133,7 +141,7 @@ pub fn run() {
                     .build(),
             )?;
 
-            log::info!("ProofPoll starting up (v{})", env!("CARGO_PKG_VERSION"));
+            log::info!("{} starting up (v{})", names::APP_NAME, env!("CARGO_PKG_VERSION"));
             if let Some(moved) = log_moved {
                 log::info!("{}", moved);
             }
@@ -271,23 +279,7 @@ pub fn run() {
                             }
                         }
 
-                        let admin_port = result.handle.admin_port_07;
-                        let app_port = result.handle.app_port_07;
-                        let conductor_pid = result.handle.conductor_pid;
-                        let conductor_pid_07 = result.handle.conductor_pid_07;
-
-                        *startup_state.conductor_handle.lock().unwrap() = Some(result.handle);
-                        *startup_state.agent_pub_key.lock().unwrap() = Some(result.agent_key);
-                        *startup_state.agent_pub_key_07.lock().unwrap() = Some(result.agent_key_07);
-                        *startup_state.app_client.lock().await = Some(result.app_client);
-                        *startup_state.app_client_v1_4.lock().await = result.app_client_v1_4;
-                        *startup_state.app_client_v1_3.lock().await = result.app_client_v1_3;
-                        *startup_state.app_client_v1_2.lock().await = result.app_client_v1_2;
-                        *startup_state.app_client_v1_1.lock().await = result.app_client_v1_1;
-                        *startup_state.app_client_v1_0.lock().await = result.app_client_v1_0;
-                        *startup_state.lair_client.lock().await = Some(result.lair_client);
-                        *startup_state.conductor_status.lock().unwrap() =
-                            conductor::ConductorStatus::Ready { admin_port, app_port };
+                        conductor::apply_started(&startup_state, &monitor_handle, result).await;
 
                         // Each line's kit, set aside once a run.
                         kits::refresh_once(kit_device_root.clone(), kit_resources.clone());
@@ -299,17 +291,10 @@ pub fn run() {
                             monitor_handle.clone(),
                         );
 
-                        // Start background health monitor
-                        conductor::spawn_health_monitor(
-                            conductor_pid,
-                            startup_state.clone(),
-                            monitor_handle.clone(),
-                        );
-                        conductor::spawn_health_monitor(
-                            conductor_pid_07,
-                            startup_state.clone(),
-                            monitor_handle,
-                        );
+                        // Both lines watched while the app runs: a conductor
+                        // that stops is started again, and the lines restart
+                        // at a quiet moment when one holds too much memory.
+                        conductor::spawn_watch(startup_state.clone(), monitor_handle);
 
                         // What this install wrote on v1.3 and v1.4 is carried
                         // to v1.5 with its proofs, in the background, until
@@ -334,22 +319,24 @@ pub fn run() {
             vault_probe::probe_vault,
             vault_probe::restart_app,
             vault_probe::test_vault_url,
+            commands::restore_go_on,
+            commands::restore_try_again,
             updater::update_status,
             updater::set_update_prefs,
             updater::dismiss_updated,
             updater::restart_to_update,
             // ── Your app commands (replace these) ─────────────────
-            commands::create_poll,
-            commands::get_poll,
-            commands::get_all_polls,
-            commands::delete_poll,
-            commands::cast_vote,
-            commands::get_poll_votes,
+            polls::create_poll,
+            polls::get_poll,
+            polls::get_all_polls,
+            polls::delete_poll,
+            polls::cast_vote,
+            polls::get_poll_votes,
             // ── Community moderation (keep or adapt) ──────────────
-            commands::flag_poll,
-            commands::get_poll_flags,
-            commands::remove_flag,
-            commands::get_flag_threshold,
+            polls::flag_poll,
+            polls::get_poll_flags,
+            polls::remove_flag,
+            polls::get_flag_threshold,
             // ── Flowsta identity linking (keep as-is) ─────────────
             commands::get_cached_profile,
             commands::save_profile_cache,
@@ -362,7 +349,6 @@ pub fn run() {
             // ── Data export + migration (keep as-is) ──────────────
             commands::get_export_data,
             commands::get_migration_status,
-            commands::abandon_pending_votes,
             // ── CAL-compliant backup + reinstall recovery ──────────
             // See the lair recovery notes
             commands::decode_record_for_export,
@@ -375,12 +361,12 @@ pub fn run() {
             seed_adopt::adopt_escrowed_seed,
             seed_adopt::rekey_device_agent,
             // ── Encrypted entries (v1.3) ───────────────────────────
-            commands::save_vote_rationale,
-            commands::get_vote_rationale,
-            commands::save_draft_poll,
-            commands::get_my_drafts,
-            commands::publish_draft,
-            commands::delete_draft,
+            polls::save_vote_rationale,
+            polls::get_vote_rationale,
+            polls::save_draft_poll,
+            polls::get_my_drafts,
+            polls::publish_draft,
+            polls::delete_draft,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -396,12 +382,7 @@ pub fn run() {
                 if let Some(state) = app_handle.try_state::<Arc<AppState>>() {
                     updater::install_on_quit(app_handle, &state.device_root);
                 }
-                let handle = app_handle
-                    .try_state::<Arc<AppState>>()
-                    .and_then(|s| s.conductor_handle.lock().ok().and_then(|mut h| h.take()));
-                if let Some(h) = handle {
-                    h.shutdown();
-                }
+                conductor::stop_lines();
             }
         });
 }

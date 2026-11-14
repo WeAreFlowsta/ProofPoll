@@ -1685,7 +1685,7 @@ dependencies = [
 [[package]]
 name = "flowsta-hc-lines"
 version = "0.1.0"
-source = "git+https://github.com/WeAreFlowsta/flowsta-hc-lines?rev=99f04c23fcd1a48c8271b03ce11c43d7613fe5df#99f04c23fcd1a48c8271b03ce11c43d7613fe5df"
+source = "git+https://github.com/WeAreFlowsta/flowsta-hc-lines?rev=c97ff29df6843f1abf94bf28f39c303cb2c41e89#c97ff29df6843f1abf94bf28f39c303cb2c41e89"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1697,6 +1697,8 @@ dependencies = [
  "holochain_conductor_api 0.7.1",
  "holochain_types 0.6.1",
  "holochain_types 0.7.1",
+ "lair_keystore 0.6.3",
+ "lair_keystore 0.7.1",
  "lair_keystore_api 0.6.3",
  "lair_keystore_api 0.7.1",
  "libc",
@@ -5260,6 +5262,7 @@ dependencies = [
 name = "proofpoll"
 version = "0.6.0-beta.3"
 dependencies = [
+ "async-trait",
  "axum 0.7.9",
  "base64 0.22.1",
  "ed25519-dalek",

@@ -9,217 +9,9 @@
 //! Holochain app that uses the standard random agent key approach.
 
 use lair_keystore_api::prelude::*;
-use percent_encoding::percent_decode_str;
-use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::process_ext::{SidecarChild, SidecarCommand};
-use crate::sidecar::sidecar_path;
-
-/// Start a lair-keystore process.
-///
-/// On first run (no config file), initializes the keystore.
-/// Then starts the server process.
-/// Returns the child process handle and the connection URL.
-pub fn start_lair_process(
-    lair_dir: &Path,
-    passphrase: &str,
-) -> Result<(SidecarChild, String), String> {
-    start_lair_process_with(lair_dir, passphrase, "proofpoll-lair-keystore")
-}
-
-/// Start a lair-keystore process from a named sidecar binary. The transition
-/// release runs two: `proofpoll-lair-keystore` (0.6.3, for the 0.6.1
-/// conductor) and `proofpoll-lair-keystore-07` (0.7.1, for the 0.7.1
-/// conductor), because a conductor accepts only a lair of its own version.
-pub fn start_lair_process_with(
-    lair_dir: &Path,
-    passphrase: &str,
-    binary: &str,
-) -> Result<(SidecarChild, String), String> {
-    std::fs::create_dir_all(lair_dir)
-        .map_err(|e| format!("Failed to create lair directory: {}", e))?;
-
-    let config_path = lair_dir.join("lair-keystore-config.yaml");
-    let is_first_run = !config_path.exists();
-
-    if is_first_run {
-        log::info!("First run: initializing lair-keystore...");
-
-        // Wipe any stale state files left over from a previous install.
-        // Windows uninstallers commonly clear the config file in AppData
-        // but leave the encrypted `store_file` behind — the next install
-        // generates a fresh random passphrase and a fresh config, then
-        // lair-server tries to open the orphaned store_file with the new
-        // passphrase and crashes with `sqlcipher_page_cipher: hmac check
-        // failed`. Removing the known lair-managed files before init
-        // guarantees we're truly starting from a clean slate.
-        for name in &["store_file", "pid_file", "socket"] {
-            let p = lair_dir.join(name);
-            if p.exists() {
-                log::warn!(
-                    "Removing stale lair file from a previous install: {:?}",
-                    p,
-                );
-                if let Err(e) = std::fs::remove_file(&p) {
-                    log::error!(
-                        "FAILED to remove stale lair file {:?}: {} — lair-server will likely crash with an hmac error",
-                        p, e,
-                    );
-                }
-            }
-        }
-
-        // Redirect init's stdio to disk so a silent crash leaves a trail.
-        // Piped handles that nothing ever drains are functionally /dev/null.
-        let init_stdout = open_log_file(lair_dir, "lair-init-stdout.log")?;
-        let init_stderr = open_log_file(lair_dir, "lair-init-stderr.log")?;
-        let mut child = SidecarCommand::new(sidecar_path(binary))
-            .arg("init")
-            .arg("--piped")
-            .current_dir(lair_dir)
-            .stdout(init_stdout)
-            .stderr(init_stderr)
-            .spawn()
-            .map_err(|e| format!("Failed to spawn lair-keystore init: {}", e))?;
-
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin
-                .write_all(format!("{}\n", passphrase).as_bytes())
-                .map_err(|e| format!("Failed to write passphrase to lair init: {}", e))?;
-        }
-
-        // A bounded wait: an init that never finishes held the start on
-        // "Starting lair-keystore..." for good. Ended, it fails this attempt
-        // and start_holochain's second attempt runs.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-        let status = loop {
-            match child.try_wait() {
-                Ok(Some(status)) => break status,
-                Ok(None) if std::time::Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(100)),
-                Ok(None) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(format!(
-                        "lair-keystore init did not finish within 60 s: {}",
-                        read_lair_logs(lair_dir, "init"),
-                    ));
-                }
-                Err(e) => return Err(format!("Failed to wait for lair init: {}", e)),
-            }
-        };
-        if !status.success() {
-            return Err(format!(
-                "lair-keystore init failed (status {}): {}",
-                status,
-                read_lair_logs(lair_dir, "init"),
-            ));
-        }
-        log::info!("Lair-keystore initialized successfully");
-    }
-
-    // Read connection URL from config file.
-    // The config pins absolute paths. After the directory has moved they
-    // must point here, or the key store binds (and we wait on) a socket in
-    // a directory that no longer exists.
-    if let Err(e) = repoint_config(lair_dir) {
-        log::warn!("[lair] config not repointed: {e}");
-    }
-
-    // Lair's default socket sits inside its own directory; where that path
-    // is over the Unix-socket limit, point the config at a short one.
-    #[cfg(not(windows))]
-    ensure_socket_fits(lair_dir, &config_path)?;
-
-    let connection_url = read_connection_url(&config_path)?;
-
-    // A pid_file left by a killed lair (empty after a hard power-off) makes
-    // the new server refuse: its pid check runs before it reads the
-    // passphrase, so every start fails. A second running ProofPoll never
-    // gets here - it is refused earlier, on the conductor ports.
-    let pid_file = lair_dir.join("pid_file");
-    if pid_file.exists() {
-        log::info!("Removing stale lair pid_file: {:?}", pid_file);
-        let _ = std::fs::remove_file(&pid_file);
-    }
-
-    // Clean up stale socket file from a previous run, wherever the config
-    // puts it. Unix only — Windows named pipes live in the kernel
-    // namespace, not on disk, so there's nothing to remove.
-    #[cfg(unix)]
-    {
-        let mut stale = vec![lair_dir.join("socket")];
-        if let Ok(p) = socket_path_from_url(&connection_url) {
-            if !stale.contains(&p) { stale.push(p); }
-        }
-        for socket_path in stale {
-            if socket_path.exists() {
-                log::info!("Removing stale lair socket: {:?}", socket_path);
-                let _ = std::fs::remove_file(&socket_path);
-            }
-        }
-    }
-
-    // Start the lair server. Redirect stdio to disk for the same reason as
-    // init above — without this, a server-side crash is invisible.
-    log::info!("Starting lair-keystore server...");
-    let server_stdout = open_log_file(lair_dir, "lair-server-stdout.log")?;
-    let server_stderr = open_log_file(lair_dir, "lair-server-stderr.log")?;
-    let mut child = SidecarCommand::new(sidecar_path(binary))
-        .arg("server")
-        .arg("--piped")
-        .current_dir(lair_dir)
-        .stdout(server_stdout)
-        .stderr(server_stderr)
-        .spawn()
-        .map_err(|e| format!("Failed to spawn lair-keystore server: {}", e))?;
-
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(format!("{}\n", passphrase).as_bytes())
-            .map_err(|e| format!("Failed to write passphrase to lair server: {}", e))?;
-    }
-
-    log::info!("Lair-keystore server started (pid {})", child.id());
-    Ok((child, connection_url))
-}
-
-fn open_log_file(lair_dir: &Path, name: &str) -> Result<std::fs::File, String> {
-    let path = lair_dir.join(name);
-    std::fs::File::create(&path)
-        .map_err(|e| format!("Failed to create lair log {:?}: {}", path, e))
-}
-
-/// Read the lair-keystore log files (stderr preferred, stdout as fallback)
-/// for the given stage (`"init"` or `"server"`). Output is trimmed and
-/// truncated so callers can splice it directly into an error message
-/// without blowing it out.
-pub fn read_lair_logs(lair_dir: &Path, stage: &str) -> String {
-    let stderr_path = lair_dir.join(format!("lair-{}-stderr.log", stage));
-    let stdout_path = lair_dir.join(format!("lair-{}-stdout.log", stage));
-
-    let stderr = std::fs::read_to_string(&stderr_path).unwrap_or_default();
-    let stdout = std::fs::read_to_string(&stdout_path).unwrap_or_default();
-
-    let output = if !stderr.trim().is_empty() {
-        stderr
-    } else {
-        stdout
-    };
-    let trimmed = output.trim();
-    if trimmed.is_empty() {
-        "(no output captured)".to_string()
-    } else if trimmed.len() > 500 {
-        // Cut on a character boundary: slicing bytes panics inside a
-        // multibyte character.
-        format!("{}...", trimmed.chars().take(500).collect::<String>())
-    } else {
-        trimmed.to_string()
-    }
-}
-
-/// Read the connection URL from lair's config file.
 /// Make `lair-keystore-config.yaml` point at the directory it now lives in.
 ///
 /// Lair writes three absolute paths at init: `connectionUrl`
@@ -294,15 +86,6 @@ pub(crate) fn repoint_config(lair_dir: &Path) -> Result<bool, String> {
     Ok(true)
 }
 
-/// The socket path inside a `unix:///path?k=...` connection URL.
-#[cfg(not(windows))]
-pub(crate) fn socket_path_from_url(connection_url: &str) -> Result<std::path::PathBuf, String> {
-    let url = lair_keystore_api::dependencies::url::Url::parse(connection_url)
-        .map_err(|e| format!("Invalid lair connection URL: {}", e))?;
-    let decoded = percent_decode_str(url.path()).decode_utf8_lossy();
-    Ok(std::path::PathBuf::from(decoded.as_ref()))
-}
-
 /// The short runtime socket for the key store under `lair_dir`. The 0.6
 /// store (`lair/`) keeps the name derived from its profile root, which
 /// installs from before the 0.7 line already point at; every other store
@@ -318,81 +101,6 @@ pub(crate) fn runtime_socket_path(lair_dir: &Path) -> std::path::PathBuf {
     } else {
         crate::profiles::short_socket_path(lair_dir)
     }
-}
-
-/// Lair writes `connectionUrl: unix://<lair dir>/socket?k=...` at init. On
-/// macOS that path is over the Unix-socket limit for a profile under a
-/// longer username (`~/Library/Application Support/com.proofpoll.app/
-/// profiles/<key>/lair/socket` is 95 bytes with a 3-letter one, limit 104)
-/// and lair dies with "path must be shorter than SUN_LEN". When the
-/// in-directory socket does not fit, rewrite the URL's path to a short
-/// per-user runtime path; the store, pid file and the connection key
-/// (`?k=`) stay exactly as lair wrote them. Idempotent: a config already
-/// pointing at a fitting path is left alone. Ported from the Vault (1.4.0).
-#[cfg(not(windows))]
-fn ensure_socket_fits(lair_dir: &Path, config_path: &Path) -> Result<(), String> {
-    let url = read_connection_url(config_path)?;
-    let current = socket_path_from_url(&url)?;
-    if crate::profiles::socket_fits(&current) {
-        return Ok(());
-    }
-    let short = runtime_socket_path(lair_dir);
-    if !crate::profiles::socket_fits(&short) {
-        return Err(format!("no socket path short enough for the key store ({:?})", short));
-    }
-    if let Some(dir) = short.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| format!("cannot create the socket directory {:?}: {}", dir, e))?;
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
-    }
-    const KEEP: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
-        .remove(b'/').remove(b'.').remove(b'-').remove(b'_');
-    let encoded = percent_encoding::utf8_percent_encode(&short.to_string_lossy(), KEEP).to_string();
-    let query = url.split_once('?').map(|(_, q)| format!("?{}", q)).unwrap_or_default();
-    let new_url = format!("unix://{}{}", encoded, query);
-    let content = std::fs::read_to_string(config_path)
-        .map_err(|e| format!("Failed to read lair config at {:?}: {}", config_path, e))?;
-    let rewritten: String = content
-        .lines()
-        .map(|l| if l.trim_start().starts_with("connectionUrl:") { format!("connectionUrl: {}", new_url) } else { l.to_string() })
-        .collect::<Vec<_>>()
-        .join("\n")
-        + "\n";
-    let tmp = config_path.with_extension("yaml.tmp");
-    std::fs::write(&tmp, rewritten).map_err(|e| format!("Failed to write lair config: {}", e))?;
-    std::fs::rename(&tmp, config_path).map_err(|e| format!("Failed to replace lair config: {}", e))?;
-    log::info!(
-        "[lair] socket moved to the runtime dir: {:?} ({} bytes; the in-directory path was {} bytes)",
-        short, short.as_os_str().len(), current.as_os_str().len()
-    );
-    Ok(())
-}
-
-fn read_connection_url(config_path: &Path) -> Result<String, String> {
-    let content = std::fs::read_to_string(config_path)
-        .map_err(|e| format!("Failed to read lair config at {:?}: {}", config_path, e))?;
-
-    for line in content.lines() {
-        let line = line.trim();
-        if line.starts_with("connectionUrl:") {
-            let url = line
-                .strip_prefix("connectionUrl:")
-                .unwrap()
-                .trim()
-                .to_string();
-            return Ok(url);
-        }
-    }
-
-    Err(format!(
-        "No connectionUrl found in lair config: {:?}",
-        config_path
-    ))
-}
-
-/// The connection URL of the lair in `lair_dir`, from its config file.
-pub(crate) fn connection_url_of(lair_dir: &Path) -> Result<String, String> {
-    read_connection_url(&lair_dir.join("lair-keystore-config.yaml"))
 }
 
 /// Connect to a running lair-keystore via its connection URL.
@@ -420,125 +128,13 @@ pub async fn connect_to_lair(
 /// used to hold the start forever.
 const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// The error to fail a start with if lair (`label`) has exited.
-fn lair_exited(child: &mut SidecarChild, lair_dir: &Path, label: &str) -> Option<String> {
-    match child.try_wait() {
-        Ok(Some(status)) => Some(format!(
-            "{} exited unexpectedly (status {}): {}",
-            label,
-            status,
-            read_lair_logs(lair_dir, "server")
-        )),
-        Ok(None) => None,
-        Err(e) => Some(format!("Could not check {}: {}", label, e)),
-    }
-}
-
-/// Wait for the lair just started as `child` to come up, watching it the
-/// whole time: lair binds its socket before it checks the passphrase, so a
-/// socket file alone proves nothing.
-///
-/// On Unix, polls until the socket file exists, then one more tick to catch
-/// the common immediate exit. On Windows (a named pipe in the kernel
-/// namespace, nothing on disk to poll), watches the child for 3 s and leaves
-/// the rest to [`connect_with_retries`].
-pub async fn wait_for_lair_socket(
-    connection_url: &str,
-    timeout_secs: u64,
-    child: &mut SidecarChild,
-    lair_dir: &Path,
-    label: &str,
-) -> Result<(), String> {
-    let tick = std::time::Duration::from_millis(200);
-
-    if cfg!(target_os = "windows") {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-        while std::time::Instant::now() < deadline {
-            if let Some(e) = lair_exited(child, lair_dir, label) {
-                return Err(e);
-            }
-            tokio::time::sleep(tick).await;
-        }
-        return match lair_exited(child, lair_dir, label) {
-            Some(e) => Err(e),
-            None => Ok(()),
-        };
-    }
-
-    let url = lair_keystore_api::dependencies::url::Url::parse(connection_url)
-        .map_err(|e| format!("Invalid connection URL: {}", e))?;
-    // url.path() returns percent-encoded path (e.g. %20 for spaces).
-    // Decode it so we match the actual filesystem path — without this, macOS
-    // paths under "Application Support" fail because we'd poll for a literal
-    // "Application%20Support" directory.
-    let decoded_path = percent_decode_str(url.path()).decode_utf8_lossy();
-    let socket_path = std::path::PathBuf::from(decoded_path.as_ref());
-
-    let deadline =
-        std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
-
-    while std::time::Instant::now() < deadline {
-        if let Some(e) = lair_exited(child, lair_dir, label) {
-            return Err(e);
-        }
-        if socket_path.exists() {
-            tokio::time::sleep(tick).await;
-            if let Some(e) = lair_exited(child, lair_dir, label) {
-                return Err(e);
-            }
-            log::info!("Lair socket ready at {:?}", socket_path);
-            return Ok(());
-        }
-        tokio::time::sleep(tick).await;
-    }
-
-    Err(format!(
-        "Lair socket not ready after {}s: {:?}",
-        timeout_secs, socket_path
-    ))
-}
-
-/// Connect to the lair just started as `child`, retrying while it runs. On
-/// Windows the named pipe registers a second or two after the process starts
-/// ("not found" until then); on a slow machine the first try can meet a
-/// reset. Gives up as soon as lair exits, after 30 s of "not found", or after
-/// six other failures.
-pub async fn connect_with_retries<C, Fut>(
-    child: &mut SidecarChild,
-    lair_dir: &Path,
-    label: &str,
-    mut connect: impl FnMut() -> Fut,
-) -> Result<C, String>
-where
-    Fut: std::future::Future<Output = Result<C, String>>,
-{
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    let mut failures = 0u32;
-    loop {
-        if let Some(e) = lair_exited(child, lair_dir, label) {
-            return Err(e);
-        }
-        let e = match connect().await {
-            Ok(client) => return Ok(client),
-            Err(e) => e,
-        };
-        if let Some(exited) = lair_exited(child, lair_dir, label) {
-            return Err(exited);
-        }
-        let not_found = e.contains("os error 2")
-            || e.contains("cannot find the file")
-            || e.contains("No such file or directory");
-        if !not_found {
-            failures += 1;
-        }
-        if std::time::Instant::now() >= deadline || failures >= 6 {
-            return Err(format!("{} ({} output: {})", e, label, read_lair_logs(lair_dir, "server")));
-        }
-        if !not_found {
-            log::warn!("[{}] connect attempt {} failed ({}), retrying", label, failures, e);
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(if not_found { 250 } else { 400 })).await;
-    }
+#[cfg(test)]
+fn read_connection_url(config_path: &Path) -> Result<String, String> {
+    let content = std::fs::read_to_string(config_path).map_err(|e| format!("Failed to read lair config at {:?}: {}", config_path, e))?;
+    content
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("connectionUrl:").map(|u| u.trim().to_string()))
+        .ok_or_else(|| format!("No connectionUrl found in lair config: {:?}", config_path))
 }
 
 #[cfg(test)]
@@ -656,10 +252,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let passphrase = "test-passphrase-0123456789";
 
+        let plan = crate::conductor::socket_plan();
         let (mut child, url) =
-            start_lair_process(&dir, passphrase).expect("lair start");
+            flowsta_hc_lines::keystore::start(&dir, &crate::sidecar::sidecar_path("proofpoll-lair-keystore"), passphrase, &plan).expect("lair start");
         let result = async {
-            wait_for_lair_socket(&url, 15, &mut child, &dir, "lair-keystore").await?;
+            flowsta_hc_lines::keystore::wait_ready(&url, std::time::Duration::from_secs(15), &mut child, &dir).await.map_err(|e| e.to_string())?;
             // The server accepts connections a beat after the socket exists.
             let mut client = None;
             for _ in 0..20 {
@@ -782,53 +379,6 @@ pub async fn import_seed_to_lair(
 
 #[cfg(all(test, not(windows)))]
 mod socket_tests {
-    use super::*;
-
-    fn config_for(lair: &Path, key: &str) -> String {
-        format!(
-            "---\nconnectionUrl: unix://{0}/socket?k={1}\npidFile: {0}/pid_file\nstoreFile: {0}/store_file\n",
-            lair.display(), key
-        )
-    }
-
-    #[test]
-    fn a_too_long_default_socket_is_moved_to_the_runtime_dir_and_the_key_is_kept() {
-        let tmp = tempfile::tempdir().unwrap();
-        // a root deep enough that <root>/lair/socket cannot fit
-        let root = tmp.path().join("x".repeat(110));
-        let lair = root.join("lair");
-        std::fs::create_dir_all(&lair).unwrap();
-        let cfg = lair.join("lair-keystore-config.yaml");
-        std::fs::write(&cfg, config_for(&lair, "abc123")).unwrap();
-        ensure_socket_fits(&lair, &cfg).unwrap();
-        let url = read_connection_url(&cfg).unwrap();
-        let sock = socket_path_from_url(&url).unwrap();
-        assert_eq!(sock, crate::profiles::short_socket_path(&root));
-        assert!(crate::profiles::socket_fits(&sock), "{:?}", sock);
-        assert!(url.ends_with("?k=abc123"), "connection key kept: {}", url);
-        assert!(sock.parent().unwrap().is_dir(), "socket dir created");
-        let after = std::fs::read_to_string(&cfg).unwrap();
-        assert!(after.contains(&format!("pidFile: {}/pid_file", lair.display())), "other paths untouched");
-        assert!(after.contains(&format!("storeFile: {}/store_file", lair.display())));
-        // second call: already fits, nothing changes
-        ensure_socket_fits(&lair, &cfg).unwrap();
-        assert_eq!(std::fs::read_to_string(&cfg).unwrap(), after);
-        // and the per-start repoint leaves the moved socket where it is
-        assert_eq!(repoint_config(&lair).unwrap(), false);
-        assert_eq!(std::fs::read_to_string(&cfg).unwrap(), after);
-    }
-
-    #[test]
-    fn a_fitting_default_socket_is_left_alone() {
-        let tmp = tempfile::tempdir().unwrap();
-        let lair = tmp.path().join("lair");
-        std::fs::create_dir_all(&lair).unwrap();
-        let cfg = lair.join("lair-keystore-config.yaml");
-        let original = config_for(&lair, "zzz");
-        std::fs::write(&cfg, &original).unwrap();
-        ensure_socket_fits(&lair, &cfg).unwrap();
-        assert_eq!(std::fs::read_to_string(&cfg).unwrap(), original);
-    }
 
     #[test]
     fn a_profile_fits_when_only_the_runtime_socket_does() {

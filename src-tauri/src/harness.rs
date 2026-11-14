@@ -14,6 +14,7 @@ use std::sync::Arc;
 use tauri::Manager;
 
 use crate::commands::{self, AppState};
+use crate::polls;
 
 pub fn spawn(app: tauri::AppHandle) {
     let Some(port) = std::env::var("PROOFPOLL_HARNESS_PORT").ok().and_then(|v| v.trim().parse::<u16>().ok()) else {
@@ -36,17 +37,17 @@ pub fn spawn(app: tauri::AppHandle) {
     });
 }
 
-type Reply = (StatusCode, Json<Value>);
+pub(crate) type Reply = (StatusCode, Json<Value>);
 
-fn ok(v: Value) -> Reply {
+pub(crate) fn ok(v: Value) -> Reply {
     (StatusCode::OK, Json(v))
 }
 
-fn failed(e: impl std::fmt::Display) -> Reply {
+pub(crate) fn failed(e: impl std::fmt::Display) -> Reply {
     (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() })))
 }
 
-fn to_value<T: serde::Serialize>(r: Result<T, String>) -> Reply {
+pub(crate) fn to_value<T: serde::Serialize>(r: Result<T, String>) -> Reply {
     match r {
         Ok(v) => ok(serde_json::to_value(v).unwrap_or(Value::Null)),
         Err(e) => failed(e),
@@ -63,13 +64,9 @@ fn rss_mb(pid: u32) -> Option<u64> {
 async fn status(Ax(app): Ax<tauri::AppHandle>) -> Reply {
     let state = app.state::<Arc<AppState>>();
     let app_status = commands::get_app_status(state.clone());
-    let (pids, app_ports) = {
-        let handle = state.conductor_handle.lock().unwrap();
-        match handle.as_ref() {
-            Some(h) => (Some((h.conductor_pid, h.conductor_pid_07)), Some((h.app_port, h.app_port_07))),
-            None => (None, None),
-        }
-    };
+    use crate::hc::Line;
+    let pids = crate::conductor::line_pid(Line::V06).zip(crate::conductor::line_pid(Line::V07));
+    let app_ports = crate::conductor::line_ports(Line::V06).map(|p| p.1).zip(crate::conductor::line_ports(Line::V07).map(|p| p.1));
     let migration = commands::get_migration_status(state.clone()).await.ok();
     let link = commands::get_identity_link(state.clone());
     let configs_with_auth = ["conductor", crate::conductor::CONDUCTOR_DIR_07]
@@ -339,7 +336,7 @@ async fn v15_records(state: &AppState, f: &str, hash: Option<String>) -> Reply {
         None => crate::hc::encode(&()),
     };
     let records = match payload {
-        Ok(p) => client.call_zome("proofpoll", "polls", f, p).await.and_then(|b| crate::hc::records(client.line(), &b)),
+        Ok(p) => client.call_zome(crate::names::ROLE_NAME, "polls", f, p).await.and_then(|b| crate::hc::records(client.line(), &b)),
         Err(e) => Err(e),
     };
     match records {
@@ -361,47 +358,21 @@ async fn v15_records(state: &AppState, f: &str, hash: Option<String>) -> Reply {
     }
 }
 
-fn s(body: &Value, key: &str) -> String {
+pub(crate) fn s(body: &Value, key: &str) -> String {
     body.get(key).and_then(|v| v.as_str()).unwrap_or_default().to_string()
 }
 
-fn opt_s(body: &Value, key: &str) -> Option<String> {
+pub(crate) fn opt_s(body: &Value, key: &str) -> Option<String> {
     body.get(key).and_then(|v| v.as_str()).map(str::to_string)
 }
 
 async fn op(Ax(app): Ax<tauri::AppHandle>, Json(body): Json<Value>) -> Reply {
     let state = app.state::<Arc<AppState>>();
-    let options = || -> Vec<String> {
-        body.get("options")
-            .and_then(|v| v.as_array())
-            .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
-            .unwrap_or_default()
-    };
-    let closes_at = body.get("closes_at").and_then(|v| v.as_i64());
+    // What is about polls is the polls folder's (a fork replaces it with its own app's operations).
+    if let Some(reply) = polls::harness_op(&app, &body).await {
+        return reply;
+    }
     match s(&body, "op").as_str() {
-        "create_poll" => to_value(
-            commands::create_poll(state, s(&body, "title"), s(&body, "description"), options(), closes_at, opt_s(&body, "poll_type")).await,
-        ),
-        "polls" => to_value(commands::get_all_polls(state).await),
-        "poll" => to_value(commands::get_poll(state, s(&body, "poll")).await),
-        "vote" => to_value(
-            commands::cast_vote(
-                state,
-                s(&body, "poll"),
-                body.get("option").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-                opt_s(&body, "dna_version").unwrap_or_else(|| "1.5".into()),
-                opt_s(&body, "poll_type"),
-            )
-            .await,
-        ),
-        "votes" => to_value(commands::get_poll_votes(state, s(&body, "poll"), opt_s(&body, "dna_version").unwrap_or_else(|| "1.5".into())).await),
-        "save_draft" => to_value(
-            commands::save_draft_poll(state, s(&body, "title"), s(&body, "description"), options(), closes_at, opt_s(&body, "poll_type")).await,
-        ),
-        "drafts" => to_value(commands::get_my_drafts(state).await),
-        "publish_draft" => to_value(commands::publish_draft(state, s(&body, "draft")).await),
-        "save_rationale" => to_value(commands::save_vote_rationale(state, s(&body, "vote"), s(&body, "text")).await),
-        "rationale" => to_value(commands::get_vote_rationale(state, s(&body, "vote")).await),
         "identity" => ok(serde_json::to_value(commands::get_identity_link(state)).unwrap_or(Value::Null)),
         "migration" => to_value(commands::get_migration_status(state).await),
         "link" => link(&app, state, s(&body, "client_id")).await,
@@ -422,11 +393,6 @@ async fn op(Ax(app): Ax<tauri::AppHandle>, Json(body): Json<Value>) -> Reply {
             let local = commands::get_app_status(state.clone()).agent_pub_key;
             to_value(commands::get_my_agent_set(state, local).await)
         }
-        // ProofPoll 0.4.x's shapes on v1.3, for the migration leg.
-        "v13_poll" => to_value(commands::harness_v13_poll(&state, s(&body, "title"), s(&body, "description"), options(), closes_at, opt_s(&body, "poll_type")).await),
-        "v13_flag" => to_value(commands::harness_v13_flag(&state, s(&body, "poll"), opt_s(&body, "reason").unwrap_or_else(|| "Spam".into())).await),
-        "v13_delete" => to_value(commands::harness_v13_remove(&state, "delete_poll", s(&body, "poll")).await),
-        "v13_unflag" => to_value(commands::harness_v13_remove(&state, "remove_flag", s(&body, "flag")).await),
         "v15_records" => v15_records(&state, &s(&body, "fn"), opt_s(&body, "hash")).await,
         // This start's admin ports and origin, so a test can run the node's
         // carrier against this instance's conductors.
@@ -435,19 +401,6 @@ async fn op(Ax(app): Ax<tauri::AppHandle>, Json(body): Json<Value>) -> Reply {
             "admin_07": crate::conductor::admin_port_07(),
             "origin": crate::conductor::node_origin(),
         })),
-        "v13_draft" => {
-            let draft = json!({
-                "title": s(&body, "title"),
-                "description": s(&body, "description"),
-                "options": options(),
-                "closes_at": closes_at,
-                "poll_type": "Anonymous",
-            });
-            to_value(commands::harness_v13_encrypted(&state, "draft_poll", None, draft.to_string().into_bytes()).await)
-        }
-        "v13_rationale" => to_value(
-            commands::harness_v13_encrypted(&state, "vote_rationale", Some(s(&body, "vote")), s(&body, "text").into_bytes()).await,
-        ),
         // The migration again, as a start does it: from NotStarted, then the
         // drafts and reasons.
         "migrate" => {
@@ -474,10 +427,28 @@ async fn op(Ax(app): Ax<tauri::AppHandle>, Json(body): Json<Value>) -> Reply {
         // posts it (it carries this install's escrowed seed).
         "backup" => backup(state, s(&body, "client_id")).await,
         "chain07" => chain07(&opt_s(&body, "dna").unwrap_or_else(|| "1.4".into())).await,
+        // The start screen's "Continue without them" during a restore that
+        // came back shorter than the backup.
+        // The start screen as a state shows it, without living through it
+        // (the UI suite's restoring screens; the app's own state is put
+        // back by showing its `ready` again).
+        "show_status" => match serde_json::from_value::<crate::conductor::ConductorStatus>(body.get("status").cloned().unwrap_or(Value::Null)) {
+            Ok(status) => {
+                *state.conductor_status.lock().unwrap() = status.clone();
+                let _ = tauri::Emitter::emit(&app, "conductor-status", status);
+                ok(json!({ "shown": true }))
+            }
+            Err(e) => failed(format!("status: {}", e)),
+        },
+        "restore_try_again" => {
+            let asked = crate::dna::ask_to_try_again();
+            ok(json!({ "asked": asked, "retry_in_secs": crate::dna::retry_in_secs() }))
+        }
+        "restore_go_on" => {
+            crate::dna::RESTORE_ACCEPT_SHORT.store(true, std::sync::atomic::Ordering::SeqCst);
+            ok(json!({ "accepted": true }))
+        }
         "proof_check" => proof_check().await,
-        "v13_vote" => to_value(
-            commands::harness_v13_vote(&state, s(&body, "poll"), body.get("option").and_then(|v| v.as_u64()).unwrap_or(0) as u32, opt_s(&body, "display_name")).await,
-        ),
         "fixtures" => fixtures().await,
         // What the Vault backup holds for this app: the escrowed seed or none.
         "escrow" => {
@@ -518,7 +489,7 @@ async fn backup(state: tauri::State<'_, Arc<AppState>>, client_id: String) -> Re
     let resp = reqwest::Client::new()
         .post(format!("http://127.0.0.1:{}/backup", port))
         .header("Origin", crate::vault_probe::webview_origin())
-        .json(&json!({ "client_id": client_id, "app_name": "ProofPoll", "data": data, "expected_identity": expected }))
+        .json(&json!({ "client_id": client_id, "app_name": crate::names::APP_NAME, "data": data, "expected_identity": expected }))
         .timeout(std::time::Duration::from_secs(60))
         .send()
         .await;
@@ -539,7 +510,7 @@ async fn vault_signs_link(agent: &str, client_id: &str) -> Result<(String, Strin
     let r = reqwest::Client::new()
         .post(format!("{}/link-identity", base))
         .header("Origin", crate::vault_probe::webview_origin())
-        .json(&json!({ "app_name": "ProofPoll", "client_id": client_id, "app_agent_pub_key": agent }))
+        .json(&json!({ "app_name": crate::names::APP_NAME, "client_id": client_id, "app_agent_pub_key": agent }))
         .timeout(std::time::Duration::from_secs(120))
         .send()
         .await
@@ -561,7 +532,7 @@ async fn v13_link(state: tauri::State<'_, Arc<AppState>>, client_id: String) -> 
         return failed("no local agent yet");
     };
     match vault_signs_link(&agent, &client_id).await {
-        Ok((key, sig)) => to_value(commands::harness_v13_link(&state, key.clone(), sig).await.map(|h| json!({ "vault_agent_pub_key": key, "link": h }))),
+        Ok((key, sig)) => to_value(polls::harness_v13_link(&state, key.clone(), sig).await.map(|h| json!({ "vault_agent_pub_key": key, "link": h }))),
         Err(e) => failed(e),
     }
 }

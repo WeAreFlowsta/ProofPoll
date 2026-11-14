@@ -7,6 +7,14 @@
 //!   4. Re-cast votes (where the target poll has been migrated)
 //!   5. Retry pending votes in a background loop
 //!
+//! **Since 0.6.0 the app no longer runs this.** What an install wrote on
+//! v1.3 and v1.4 is carried to v1.5 with its proofs (`carry_move.rs`), not
+//! written again. `run_migration` and `carry_private` are compiled into the
+//! test build only (feature `harness`): the matrix's `migration` leg uses
+//! them to make the shape a 0.5.0 install left, which `carry_move` must map
+//! for everyone updating from 0.5.0. The state file they wrote is still read
+//! (`MigrationState`): the backup counts what 0.5.0 copied.
+//!
 //! ## For developers forking this app
 //!
 //! The migration pattern works for any data model. To adapt:
@@ -19,6 +27,10 @@
 //! `run_migration()` takes source and destination clients as parameters,
 //! and the state file name is derived from `ACTIVE_APP_ID` automatically.
 
+// Outside the test build nothing calls the two entry points, so what only
+// they use is unused there (and not in the program at all).
+#![cfg_attr(not(feature = "harness"), allow(dead_code, unused_imports))]
+
 use crate::commands::AppState;
 use holochain_types::prelude::ActionHash;
 use std::path::Path;
@@ -26,7 +38,7 @@ use std::sync::Arc;
 use tauri::Emitter;
 
 /// Role name for zome calls — must match happ.yaml role id.
-const ROLE_NAME: &str = "proofpoll";
+const ROLE_NAME: &str = crate::names::ROLE_NAME;
 
 // ── Migration state (persisted to disk) ───────────────────────────────
 
@@ -260,6 +272,7 @@ async fn call_zome_on(
 /// client (`state.app_client_v1_4`: this module is the v1.3 to v1.4 move;
 /// v1.5 carries records instead, `carry_move.rs`). Everything else is
 /// version-agnostic.
+#[cfg(feature = "harness")]
 pub async fn run_migration(
     state: &Arc<AppState>,
     app_handle: &tauri::AppHandle,
@@ -621,6 +634,7 @@ pub async fn run_migration(
 /// A reason follows its vote only when the vote itself moved (a vote left on
 /// v1.3 keeps its reason there, and `get_vote_rationale` reads it there).
 /// Returns (drafts copied, reasons copied).
+#[cfg(feature = "harness")]
 pub async fn carry_private(state: &Arc<AppState>) -> Result<(usize, usize), String> {
     if state.migration_state.lock().await.private_carried {
         return Ok((0, 0));
@@ -718,144 +732,6 @@ async fn my_vote_on(client: &crate::hc::AppClient, poll: &ActionHash, my_agent: 
     let recs = crate::hc::records(client.line(), &r).ok()?;
     let rec = recs.into_iter().find(|v| v.author == my_agent)?;
     crate::hc::action_hash(&rec.action_hash).ok()
-}
-
-pub fn spawn_migration_retry_loop(
-    state: Arc<AppState>,
-    app_handle: tauri::AppHandle,
-) {
-    tauri::async_runtime::spawn(async move {
-        loop {
-            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-
-            let has_pending = {
-                let ms = state.migration_state.lock().await;
-                !ms.votes_pending.is_empty()
-            };
-
-            if !has_pending {
-                log::info!("No pending votes, stopping migration retry loop");
-                break;
-            }
-
-            // Use the active (destination) client for retries
-            let dest_client = state.app_client_v1_4.lock().await;
-            let dest = match dest_client.as_ref() {
-                Some(c) => c,
-                None => continue,
-            };
-
-            let pending = {
-                let ms = state.migration_state.lock().await;
-                ms.votes_pending.clone()
-            };
-
-            let mut newly_migrated = Vec::new();
-
-            let mut closed_now = Vec::new();
-            for vote in &pending {
-                if is_closed(vote.closes_at, now_secs()) {
-                    closed_now.push((vote.source_poll_hash.clone(), vote.option_index));
-                    continue;
-                }
-                let old_hash = match ActionHash::try_from(vote.source_poll_hash.clone()) {
-                    Ok(h) => h,
-                    Err(_) => continue,
-                };
-
-                let mapping_payload = match crate::hc::encode(&old_hash) {
-                    Ok(p) => p,
-                    Err(_) => continue,
-                };
-
-                let mapping_result =
-                    call_zome_on(dest, "polls", "get_migration_mapping", mapping_payload).await;
-
-                let new_hash: Option<ActionHash> = match mapping_result {
-                    Ok(r) => crate::hc::decode(&r).unwrap_or(None),
-                    Err(_) => None,
-                };
-
-                if let Some(new_hash) = new_hash {
-                    let vote_input = CastVoteInput {
-                        poll_action_hash: new_hash.clone(),
-                        option_index: vote.option_index,
-                        display_name: None,
-                        profile_picture: None,
-                    };
-                    let vote_payload = match crate::hc::encode(&vote_input) {
-                        Ok(p) => p,
-                        Err(_) => continue,
-                    };
-
-                    match call_zome_on(dest, "polls", "cast_vote", vote_payload).await {
-                        Ok(_) => {
-                            newly_migrated.push((
-                                vote.source_poll_hash.clone(),
-                                vote.option_index,
-                                new_hash.to_string(),
-                            ));
-                            log::info!(
-                                "Retry succeeded: vote on '{}' migrated",
-                                vote.poll_title
-                            );
-                        }
-                        Err(e) => {
-                            if e.contains("already voted") {
-                                newly_migrated.push((
-                                    vote.source_poll_hash.clone(),
-                                    vote.option_index,
-                                    new_hash.to_string(),
-                                ));
-                            } else if e.contains("Poll is closed") {
-                                closed_now.push((vote.source_poll_hash.clone(), vote.option_index));
-                            } else {
-                                log::debug!("Retry failed for vote on '{}': {}", vote.poll_title, e);
-                            }
-                        }
-                    }
-                }
-            }
-
-            if !closed_now.is_empty() {
-                let mut ms = state.migration_state.lock().await;
-                ms.votes_pending.retain(|v| !closed_now.contains(&(v.source_poll_hash.clone(), v.option_index)));
-                ms.save(&state.data_dir);
-                log::info!("{} pending vote(s) on closed polls stay where they were cast", closed_now.len());
-            }
-
-            // Update state
-            if !newly_migrated.is_empty() {
-                let mut ms = state.migration_state.lock().await;
-                for (old_hash, option_index, new_hash) in &newly_migrated {
-                    ms.votes_pending.retain(|v| {
-                        !(v.source_poll_hash == *old_hash && v.option_index == *option_index)
-                    });
-                    ms.votes_migrated.push(MigratedVoteRecord {
-                        old_poll_hash: old_hash.clone(),
-                        new_poll_hash: new_hash.clone(),
-                        option_index: *option_index,
-                    });
-                }
-                ms.save(&state.data_dir);
-
-                let _ = app_handle.emit("migration-progress", serde_json::json!({
-                    "phase": "retry",
-                    "votes_migrated": newly_migrated.len(),
-                    "votes_pending": ms.votes_pending.len(),
-                }));
-            }
-
-            // Increment retry counts
-            {
-                let mut ms = state.migration_state.lock().await;
-                for vote in &mut ms.votes_pending {
-                    vote.retry_count += 1;
-                }
-                ms.save(&state.data_dir);
-            }
-        }
-    });
 }
 
 #[cfg(test)]

@@ -334,10 +334,11 @@ export interface MigrationState {
   status: "NotStarted" | "InProgress" | "Complete" | { Error: string };
   polls_migrated: { old_hash: string; new_hash: string; title: string }[];
   votes_pending: {
-    v1_0_poll_hash: string;
+    source_poll_hash: string;
     option_index: number;
     poll_title: string;
     retry_count: number;
+    closes_at?: number | null;
   }[];
   votes_migrated: {
     old_poll_hash: string;
@@ -348,10 +349,6 @@ export interface MigrationState {
 
 export async function getMigrationStatus(): Promise<MigrationState> {
   return invoke<MigrationState>("get_migration_status");
-}
-
-export async function abandonPendingVotes(): Promise<void> {
-  return invoke<void>("abandon_pending_votes");
 }
 
 // ── Encrypted entries (v1.3) ──────────────────────────────────────────
