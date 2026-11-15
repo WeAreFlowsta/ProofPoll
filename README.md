@@ -17,6 +17,9 @@ ProofPoll is built on **[Flowsta Vault](https://flowsta.com/vault/)**, which kee
 
 ## What's New
 
+### v0.6.0-beta.5 - 2026-11-15
+- **Backups work after you switch profiles.** When one Flowsta identity had used ProofPoll and you then opened a profile for another, the Vault could refuse that profile's backup. ProofPoll now tells the Vault which profile is open before each request to it.
+
 ### v0.6.0-beta.4 - 2026-11-15
 - **Long histories reach your other devices.** ProofPoll now runs a Holochain 0.7.1 built from the official source with a small set of fixes (listed at github.com/WeAreFlowsta/holochain-build). With the official 0.7.1 a large amount of data could stop part way between two devices, and anything older than about half an hour did not cross. Nothing changes in your data.
 - **ProofPoll recovers by itself when a background service stops.** If one of its Holochain services stops, ProofPoll starts it again and says so only when that fails three times in ten minutes. When one holds more than 1 GB of memory, ProofPoll restarts them at a quiet moment.
