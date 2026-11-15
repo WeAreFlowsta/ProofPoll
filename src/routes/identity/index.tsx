@@ -3,7 +3,7 @@ import { useNavigate } from "@builder.io/qwik-city";
 import { invoke } from "@tauri-apps/api/core";
 import { linkedContext, linkStateContext, displayNameContext, profilePictureContext } from "~/lib/context";
 import { sanitizeImageSrc } from "~/lib/sanitize";
-import { readAndClearSignInIntent, vaultLinkOptions } from "~/lib/signin";
+import { bindOpenProfile, readAndClearSignInIntent, vaultLinkOptions } from "~/lib/signin";
 import { focusSelf } from "~/lib/window";
 import { SettingsTabs } from "~/components/settings-tabs/settings-tabs";
 import { getLastBackupOutcome, type BackupOutcome } from "~/lib/backup";
@@ -90,6 +90,7 @@ export default component$(() => {
     let escrowed: string | null = null;
     try {
       const { retrieveFromVault } = await import("@flowsta/holochain");
+      await bindOpenProfile();
       const res = await retrieveFromVault({
         clientId: import.meta.env.VITE_FLOWSTA_CLIENT_ID,
       });

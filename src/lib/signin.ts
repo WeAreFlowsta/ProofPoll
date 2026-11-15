@@ -39,9 +39,44 @@ export function readAndClearSignInIntent(): SignInIntent {
   };
 }
 
-/** The Vault a test build pins for sign-in, as `linkFlowstaIdentity`
- * options. A release build has none, and the SDK finds the Vault itself. */
+/**
+ * Tell the Flowsta SDK which identity the open profile is signed in as.
+ *
+ * The SDK keeps one "bound identity" per app in the page's storage, set
+ * when a link is made, and refuses every Vault call (backups among them)
+ * while the Vault holds another identity. ProofPoll keeps a profile per
+ * identity and opens the one the Vault has unlocked, so that one value
+ * must follow the profile: without this, the profile that was not the
+ * last to sign in had every backup refused as "a different identity".
+ * A profile with no link clears the value, so its sign-in starts clean.
+ */
+export async function bindOpenProfile(): Promise<void> {
+  try {
+    const { invoke } = await import("@tauri-apps/api/core");
+    const link = await invoke<{ vault_agent_pub_key: string } | null>("get_identity_link");
+    const { bindVaultIdentity, clearBoundIdentity, getBoundIdentity } = await import("@flowsta/holochain");
+    const bound = getBoundIdentity();
+    const linked = link?.vault_agent_pub_key ?? null;
+    if (linked === bound) return;
+    if (linked) {
+      bindVaultIdentity(linked);
+    } else {
+      clearBoundIdentity();
+    }
+    console.log(`[ProofPoll] the Vault binding follows the open profile (${linked ? "linked" : "not linked"})`);
+  } catch (e) {
+    // Not in the app (a browser preview), or the app is still starting:
+    // the next call binds.
+    console.warn("[ProofPoll] could not set the Vault binding from the profile", e);
+  }
+}
+
+/** What every call to the Vault through the SDK takes first: the binding
+ * follows the open profile (`bindOpenProfile`), and a test build pins the
+ * Vault it talks to. A release build pins none, and the SDK finds the
+ * Vault itself. */
 export async function vaultLinkOptions(): Promise<{ ipcUrl?: string }> {
+  await bindOpenProfile();
   try {
     const { invoke } = await import("@tauri-apps/api/core");
     const url = await invoke<string | null>("test_vault_url");

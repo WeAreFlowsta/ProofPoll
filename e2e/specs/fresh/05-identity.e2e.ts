@@ -53,6 +53,25 @@ describe("the Identity page, signed in", () => {
     await shot("identity-details");
   });
 
+  // Two identities on one install: the SDK's one stored binding was left
+  // at the identity that signed in last, and the other profile's backups
+  // were refused as "a different identity" (found on a real machine,
+  // 0.6.0-beta.4). The binding follows the open profile.
+  it("a binding left by another identity's profile is set back to this profile's", async () => {
+    const linked = (await harnessStatus()).identity_link?.vault_agent_pub_key as string;
+    const other = "uhCAkWuA-Ehm9EVzcsPE2Wo_vpc9ImljHN8NMMEXpbtG5BdooOV9a";
+    expect(linked).not.toBe(other);
+    await browser.execute((k) => localStorage.setItem("flowsta:vault-bound-identity", k), other);
+    await browser.refresh();
+    await waitAppShown();
+    await browser.waitUntil(async () => (await browser.execute(() => localStorage.getItem("flowsta:vault-bound-identity"))) === linked, {
+      timeout: 60_000,
+      timeoutMsg: "the binding stayed at the other identity",
+    });
+    await goto("nav-settings", "/identity/");
+    expect(await (await byId("nav-mismatch-banner")).isExisting()).toBe(false);
+  });
+
   it("Settings shows this version; the Updates tab has updates on by default, and goes back to Identity", async () => {
     const version = await byId("settings-version");
     await version.waitForDisplayed({ timeout: 10_000 });
