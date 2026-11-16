@@ -17,6 +17,13 @@ ProofPoll is built on **[Flowsta Vault](https://flowsta.com/vault/)**, which kee
 
 ## What's New
 
+### v0.6.0-beta.6 - 2026-11-17
+- **ProofPoll carries its own connection to your Vault.** With Flowsta Vault 1.8.0, connecting ProofPoll gives this install a private token, and ProofPoll presents it with every request to the Vault. The Vault then knows a request is ProofPoll's, whatever else on the computer presents the same address.
+- **Disconnect says what the Vault did.** After you disconnect your Flowsta account in ProofPoll, the notice says whether your Vault removed ProofPoll from its list.
+- **The move to the new network version waits out a slow network.** When copying your identity links times out, ProofPoll stops at the first time-out and tries again two minutes later.
+- Security updates to the networking and runtime libraries ProofPoll is built with.
+- **For developers and forks:** ProofPoll uses `@flowsta/holochain` 3.11.0 and `flowsta-vault-client` 0.2, which send the client id and the link token.
+
 ### v0.6.0-beta.5 - 2026-11-15
 - **Backups work after you switch profiles.** When one Flowsta identity had used ProofPoll and you then opened a profile for another, the Vault could refuse that profile's backup. ProofPoll now tells the Vault which profile is open before each request to it.
 
