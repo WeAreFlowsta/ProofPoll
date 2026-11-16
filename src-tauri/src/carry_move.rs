@@ -358,12 +358,24 @@ pub async fn run(state: &Arc<AppState>) -> Result<Report, String> {
         }
     };
 
+    // A link's write reads the network. In a start's first minutes that read
+    // can time out, a minute at a time: after the first one the rest of the
+    // links wait for the next run, which then comes sooner (`next_run_in`).
+    let mut timed_out = false;
     for c in &plan.links {
+        if timed_out {
+            report.failed += 1;
+            continue;
+        }
         let r = match carried::check(c) {
             Ok(_) => call_hash(dest, "carry_link", &CarryInput { carried: c.clone() }).await.map(|_| true),
             Err(e) => Err(e),
         };
+        timed_out = r.as_ref().is_err_and(|e| matches!(flowsta_hc_lines::kind_of_message(e), flowsta_hc_lines::ZomeErrorKind::Timeout | flowsta_hc_lines::ZomeErrorKind::NoAnswer));
         count(r, &mut report.links, &mut report.waiting, &mut report.failed, "an agent link");
+    }
+    if timed_out {
+        log::info!("[move 1.5] the network did not answer in time: the agent links are tried again in {} minutes", RETRY_SOON.as_secs() / 60);
     }
     if report.waiting == 0 && report.failed == 0 {
         set_links_carried();
@@ -476,7 +488,19 @@ fn held_for_a_test() -> bool {
     cfg!(debug_assertions) && std::env::var("PROOFPOLL_TEST_HOLD_MOVE").is_ok_and(|v| !v.is_empty())
 }
 
-/// Run the move now and again every ten minutes until nothing is left,
+/// The wait after a run in which something failed (a network read that timed
+/// out early in a start): a person who opens the app for a few minutes at a
+/// time still gets a second run.
+const RETRY_SOON: std::time::Duration = std::time::Duration::from_secs(120);
+/// The wait after a run that left only what cannot come yet.
+const RETRY_LATER: std::time::Duration = std::time::Duration::from_secs(600);
+
+fn next_run_in(failed: usize) -> std::time::Duration {
+    if failed > 0 { RETRY_SOON } else { RETRY_LATER }
+}
+
+/// Run the move now, again two minutes after a run with failures and
+/// otherwise every ten minutes until nothing is left,
 /// under the same gate as every write (a different identity present: wait).
 pub fn spawn(state: Arc<AppState>) {
     if held_for_a_test() {
@@ -495,12 +519,15 @@ pub fn spawn(state: Arc<AppState>) {
                     continue;
                 }
             }
-            match run(&state).await {
+            let failed = match run(&state).await {
                 Ok(_) if MoveState::load(&state.data_dir).complete => break,
-                Ok(_) => {}
-                Err(e) => log::warn!("[move 1.5] this run stopped: {}", e),
-            }
-            tokio::time::sleep(std::time::Duration::from_secs(600)).await;
+                Ok(report) => report.failed,
+                Err(e) => {
+                    log::warn!("[move 1.5] this run stopped: {}", e);
+                    1
+                }
+            };
+            tokio::time::sleep(next_run_in(failed)).await;
         }
     });
 }
@@ -518,6 +545,13 @@ pub fn reopen(data_dir: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_run_with_failures_is_followed_sooner() {
+        assert_eq!(next_run_in(0), RETRY_LATER);
+        assert_eq!(next_run_in(2), RETRY_SOON);
+        assert!(RETRY_SOON < RETRY_LATER);
+    }
     use holochain_types_07::prelude::Timestamp;
 
     fn rec(kind: (u8, u8), byte: u8, entry: Vec<u8>) -> Own {
