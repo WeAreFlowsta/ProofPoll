@@ -45,6 +45,7 @@ mod profiles;
 mod carried;
 mod carry_move;
 mod vault_probe;
+mod link_token;
 mod webview_fix;
 #[cfg(test)]
 mod spawn_guard;
@@ -168,6 +169,10 @@ pub fn run() {
             if let Some(fix) = WEBVIEW_FIX.get() {
                 log::info!("[webview] {:?}", fix);
             }
+
+            // The profile's link token, if it has one: from here on the
+            // Vault is asked as this profile's link.
+            link_token::open_profile(vault_probe::client(), &profile_root);
 
             let app_state = Arc::new(AppState::new_with_device_root(profile_root, data_dir.clone()));
             let relaunched = vault_probe::take_relaunch_marker(&data_dir);
@@ -346,6 +351,9 @@ pub fn run() {
             commands::get_my_agent_set,
             commands::get_identity_link,
             commands::revoke_identity_link,
+            link_token::get_vault_link_token,
+            link_token::save_vault_link_token,
+            link_token::clear_vault_link_token,
             // ── Data export + migration (keep as-is) ──────────────
             commands::get_export_data,
             commands::get_migration_status,
@@ -357,6 +365,7 @@ pub fn run() {
             commands::get_last_backup_outcome,
             // ── Agent-seed escrow: adopt / re-key (authorship survives
             //    machine death) ─────────────────────────────────────
+            seed_adopt::get_escrowed_seed,
             seed_adopt::get_seed_escrow_state,
             seed_adopt::adopt_escrowed_seed,
             seed_adopt::rekey_device_agent,

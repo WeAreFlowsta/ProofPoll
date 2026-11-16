@@ -90,9 +90,9 @@ url = "2"
 # The kit cache (and, from 0.5.2, the rest of the lines library): the same
 # rev as Flowsta Vault; its Holochain client pins are ProofPoll's own.
 async-trait = "0.1"
-flowsta-hc-lines = { git = "https://github.com/WeAreFlowsta/flowsta-hc-lines", rev = "06b1318f4a10e6093a170476fba32e38b2641fc8" }
+flowsta-hc-lines = { git = "https://github.com/WeAreFlowsta/flowsta-hc-lines", rev = "3a8a319e22aedb94f5c91f77f2efab2538e52d6f" }
 # The Flowsta side: finding the Vault, the identity link, the device key, adopt, profiles.
-flowsta-vault-client = { git = "https://github.com/WeAreFlowsta/flowsta-rust-sdk", rev = "695b1895b56b499a58dd42c58ccdd2e1f9c1e055" }
+flowsta-vault-client = { git = "https://github.com/WeAreFlowsta/flowsta-rust-sdk", rev = "a07ba43ec4eb0c6e9df3e84841aa677289e85ebe" }
 
 # The test harness's localhost server (feature `harness`, test builds only).
 axum = { version = "0.7", optional = true, default-features = false, features = ["http1", "json", "tokio"] }

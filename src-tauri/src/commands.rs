@@ -735,10 +735,11 @@ pub async fn revoke_identity_link(
     delete_identity_link(&state.data_dir);
     flowsta_vault_client::identity::delete_cached_profile(&state.data_dir);
 
-    // The Vault-side notification happens from the WEBVIEW (identity page),
-    // not here: the Vault authorizes /revoke-identity by the caller's
-    // Origin header, which a Rust reqwest doesn't carry - the old
-    // Rust-side POST was silently 403'd on every unlink ever made.
+    // Telling the Vault happens from the WEBVIEW (the identity page, through
+    // the SDK's `revokeFlowstaIdentity`), not here: the page waits for the
+    // Vault's answer and says what it did. The profile's link token is
+    // still needed for that call, so it is not deleted here; the page
+    // clears it afterwards (`clear_vault_link_token`).
 
     Ok(())
 }
@@ -1348,6 +1349,7 @@ pub fn get_last_backup_outcome(
 
 #[tauri::command]
 pub async fn build_canonical_backup(
+    app: tauri::AppHandle,
     state: tauri::State<'_, std::sync::Arc<AppState>>,
     client_id: Option<String>,
 ) -> Result<serde_json::Value, String> {
@@ -1369,8 +1371,15 @@ pub async fn build_canonical_backup(
          first - pass clientId when invoking build_canonical_backup",
     )?;
     let probe = crate::seed_adopt::escrow_probe(client_id);
-    crate::seed_adopt::backup_escrow_gate(&probe, crate::device_seed::load(&state.data_dir))
-        .await?;
+    let presented = probe.vault.link_token();
+    if let Err(why) = crate::seed_adopt::backup_escrow_gate(&probe, crate::device_seed::load(&state.data_dir)).await {
+        // The Vault refused the read over this profile's link: the page
+        // offers to sign in again.
+        if let flowsta_vault_client::adopt::Held::CheckFailed(code) = &why {
+            crate::link_token::note_refusal(&app, &state.data_dir, code, presented.as_deref());
+        }
+        return Err(crate::seed_adopt::held(why));
+    }
 
     let my_key = {
         let key = state.agent_pub_key.lock().unwrap();

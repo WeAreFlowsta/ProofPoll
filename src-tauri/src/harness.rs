@@ -425,7 +425,7 @@ async fn op(Ax(app): Ax<tauri::AppHandle>, Json(body): Json<Value>) -> Reply {
         }
         // The canonical backup into the pinned Vault, as the SDK's backup
         // posts it (it carries this install's escrowed seed).
-        "backup" => backup(state, s(&body, "client_id")).await,
+        "backup" => backup(&app, state, s(&body, "client_id")).await,
         "chain07" => chain07(&opt_s(&body, "dna").unwrap_or_else(|| "1.4".into())).await,
         // The start screen's "Continue without them" during a restore that
         // came back shorter than the backup.
@@ -477,19 +477,25 @@ async fn op(Ax(app): Ax<tauri::AppHandle>, Json(body): Json<Value>) -> Reply {
     }
 }
 
-async fn backup(state: tauri::State<'_, Arc<AppState>>, client_id: String) -> Reply {
+async fn backup(app: &tauri::AppHandle, state: tauri::State<'_, Arc<AppState>>, client_id: String) -> Reply {
     let Some(port) = crate::vault_probe::test_vault_port() else {
         return failed("no PROOFPOLL_TEST_VAULT_PORT");
     };
     let expected = commands::get_identity_link(state.clone()).map(|l| l.vault_agent_pub_key);
-    let data = match commands::build_canonical_backup(state, Some(client_id.clone())).await {
+    let data = match commands::build_canonical_backup(app.clone(), state, Some(client_id.clone())).await {
         Ok(d) => d,
         Err(e) => return failed(format!("build_canonical_backup: {}", e)),
     };
-    let resp = reqwest::Client::new()
-        .post(format!("http://127.0.0.1:{}/backup", port))
-        .header("Origin", crate::vault_probe::webview_origin())
-        .json(&json!({ "client_id": client_id, "app_name": crate::names::APP_NAME, "data": data, "expected_identity": expected }))
+    // Through the app's Vault client, as every call is: it carries the
+    // origin and, once the instance has signed in, its link token. Under
+    // the label the page's own backups use: the Vault hands an adopting
+    // device the "latest" backup before any other, so a backup written
+    // here under another label was passed over for the page's older one.
+    let resp = crate::vault_probe::client()
+        .post(
+            &format!("http://127.0.0.1:{}/backup", port),
+            json!({ "client_id": client_id, "app_name": crate::names::APP_NAME, "label": "latest", "data": data, "expected_identity": expected }),
+        )
         .timeout(std::time::Duration::from_secs(60))
         .send()
         .await;
@@ -500,17 +506,30 @@ async fn backup(state: tauri::State<'_, Arc<AppState>>, client_id: String) -> Re
     }
 }
 
-/// The Vault's signature for this install's key, as `/link-identity` gives
-/// it to the SDK: (identity key, signature).
-async fn vault_signs_link(agent: &str, client_id: &str) -> Result<(String, String), String> {
+/// What the Vault answered a link request with.
+struct VaultLink {
+    /// The identity's key.
+    key: String,
+    /// The Vault's signature over the two keys.
+    signature: String,
+    /// The link's token, from a Vault that gives one.
+    token: Option<String>,
+}
+
+/// The Vault's answer for this install's key, as `/link-identity` gives it
+/// to the SDK. `with_token`: ask as the SDK does now, for a link that
+/// answers only to its token.
+async fn vault_signs_link(agent: &str, client_id: &str, with_token: bool) -> Result<VaultLink, String> {
     let base = match crate::vault_probe::test_vault_port() {
         Some(p) => format!("http://127.0.0.1:{}", p),
         None => return Err("no PROOFPOLL_TEST_VAULT_PORT".into()),
     };
-    let r = reqwest::Client::new()
-        .post(format!("{}/link-identity", base))
-        .header("Origin", crate::vault_probe::webview_origin())
-        .json(&json!({ "app_name": crate::names::APP_NAME, "client_id": client_id, "app_agent_pub_key": agent }))
+    let mut body = json!({ "app_name": crate::names::APP_NAME, "client_id": client_id, "app_agent_pub_key": agent });
+    if with_token {
+        body["require_link_token"] = json!(true);
+    }
+    let r = crate::vault_probe::client()
+        .post(&format!("{}/link-identity", base), body)
         .timeout(std::time::Duration::from_secs(120))
         .send()
         .await
@@ -519,9 +538,11 @@ async fn vault_signs_link(agent: &str, client_id: &str) -> Result<(String, Strin
         return Err(format!("link-identity {}: {}", r.status(), r.text().await.unwrap_or_default()));
     }
     let v: Value = r.json().await.unwrap_or(Value::Null);
-    match (v.get("vault_agent_pub_key").and_then(|x| x.as_str()), v.get("vault_signature").and_then(|x| x.as_str())) {
-        (Some(key), Some(sig)) => Ok((key.to_string(), sig.to_string())),
-        _ => Err(format!("link-identity answered without a key and signature: {}", v)),
+    let text = |name: &str| v.get(name).and_then(|x| x.as_str()).filter(|x| !x.is_empty()).map(String::from);
+    match (text("vault_agent_pub_key"), text("vault_signature")) {
+        (Some(key), Some(signature)) => Ok(VaultLink { key, signature, token: text("link_token") }),
+        // Named by its fields, never printed whole: the answer can hold a token.
+        _ => Err("link-identity answered without a key and signature".into()),
     }
 }
 
@@ -531,8 +552,13 @@ async fn v13_link(state: tauri::State<'_, Arc<AppState>>, client_id: String) -> 
     let Some(agent) = commands::get_app_status(state.clone()).agent_pub_key else {
         return failed("no local agent yet");
     };
-    match vault_signs_link(&agent, &client_id).await {
-        Ok((key, sig)) => to_value(polls::harness_v13_link(&state, key.clone(), sig).await.map(|h| json!({ "vault_agent_pub_key": key, "link": h }))),
+    match vault_signs_link(&agent, &client_id, false).await {
+        Ok(link) => {
+            // That version kept no token, and a new link ends the key's
+            // earlier one.
+            crate::link_token::forget(crate::vault_probe::client(), &state.data_dir);
+            to_value(polls::harness_v13_link(&state, link.key.clone(), link.signature).await.map(|h| json!({ "vault_agent_pub_key": link.key, "link": h })))
+        }
         Err(e) => failed(e),
     }
 }
@@ -544,8 +570,26 @@ async fn link(app: &tauri::AppHandle, state: tauri::State<'_, Arc<AppState>>, cl
         return failed("no local agent yet");
     };
     let _ = app;
-    match vault_signs_link(&agent, &client_id).await {
-        Ok((key, sig)) => to_value(commands::commit_identity_link(state, key.clone(), sig).await.map(|h| json!({ "vault_agent_pub_key": key, "link": h }))),
+    let link = match vault_signs_link(&agent, &client_id, true).await {
+        Ok(link) => link,
+        Err(e) => return failed(e),
+    };
+    let committed = match commands::commit_identity_link(state.clone(), link.key.clone(), link.signature).await {
+        Ok(hash) => hash,
+        Err(e) => return failed(e),
+    };
+    // As the page does after a sign-in: the profile keeps the link's token,
+    // or none when the Vault gave none.
+    let vault = crate::vault_probe::client();
+    let kept = match link.token.as_deref() {
+        Some(token) => crate::link_token::keep(vault, &state.data_dir, token),
+        None => {
+            crate::link_token::forget(vault, &state.data_dir);
+            Ok(())
+        }
+    };
+    match kept {
+        Ok(()) => ok(json!({ "vault_agent_pub_key": link.key, "link": committed, "link_token": link.token.is_some() })),
         Err(e) => failed(e),
     }
 }
