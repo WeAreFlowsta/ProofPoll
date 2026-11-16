@@ -487,11 +487,14 @@ async fn backup(app: &tauri::AppHandle, state: tauri::State<'_, Arc<AppState>>, 
         Err(e) => return failed(format!("build_canonical_backup: {}", e)),
     };
     // Through the app's Vault client, as every call is: it carries the
-    // origin and, once the instance has signed in, its link token.
+    // origin and, once the instance has signed in, its link token. Under
+    // the label the page's own backups use: the Vault hands an adopting
+    // device the "latest" backup before any other, so a backup written
+    // here under another label was passed over for the page's older one.
     let resp = crate::vault_probe::client()
         .post(
             &format!("http://127.0.0.1:{}/backup", port),
-            json!({ "client_id": client_id, "app_name": crate::names::APP_NAME, "data": data, "expected_identity": expected }),
+            json!({ "client_id": client_id, "app_name": crate::names::APP_NAME, "label": "latest", "data": data, "expected_identity": expected }),
         )
         .timeout(std::time::Duration::from_secs(60))
         .send()
