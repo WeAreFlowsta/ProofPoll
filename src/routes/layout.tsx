@@ -4,12 +4,13 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { linkedContext, linkStateContext, displayNameContext, profilePictureContext, type LinkState } from "~/lib/context";
 import { sanitizeImageSrc } from "~/lib/sanitize";
-import { bindOpenProfile, setSignInIntent, vaultLinkOptions } from "~/lib/signin";
+import { bindOpenProfile, CLIENT_ID, setSignInIntent, vaultLinkOptions } from "~/lib/signin";
+import { forgetLinkToken, signInWithVault } from "~/lib/vault-link";
+import { LINK_REFUSED_EVENT, vaultRefusalMessage } from "~/lib/errors";
 import {
   getLinkedAgents,
   identityLinkedOnActive,
   getIdentityLink,
-  commitIdentityLink,
   revokeIdentityLink,
   getMigrationStatus,
   getCachedProfile,
@@ -89,7 +90,13 @@ export default component$(() => {
   // Vault forgetting the app).
   const linkNeeded = useSignal(false);
   const linkConfirming = useSignal(false);
-  const linkConfirmFailed = useSignal(false);
+  // Why the Vault did not confirm it, in words for the banner.
+  const linkConfirmError = useSignal<string | null>(null);
+  // The Vault refused a call over this profile's link: it no longer knows
+  // the link's token (the person removed ProofPoll in the Vault, or the
+  // Vault was reset), or the link needs a token this profile does not
+  // hold. Signing in again makes a new link; the banner offers it.
+  const reconnectNeeded = useSignal(false);
 
   useVisibleTask$(({ cleanup }) => {
     let active = true;
@@ -137,6 +144,9 @@ export default component$(() => {
     listen<"password" | "installing" | "restarting">("update-stage", (event) => {
       updateStage.value = event.payload;
     }).then((unlisten) => unlistenMigration.push(unlisten));
+    listen(LINK_REFUSED_EVENT, () => {
+      reconnectNeeded.value = true;
+    }).then((unlisten) => unlistenMigration.push(unlisten));
 
     const startBackup = async () => {
       // Write-triggered backups share the auto-backup's on/off signal: a
@@ -155,7 +165,7 @@ export default component$(() => {
         // exports — see backup.rs::is_canonical_backup over in flowsta-vault.
         const pin = await vaultLinkOptions();
         stopAutoBackup = startAutoBackup({
-          clientId: import.meta.env.VITE_FLOWSTA_CLIENT_ID,
+          clientId: CLIENT_ID,
           appName: "ProofPoll",
           ...pin,
           intervalMinutes: 60,
@@ -163,17 +173,17 @@ export default component$(() => {
           // escrowed seed BEFORE building a payload - without that gate, a
           // fresh install's first backup would overwrite the seed a
           // machine-death restore needs (see seed_adopt::backup_escrow_gate).
-          getData: () =>
-            invoke("build_canonical_backup", {
-              clientId: import.meta.env.VITE_FLOWSTA_CLIENT_ID,
-            }),
+          getData: () => invoke("build_canonical_backup", { clientId: CLIENT_ID }),
           onSuccess: (r) => {
             console.log(`[ProofPoll] Vault backup: ${r.dataSize} bytes`);
             reportBackupOutcome(true, "saved", r.dataSize);
           },
           onError: (e) => {
-            console.warn("[ProofPoll] Vault backup skipped:", e.message);
-            reportBackupOutcome(false, e.message);
+            // A refusal about this app's connection is said in
+            // ProofPoll's words (and raises the offer to connect again).
+            const message = vaultRefusalMessage(e) ?? e.message;
+            console.warn("[ProofPoll] Vault backup skipped:", message);
+            reportBackupOutcome(false, message);
           },
         });
       } catch {
@@ -244,7 +254,7 @@ export default component$(() => {
       }
 
       const vaultStatus = await getFlowstaLinkStatus({
-        clientId: import.meta.env.VITE_FLOWSTA_CLIENT_ID,
+        clientId: CLIENT_ID,
         localAgentPubKey: agentPubKey,
         ...(await vaultLinkOptions()),
       }).catch(() => ({ state: "offline" as const }));
@@ -297,6 +307,9 @@ export default component$(() => {
             // conductor-born).
             const linkKey = s.agent_pub_key_07 ?? s.agent_pub_key;
             if (linkKey) {
+              // The SDK takes the open profile's identity and link token
+              // before the first call to the Vault.
+              await bindOpenProfile();
               const state = await computeLinkState(linkKey);
               linkState.value = state;
               // Basic writes need a signed-in install, not a live Vault -
@@ -430,6 +443,8 @@ export default component$(() => {
           activeLinkChecked = false;
           linkNeeded.value = false;
         }
+        // Signed out: there is no link left to connect again.
+        if (nextState === "unlinked") reconnectNeeded.value = false;
 
         // Fetch profile when linked but profile is missing. Cache display
         // is fine in `offline` too; refreshing the cache is linked-only
@@ -497,8 +512,14 @@ export default component$(() => {
     disconnecting.value = true;
     try {
       await revokeIdentityLink().catch(() => {});
-      // The profile has no link now: the SDK's binding goes with it.
+      // The profile has no link now: its link token and the SDK's binding
+      // go with it. The Vault is not asked to remove ProofPoll here: it
+      // holds another identity, and the one that was signed in keeps its
+      // entry until the person disconnects it there.
+      const s = status.value;
+      await forgetLinkToken(s?.agent_pub_key_07 ?? s?.agent_pub_key ?? null);
       await bindOpenProfile();
+      reconnectNeeded.value = false;
       await saveProfileCache(null, null).catch(() => {});
       displayName.value = null;
       profilePicture.value = null;
@@ -515,31 +536,27 @@ export default component$(() => {
     setSignInIntent({ autoLink: true });
     nav("/identity/");
   });
-  // The link banner's action: the Vault signs the link of the key the
-  // active network runs as, and it is written there. commit_identity_link
-  // refuses any identity but the one this install is linked to.
+  // The link banners' action (confirm this device; connect again): the
+  // Vault signs the link of the key the active network runs as, it is
+  // written there, and the profile keeps the link's token.
+  // commit_identity_link refuses any identity but the one this install is
+  // linked to.
   const handleConfirmLink = $(async () => {
     const s = status.value;
     const linkKey = s?.agent_pub_key_07 ?? s?.agent_pub_key;
     if (!linkKey || linkConfirming.value) return;
+    const notConfirmed = "Your Vault did not confirm it. Try again with your Vault open and unlocked.";
     linkConfirming.value = true;
-    linkConfirmFailed.value = false;
+    linkConfirmError.value = null;
     try {
-      const { linkFlowstaIdentity } = await import("@flowsta/holochain");
-      const result = await linkFlowstaIdentity({
-        appName: "ProofPoll",
-        clientId: import.meta.env.VITE_FLOWSTA_CLIENT_ID,
-        localAgentPubKey: linkKey,
-        ...(await vaultLinkOptions()),
-      });
-      if (result.success) {
-        await commitIdentityLink(result.payload.vaultAgentPubKey, result.payload.vaultSignature);
+      if (await signInWithVault(linkKey)) {
         linkNeeded.value = false;
+        reconnectNeeded.value = false;
       } else {
-        linkConfirmFailed.value = true;
+        linkConfirmError.value = notConfirmed;
       }
-    } catch {
-      linkConfirmFailed.value = true;
+    } catch (e) {
+      linkConfirmError.value = vaultRefusalMessage(e) ?? notConfirmed;
     } finally {
       linkConfirming.value = false;
     }
@@ -923,7 +940,43 @@ export default component$(() => {
                 </div>
               )}
 
-            {linkNeeded.value && linkState.value === "linked" && (
+            {/* The Vault no longer has this profile's link (or the link
+                needs a token the profile does not hold): signing in again
+                makes a new one. The mismatch banner outranks it, and it
+                stands in for the link banner below (the same sign-in
+                settles both). */}
+            {reconnectNeeded.value &&
+              (linkState.value === "linked" || linkState.value === "offline") && (
+                <div class="bg-indigo-900/30 border border-indigo-800/50 rounded-lg px-4 py-3 mb-4" data-testid="nav-reconnect-banner">
+                  <p class="text-sm font-medium text-indigo-200">
+                    Connect ProofPoll to your Vault again
+                  </p>
+                  <p class="mt-1 text-xs text-indigo-300/90">
+                    Your Vault no longer recognizes this ProofPoll's
+                    connection, so backups are on hold. Your polls and votes
+                    are unchanged. Connect again and approve it in your
+                    Vault.
+                  </p>
+                  {linkConfirmError.value && (
+                    <p class="mt-1 text-xs text-amber-300/90">
+                      {linkConfirmError.value}
+                    </p>
+                  )}
+                  <div class="mt-3">
+                    <button
+                      type="button"
+                      onClick$={handleConfirmLink}
+                      disabled={linkConfirming.value}
+                      data-testid="nav-reconnect-confirm"
+                      class="inline-flex items-center rounded-md bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-500 disabled:opacity-60"
+                    >
+                      {linkConfirming.value ? "Waiting for your Vault..." : "Connect again"}
+                    </button>
+                  </div>
+                </div>
+              )}
+
+            {linkNeeded.value && !reconnectNeeded.value && linkState.value === "linked" && (
               <div class="bg-indigo-900/30 border border-indigo-800/50 rounded-lg px-4 py-3 mb-4" data-testid="nav-link-banner">
                 <p class="text-sm font-medium text-indigo-200">
                   Confirm this device in your Vault
@@ -932,10 +985,9 @@ export default component$(() => {
                   Once, so other people can see that the polls and votes you
                   make on this device are yours.
                 </p>
-                {linkConfirmFailed.value && (
+                {linkConfirmError.value && (
                   <p class="mt-1 text-xs text-amber-300/90">
-                    Your Vault did not confirm it. Try again with your Vault
-                    open and unlocked.
+                    {linkConfirmError.value}
                   </p>
                 )}
                 <div class="mt-3">

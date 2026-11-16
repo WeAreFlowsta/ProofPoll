@@ -257,11 +257,19 @@ export interface SeedEscrowReport {
 }
 
 /**
- * Compare the seed escrowed in the Vault backup against this install's.
- * The escrowed hex comes from `retrieveFromVault(...).data.app_keys` -
- * fetched HERE in the webview because the Vault authorizes backup reads by
- * the caller's Origin header. Pass null when the backup is absent or
- * carries no seed.
+ * The seed escrowed in the person's Vault backup of this app, or null when
+ * the Vault holds no backup or one without a seed. The Rust side reads it,
+ * the same way its backup gate and the restore do, so the Identity page
+ * and the gate always judge the same backup. Rejects when the Vault is not
+ * open as the identity signed in here, or the backup cannot be read.
+ */
+export async function getEscrowedSeed(clientId: string): Promise<string | null> {
+  return invoke<string | null>("get_escrowed_seed", { clientId });
+}
+
+/**
+ * Compare the seed escrowed in the Vault backup (`getEscrowedSeed`) against
+ * this install's. Pass null when the backup is absent or carries no seed.
  */
 export async function getSeedEscrowState(
   escrowedSeedHex: string | null,

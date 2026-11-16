@@ -198,8 +198,14 @@ fn adopt_refusal(e: AdoptError) -> String {
     }
 }
 
-fn held(e: Held) -> String {
+/// The Vault refused a call over this profile's link (its token is no
+/// longer known there, or the link needs one this profile does not hold).
+pub(crate) const ERR_VAULT_LINK_REFUSED: &str =
+    "your Flowsta Vault no longer recognizes this ProofPoll's connection. Connect ProofPoll to your Vault again.";
+
+pub(crate) fn held(e: Held) -> String {
     match e {
+        Held::CheckFailed(e) if crate::link_token::link_refusal(&e).is_some() => format!("backup held: {}", ERR_VAULT_LINK_REFUSED),
         Held::CheckFailed(e) => format!("backup held: could not check the Vault's escrowed key first ({}) - when in doubt, never write", e),
         Held::OtherKey => "backup held: your Vault backup escrows a different authorship key than this \
                            device's. Restore the key from the Identity page first - overwriting would \
@@ -222,8 +228,10 @@ fn held(e: Held) -> String {
 /// safe: a fresh install links, its hourly backup fires, and without this
 /// gate that backup would replace the lost machine's escrowed seed before
 /// the user ever saw the restore offer.
-pub(crate) async fn backup_escrow_gate<P: EscrowProbe>(probe: &P, local: Result<Option<DeviceSeed>, String>) -> Result<(), String> {
-    sdk::backup_escrow_gate(probe, local).await.map_err(held)
+/// The reason comes back as the engine names it; [`held`] puts it in
+/// ProofPoll's words.
+pub(crate) async fn backup_escrow_gate<P: EscrowProbe>(probe: &P, local: Result<Option<DeviceSeed>, String>) -> Result<(), Held> {
+    sdk::backup_escrow_gate(probe, local).await
 }
 
 struct AppSeams {
@@ -270,6 +278,9 @@ impl AdoptSeams for AppSeams {
 
     fn finish_binding_swap(&self) {
         sdk::finish_binding_swap(&self.state.data_dir);
+        // The link token belongs to the outgoing key's link: it goes with
+        // the binding, and signing back in brings a new one.
+        crate::link_token::forget(crate::vault_probe::client(), &self.state.data_dir);
     }
 }
 
@@ -285,9 +296,34 @@ pub struct SeedEscrowReport {
     pub relink_pending: bool,
 }
 
-/// Compare the seed escrowed in the Vault backup (fetched by the WEBVIEW,
-/// whose origin the Vault authorizes) against this install's. Pass `None`
-/// when the backup is absent or carries no seed.
+/// The seed escrowed in the person's Vault backup of this app, for the
+/// Identity page: None when the Vault holds no backup, or one without a
+/// seed. Read the way the backup gate and the restore read it (the newest
+/// backup, whatever version of the app wrote it), so the page never offers
+/// a restore the gate would not, or the other way round. The Vault must be
+/// open as the identity signed in here.
+#[tauri::command]
+pub async fn get_escrowed_seed(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Arc<AppState>>,
+    client_id: String,
+) -> Result<Option<String>, String> {
+    crate::commands::require_identity_match(&state).await?;
+    let probe = escrow_probe(client_id);
+    let presented = probe.vault.link_token();
+    match probe.escrowed_seed().await {
+        Ok(EscrowedSeed::Seed(hex)) => Ok(Some(hex)),
+        Ok(EscrowedSeed::NoBackup | EscrowedSeed::DataOnly) => Ok(None),
+        Err(e) => {
+            crate::link_token::note_refusal(&app, &state.data_dir, &e, presented.as_deref());
+            Err(format!("Could not read your Vault backup ({})", e))
+        }
+    }
+}
+
+/// Compare the seed escrowed in the Vault backup ([`get_escrowed_seed`])
+/// against this install's. Pass `None` when the backup is absent or
+/// carries no seed.
 #[tauri::command]
 pub fn get_seed_escrow_state(
     state: tauri::State<'_, Arc<AppState>>,
@@ -371,11 +407,16 @@ pub async fn adopt_escrowed_seed(
     let client_id = client_id.ok_or(
         "restore held: no client_id supplied, so the backup's chain cannot be checked first",
     )?;
-    let backup = escrow_probe(client_id)
-        .retrieve()
-        .await
-        .map_err(|e| format!("Could not read your Vault backup ({}). Try again in a moment - nothing was changed.", e))?
-        .ok_or("Your Vault holds no ProofPoll backup any more - nothing was changed.")?;
+    let probe = escrow_probe(client_id);
+    let presented = probe.vault.link_token();
+    let backup = match probe.retrieve().await {
+        Ok(backup) => backup.ok_or("Your Vault holds no ProofPoll backup any more - nothing was changed.")?,
+        Err(e) if crate::link_token::link_refusal(&e).is_some() => {
+            crate::link_token::note_refusal(&app, &state.data_dir, &e, presented.as_deref());
+            return Err(format!("Could not read your Vault backup: {} Nothing was changed.", ERR_VAULT_LINK_REFUSED));
+        }
+        Err(e) => return Err(format!("Could not read your Vault backup ({}). Try again in a moment - nothing was changed.", e)),
+    };
     match classify_escrow_payload(&backup)? {
         EscrowedSeed::Seed(hex) if hex == incoming.device_seed_hex => {}
         _ => {
@@ -476,6 +517,12 @@ mod tests {
         }
         assert!(held(Held::OtherKey).contains("from the Identity page"));
         assert!(held(Held::CheckFailed("x".into())).contains("never write"));
+        assert!(held(Held::CheckFailed("not_linked".into())).contains("(not_linked)"), "an older Vault's refusal reads as before");
+        // The Vault refused the link token: said plainly, with the cure.
+        for code in ["invalid_link_token", "link_token_required"] {
+            let said = held(Held::CheckFailed(code.into()));
+            assert!(said.starts_with("backup held") && said.contains("Connect ProofPoll to your Vault again") && !said.contains(code), "{said}");
+        }
     }
 
     /// Both lines' folders and the key store's passphrase are wiped: the 0.7

@@ -2,8 +2,13 @@
 //!
 //! Finding the right Vault (all three ports asked at once, another user
 //! account's Vault ignored, the unlocked one preferred) is
-//! `flowsta_vault_client::vault`; here are the app's own origin, its test
-//! switch, and the commands the webview calls.
+//! `flowsta_vault_client::vault`; here are the app's own origin and client
+//! id, its test switch, and the commands the webview calls.
+//!
+//! Every call this app makes to the Vault from Rust goes through
+//! [`client`]: its `get` and `post` say which app the call is from (the
+//! origin, the client id, and the open profile's link token once there is
+//! one, see `link_token.rs`).
 
 use flowsta_vault_client::vault::{self, VaultClient, VaultConfig};
 use std::sync::OnceLock;
@@ -12,15 +17,14 @@ use std::time::Duration;
 pub use flowsta_vault_client::vault::VaultProbe;
 pub(crate) use flowsta_vault_client::vault::take_relaunch_marker;
 
-/// The Origin header the Vault's bridge maps to this app's client_id. The
-/// linked-apps registry records the origin the WEBVIEW presented during the
-/// link ceremony, so every Rust-side request must present the same one: a
-/// bare reqwest carries none, and the Vault then answers as to a stranger -
-/// `/status` without the display name and picture (scope-gated per origin
-/// since Vault 1.2), `/revoke-identity` refused. Found twice: the
-/// /revoke-identity lesson, then the "F" avatar on Windows (2026-10-25).
-/// `tauri dev` serves the dev server's origin; every built app (a debug
-/// test build too) serves the bundled one.
+/// The Origin header every request to the Vault carries. The Vault records
+/// the origin the WEBVIEW presented when the person linked the app, and
+/// accepts that link's token only from the same origin, so every Rust-side
+/// request must present the same one: a bare reqwest carries none, and the
+/// Vault then answers as to a stranger - `/status` without the display name
+/// and picture (scope-gated per origin since Vault 1.2), other routes
+/// refused. `tauri dev` serves the dev server's origin; every built app (a
+/// debug test build too) serves the bundled one.
 pub(crate) fn webview_origin() -> &'static str {
     static ORIGIN: OnceLock<String> = OnceLock::new();
     // devUrl in tauri.conf.json
@@ -38,11 +42,24 @@ pub(crate) fn test_vault_port() -> Option<u16> {
     None
 }
 
+/// This app's Flowsta client id: the one the page is built with
+/// (`VITE_FLOWSTA_CLIENT_ID`; `build.rs` passes it on). Every Tauri app's
+/// webview presents the same origin, so the client id is what lets the
+/// Vault tell this app from another one on the same computer. None in a
+/// build that was given no client id.
+pub(crate) fn client_id() -> Option<&'static str> {
+    Some(env!("PROOFPOLL_CLIENT_ID")).filter(|id| !id.is_empty())
+}
+
 /// The one client every part of the app asks through, so the page, the
-/// identity checks and the backup all talk to the same Vault.
+/// identity checks and the backup all talk to the same Vault, as the same
+/// app.
 pub(crate) fn client() -> &'static VaultClient {
     static CLIENT: OnceLock<VaultClient> = OnceLock::new();
-    CLIENT.get_or_init(|| VaultClient::new(VaultConfig { origin: webview_origin().to_string(), only_port: test_vault_port() }).expect("the Vault client"))
+    CLIENT.get_or_init(|| {
+        VaultClient::new(VaultConfig { origin: webview_origin().to_string(), only_port: test_vault_port(), client_id: client_id().map(String::from) })
+            .expect("the Vault client")
+    })
 }
 
 /// The Vault to talk to right now, or None when none of this user's Vaults

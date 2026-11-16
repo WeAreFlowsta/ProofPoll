@@ -3,16 +3,18 @@ import { useNavigate } from "@builder.io/qwik-city";
 import { invoke } from "@tauri-apps/api/core";
 import { linkedContext, linkStateContext, displayNameContext, profilePictureContext } from "~/lib/context";
 import { sanitizeImageSrc } from "~/lib/sanitize";
-import { bindOpenProfile, readAndClearSignInIntent, vaultLinkOptions } from "~/lib/signin";
+import { CLIENT_ID, readAndClearSignInIntent, vaultLinkOptions } from "~/lib/signin";
+import { disconnectFromVault, disconnectNotice, signInWithVault } from "~/lib/vault-link";
+import { vaultRefusalMessage } from "~/lib/errors";
 import { focusSelf } from "~/lib/window";
 import { SettingsTabs } from "~/components/settings-tabs/settings-tabs";
 import { getLastBackupOutcome, type BackupOutcome } from "~/lib/backup";
 import {
   getLinkedAgents,
   getIdentityLink,
-  commitIdentityLink,
   revokeIdentityLink,
   saveProfileCache,
+  getEscrowedSeed,
   getSeedEscrowState,
   adoptEscrowedSeed,
   rekeyDeviceAgent,
@@ -79,25 +81,17 @@ export default component$(() => {
   const seedDismissed = useSignal(false);
   const backupOutcome = useSignal<BackupOutcome | null>(null);
 
-  // Fetch the escrowed seed from the Vault backup (from the WEBVIEW - the
-  // Vault authorizes backup reads by Origin) and compare against this
-  // install's seed. A failed backup read never invents "synced": the
-  // comparison still runs for the local half (legacy detection) and the
-  // panel says the backup couldn't be checked.
+  // Read the seed escrowed in the Vault backup (the Rust side reads it, the
+  // way its backup gate does) and compare it against this install's seed.
+  // A failed backup read never invents "synced": the comparison still runs
+  // for the local half (legacy detection) and the panel says the backup
+  // couldn't be checked.
   const loadSeedState = $(async () => {
     seedError.value = null;
     escrowCheckFailed.value = false;
     let escrowed: string | null = null;
     try {
-      const { retrieveFromVault } = await import("@flowsta/holochain");
-      await bindOpenProfile();
-      const res = await retrieveFromVault({
-        clientId: import.meta.env.VITE_FLOWSTA_CLIENT_ID,
-      });
-      const keys = (res?.data as { app_keys?: { device_seed_hex?: unknown } } | undefined)
-        ?.app_keys;
-      escrowed =
-        typeof keys?.device_seed_hex === "string" ? keys.device_seed_hex : null;
+      escrowed = await getEscrowedSeed(CLIENT_ID);
     } catch {
       escrowCheckFailed.value = true;
     }
@@ -114,7 +108,7 @@ export default component$(() => {
     seedBusy.value = true;
     seedError.value = null;
     try {
-      await adoptEscrowedSeed(escrowedHex.value, import.meta.env.VITE_FLOWSTA_CLIENT_ID);
+      await adoptEscrowedSeed(escrowedHex.value, CLIENT_ID);
       // On success the app restarts (dev builds exit instead).
     } catch (e: any) {
       seedError.value = e.message || String(e);
@@ -178,7 +172,7 @@ export default component$(() => {
       try {
         const { getFlowstaLinkStatus } = await import("@flowsta/holochain");
         const result = await getFlowstaLinkStatus({
-          clientId: import.meta.env.VITE_FLOWSTA_CLIENT_ID,
+          clientId: CLIENT_ID,
           localAgentPubKey: pubKey,
           ...(await vaultLinkOptions()),
         });
@@ -190,6 +184,56 @@ export default component$(() => {
       }
     },
   );
+
+  // Sign in with Flowsta: the person approves the link in their Vault, it
+  // is written to the network, and the profile keeps the link's token
+  // (`signInWithVault`). The button and the auto-link both come here.
+  const linkIdentity = $(async () => {
+    if (!agentKey.value) return;
+    error.value = null;
+    success.value = null;
+    linking.value = true;
+
+    try {
+      const vaultKey = await signInWithVault(agentKey.value);
+      if (!vaultKey) {
+        error.value = "Identity linking was not completed";
+        return;
+      }
+
+      linkedVaultKey.value = vaultKey;
+      hasLocalLink.value = true;
+      linkStateCtx.value = "linked";
+      linkedCtx.value = true;
+      await fetchVaultProfile();
+      void loadSeedState();
+      success.value = "Signed in successfully!";
+      await focusSelf();
+      const target = safeReturnTo.value;
+      if (target) {
+        setTimeout(() => nav(target), 1000);
+      }
+    } catch (e: any) {
+      const msg = e.message || String(e);
+      const refused = vaultRefusalMessage(e);
+      if (refused) {
+        error.value = refused;
+      } else if (msg.includes("VaultNotFound") || msg.includes("ECONNREFUSED")) {
+        // Vault isn't running. Best-effort: try to open it for the user.
+        void invoke("launch_vault").catch(() => {});
+        error.value =
+          "Flowsta Vault isn't running, so it's opening now. Once it's ready, click Sign in with Flowsta again.";
+      } else if (msg.includes("VaultLocked")) {
+        error.value = "Flowsta Vault is locked. Please unlock it first.";
+      } else if (msg.includes("UserDenied") || msg.includes("denied")) {
+        error.value = "You declined the link request in Flowsta Vault.";
+      } else {
+        error.value = msg;
+      }
+    } finally {
+      linking.value = false;
+    }
+  });
 
   useVisibleTask$(async ({ cleanup }) => {
     // Pull autoLink + returnTo from sessionStorage (set by the caller
@@ -213,7 +257,8 @@ export default component$(() => {
         const linked = await getLinkedAgents(status.agent_pub_key);
         if (linked.length > 0) {
           linkedVaultKey.value = linked[0];
-          const vaultState = await fetchVaultLinkState(status.agent_pub_key);
+          // The Vault's link is of the key the active network runs as.
+          const vaultState = await fetchVaultLinkState(status.agent_pub_key_07 ?? status.agent_pub_key);
           if (vaultState !== "mismatch" && !displayName.value) {
             await fetchVaultProfile();
           }
@@ -236,52 +281,7 @@ export default component$(() => {
     // step 2 of the restore IS this sign-in.
     if (autoLink.value && !hasLocalLink.value && agentKey.value) {
       autoLink.value = false;
-      linking.value = true;
-      try {
-        const { linkFlowstaIdentity } = await import("@flowsta/holochain");
-        const result = await linkFlowstaIdentity({
-          appName: "ProofPoll",
-          clientId: import.meta.env.VITE_FLOWSTA_CLIENT_ID,
-          localAgentPubKey: agentKey.value,
-          ...(await vaultLinkOptions()),
-        });
-        if (!result.success) {
-          error.value = "Identity linking was not completed";
-        } else {
-          await commitIdentityLink(
-            result.payload.vaultAgentPubKey,
-            result.payload.vaultSignature,
-          );
-          linkedVaultKey.value = result.payload.vaultAgentPubKey;
-          hasLocalLink.value = true;
-          linkStateCtx.value = "linked";
-          linkedCtx.value = true;
-          await fetchVaultProfile();
-          void loadSeedState();
-          success.value = "Signed in successfully!";
-          await focusSelf();
-          const target = safeReturnTo.value;
-          if (target) {
-            setTimeout(() => nav(target), 1000);
-          }
-        }
-      } catch (e: any) {
-        const msg = e.message || String(e);
-        if (msg.includes("VaultNotFound") || msg.includes("ECONNREFUSED")) {
-          // Vault isn't running. Best-effort: try to open it for the user.
-          void invoke("launch_vault").catch(() => {});
-          error.value =
-            "Flowsta Vault isn't running, so it's opening now. Once it's ready, click Sign in with Flowsta again.";
-        } else if (msg.includes("VaultLocked")) {
-          error.value = "Flowsta Vault is locked. Please unlock it first.";
-        } else if (msg.includes("UserDenied") || msg.includes("denied")) {
-          error.value = "You declined the link request in Flowsta Vault.";
-        } else {
-          error.value = msg;
-        }
-      } finally {
-        linking.value = false;
-      }
+      await linkIdentity();
     } else if (autoLink.value && hasLocalLink.value) {
       // A stale link exists - the auto-link intent used to be dropped here
       // with no message at all, leaving "Connect with current account" a
@@ -304,105 +304,19 @@ export default component$(() => {
     cleanup(() => clearInterval(outcomeTimer));
   });
 
-  const linkIdentity = $(async () => {
-    if (!agentKey.value) return;
-    error.value = null;
-    success.value = null;
-    linking.value = true;
-
-    try {
-      const { linkFlowstaIdentity } = await import("@flowsta/holochain");
-
-      const result = await linkFlowstaIdentity({
-        appName: "ProofPoll",
-        clientId: import.meta.env.VITE_FLOWSTA_CLIENT_ID,
-        localAgentPubKey: agentKey.value,
-        ...(await vaultLinkOptions()),
-      });
-
-      if (!result.success) {
-        error.value = "Identity linking was not completed";
-        return;
-      }
-
-      await commitIdentityLink(
-        result.payload.vaultAgentPubKey,
-        result.payload.vaultSignature,
-      );
-
-      linkedVaultKey.value = result.payload.vaultAgentPubKey;
-      hasLocalLink.value = true;
-      linkStateCtx.value = "linked";
-      linkedCtx.value = true;
-      await fetchVaultProfile();
-      void loadSeedState();
-      success.value = "Signed in successfully!";
-      await focusSelf();
-      const target = safeReturnTo.value;
-      if (target) {
-        setTimeout(() => nav(target), 1000);
-      }
-    } catch (e: any) {
-      const msg = e.message || String(e);
-      if (msg.includes("VaultNotFound") || msg.includes("ECONNREFUSED")) {
-        // Vault isn't running. Best-effort: try to open it for the user.
-        void invoke("launch_vault").catch(() => {});
-        error.value =
-          "Flowsta Vault isn't running, so it's opening now. Once it's ready, click Sign in with Flowsta again.";
-      } else if (msg.includes("VaultLocked")) {
-        error.value = "Flowsta Vault is locked. Please unlock it first.";
-      } else if (msg.includes("UserDenied") || msg.includes("denied")) {
-        error.value = "You declined the link request in Flowsta Vault.";
-      } else {
-        error.value = msg;
-      }
-    } finally {
-      linking.value = false;
-    }
-  });
-
+  // Disconnect, in this order: the link is revoked on the network and
+  // deleted here (that is what ends the sign-in; if it fails, nothing else
+  // happens), then the Vault is told and its answer waited for, and the
+  // notice says what the Vault did.
   const unlinkIdentity = $(async () => {
     error.value = null;
     success.value = null;
     unlinking.value = true;
 
     try {
+      const vaultKey = linkedVaultKey.value;
       await revokeIdentityLink();
-      // Tell the Vault to drop its side of the link too. From the webview
-      // (not Rust) so the request carries this app's Origin header - the
-      // Vault attributes and authorizes the revocation by it. Best-effort:
-      // the local revocation above is what ends authority.
-      try {
-        const vault = await invoke<VaultProbeLite | null>("probe_vault").catch(
-          () => null,
-        );
-        // Name the identity this link belongs to. A Vault holds several
-        // identities and answers an unnamed request as whichever is open;
-        // if another one is open right now, leave the Vault's entry alone
-        // rather than touch the wrong identity (P3).
-        const wrongIdentity =
-          !!vault?.agent_pub_key &&
-          !!linkedVaultKey.value &&
-          vault.agent_pub_key !== linkedVaultKey.value;
-        if (vault && !wrongIdentity) {
-          await fetch(`${vault.url}/revoke-identity`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              app_name: "ProofPoll",
-              app_agent_pub_key: agentKey.value,
-              expected_identity: linkedVaultKey.value,
-            }),
-            signal: AbortSignal.timeout(3000),
-          });
-        } else if (wrongIdentity) {
-          console.info(
-            "[ProofPoll] Vault has a different identity open; its ProofPoll entry stays until that identity is opened and ProofPoll disconnected there.",
-          );
-        }
-      } catch {
-        // Vault not running - its stale entry is cosmetic
-      }
+      const outcome = await disconnectFromVault(agentKey.value, vaultKey);
       linkedVaultKey.value = null;
       hasLocalLink.value = false;
       seedReport.value = null;
@@ -411,7 +325,7 @@ export default component$(() => {
       displayName.value = null;
       profilePicture.value = null;
       confirmUnlink.value = false;
-      success.value = "Flowsta account disconnected.";
+      success.value = disconnectNotice(outcome);
     } catch (e: any) {
       error.value = e.message || String(e);
     } finally {

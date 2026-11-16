@@ -283,7 +283,7 @@ These identifiers **must** change or your app will conflict with ProofPoll:
 | Windows console markers | `src-tauri/src/process_ext.rs` (`SIDECAR_TITLE_MARKERS`) | `proofpoll-holochain`, `proofpoll-lair-keystore` | your sidecar names (or console windows stay visible on Windows) |
 | Bundled hApp resources | `src-tauri/tauri.conf.json` (`resources`) | `resources/proofpoll_v1_4_happ.happ` (+ `proofpoll_v1_3_happ.happ` during the transition) | your hApp filename(s) (in step with `HAPP_FILE_*` in `dna.rs`) |
 | App data directory | derived from the bundle ID | `com.proofpoll.app` (profiles, conductors, lairs, logs live under it) | follows your bundle ID; nothing to edit, but know where your users' data goes |
-| Flowsta client id | `.env` (`VITE_FLOWSTA_CLIENT_ID`; `.env` is not committed) | ProofPoll's | yours from dev.flowsta.com (see Flowsta Integration Points) |
+| Flowsta client id | `.env` (`VITE_FLOWSTA_CLIENT_ID`; `.env` is not committed). The page and the Rust side are both built with it | ProofPoll's | yours from dev.flowsta.com (see Flowsta Integration Points) |
 | CI secrets | repository settings | `PROOFPOLL_BOOTSTRAP_URL`, `PROOFPOLL_RELAY_URL`, `PROOFPOLL_SIGNAL_URL`, `PROOFPOLL_AUTH_MATERIAL` (0.6 line), `PROOFPOLL_BOOTSTRAP_URL_07`, `PROOFPOLL_RELAY_URL_07` (0.7 line), `VITE_FLOWSTA_CLIENT_ID`, signing secrets | your own names and values (rename in the workflow too) |
 | App icons | `src-tauri/icons/` | ProofPoll artwork | your artwork (paths stay the same; regenerate from your `source.svg`) |
 | CI binary download | `.github/workflows/build-release.yml` | downloads to `binaries/proofpoll-{holochain,lair-keystore}-<triple>` | `binaries/yourapp-{holochain,lair-keystore}-<triple>` |
@@ -427,10 +427,11 @@ ProofPoll uses [Flowsta](https://flowsta.com) for decentralized identity verific
 ### Setup
 
 1. Register your app at [dev.flowsta.com](https://dev.flowsta.com) to get a `client_id`
-2. Update `.env`: `VITE_FLOWSTA_CLIENT_ID=your_client_id_here`
-3. Clone `flowsta-agent-linking` at `../flowsta-agent-linking/` (referenced by build scripts)
-4. Keep the `agent_linking_integrity` and `agent_linking` zomes in your `dna.yaml`
-5. Update the `appName` parameter in `linkFlowstaIdentity()` calls to your app name (shown in the Vault approval dialog)
+2. Update `.env`: `VITE_FLOWSTA_CLIENT_ID=your_client_id_here`. The page and the Rust side are both built with it (`src-tauri/build.rs` reads the environment first, then `.env`), so both name the same app to the Vault
+3. On your app's page at dev.flowsta.com, register the origins it connects from. A Tauri app's webview presents `tauri://localhost` on macOS and Linux and `http://tauri.localhost` on Windows; register both. Once an app has registered origins, the Vault refuses a link request from any other origin
+4. Clone `flowsta-agent-linking` at `../flowsta-agent-linking/` (referenced by build scripts)
+5. Keep the `agent_linking_integrity` and `agent_linking` zomes in your `dna.yaml`
+6. Update `APP_NAME` in `src/lib/vault-link.ts` to your app name (shown in the Vault approval dialog)
 
 ### Scopes
 
@@ -469,7 +470,14 @@ The Flowsta Vault is a separate desktop app that manages the user's identity. Yo
 3. Vault signs an attestation with the user's key → returned to your app
 4. Your app commits the `IsSamePersonEntry` on the DHT via the `agent_linking` zome
 5. Identity link data is saved locally (`identity-link.json`)
-6. Display name and profile picture are fetched from Vault and cached locally (`profile-cache.json`)
+6. The Vault's answer carries a **link token** for this link. The SDK keeps it for the page, and the page hands it to the Rust side, which keeps it with the profile (`vault-link-token.json`, beside `identity-link.json`)
+7. Display name and profile picture are fetched from Vault and cached locally (`profile-cache.json`)
+
+**Which app a call is from.** Every Tauri app's webview presents the same origin, so the Vault tells this app from another one on the same computer by what each call carries: the app's `client_id` and its link token. Both sides send them without extra code: the SDK from the page, and `flowsta-vault-client` from Rust (every Rust call goes through the one client in `vault_probe.rs`). At each start the Rust side loads the open profile's token and the page gives the SDK the same one (`bindOpenProfile` in `src/lib/signin.ts`). A profile linked before link tokens has none, and works as it always did. The token is a secret: it is never logged.
+
+**Disconnect.** The link is revoked on the network and deleted on this device first. Then the page tells the Vault (`revokeFlowstaIdentity`, which presents the link token, so only the app that made a link can remove it) and waits up to 10 seconds for its answer. The notice says what happened: the Vault removed the app, or the Vault was not reachable and still lists it. The profile's token is forgotten on both sides either way.
+
+**When the Vault no longer knows the link** (the person removed the app in the Vault, or the Vault was reset), calls that carry the token are refused. The app forgets the token and a banner offers to connect again: the same sign-in, which brings a new token.
 
 **Subsequent launches (Vault running or not)**:
 1. App loads `identity-link.json` → knows user was previously linked
@@ -490,6 +498,9 @@ moved, and keep the walk covering both (today the previous network is the one
 `app_client_v1_3`; a third network means turning that pair into a list).
 
 **Key files for this flow**:
+- `src/lib/vault-link.ts` - sign-in and disconnect: the only two places a link is made or removed, and where its token is stored and cleared
+- `src/lib/signin.ts` - `bindOpenProfile`: the SDK follows the open profile (its identity and its link token)
+- `src-tauri/src/link_token.rs` - the profile's link token on disk and in the Rust Vault client
 - `src/routes/layout.tsx` — Startup link detection, profile cache loading, Vault polling
 - `src-tauri/src/commands.rs` — `get_identity_link`, `get_cached_profile`, `save_profile_cache` commands
 - `src/lib/holochain.ts` — TypeScript wrappers for all identity + profile functions
@@ -534,7 +545,7 @@ ProofPoll backs up the user's authored data to Flowsta Vault's encrypted local s
 | `http://127.0.0.1:27777` | `layout.tsx`, `identity/index.tsx`, `commands.rs` | Flowsta Vault IPC server |
 | `@flowsta/holochain` | `package.json`, `layout.tsx`, `identity/index.tsx` | Flowsta SDK for identity linking |
 | `flowsta-agent-linking` | `build.sh`, `dna.yaml` | Reusable Rust crate for DHT identity attestations |
-| `"ProofPoll"` in `linkFlowstaIdentity()` | `layout.tsx`, `identity/index.tsx` | App name shown in Vault approval dialog |
+| `APP_NAME` (`"ProofPoll"`) | `src/lib/vault-link.ts` | App name shown in Vault approval dialog |
 | Port `5174` | `vite.config.ts` | Dev port (avoids conflict with Vault on 5173) |
 | Port `4466` | `conductor.rs` | Admin WS port (avoids conflict with Vault on 4455) |
 
@@ -637,6 +648,8 @@ These files work for **any** Holochain + Tauri app with zero or minimal changes:
 | `src-tauri/src/device_seed.rs` | App-side agent seed: generation, atomic recovery file, lair import + derivation cross-check | Rename file/tag constants |
 | `src-tauri/src/seed_adopt.rs` | Seed adopt/re-key engine (verified stop→wipe→commit ordering behind a testable seam) + backup escrow gate | Rename paths/constants |
 | `src/lib/backup.ts` | Write-triggered debounced Vault backups for the `getData` auto-backup path | None |
+| `src-tauri/src/link_token.rs` | The profile's Vault link token: kept beside the identity link, given to the Rust Vault client at start, forgotten on disconnect or when the Vault refuses it | None |
+| `src/lib/vault-link.ts` | Sign-in and disconnect through the SDK, with the link token handed to the Rust side and the disconnect notice saying what the Vault did | `APP_NAME` |
 | `src-tauri/src/dna.rs` | Multi-version DNA install, AppWebsocket per version, signing credentials with CellDisabled recovery | Change app IDs and hApp filenames |
 | `src-tauri/src/migration.rs` | Migration state machine, export/import/retry pattern. Auto-versioned state file | Change entry types, zome names, and source client field |
 | `src/lib/context.ts` | Qwik signals for linked/display state | None |
@@ -814,6 +827,7 @@ ProofPoll/
 │       ├── crypto.rs           #   Lair-based encryption (xsalsa20poly1305)
 │       ├── device_seed.rs      #   App-side agent seed + escrow (authorship survives machine death)
 │       ├── seed_adopt.rs       #   Seed adopt/re-key engine + backup escrow gate
+│       ├── link_token.rs       #   The profile's Vault link token (kept, loaded at start, forgotten)
 │       ├── dna.rs              #   Multi-version DNA install + WebSocket setup
 │       ├── migration.rs        #   DNA migration orchestration
 │       ├── lair.rs             #   Lair keystore management

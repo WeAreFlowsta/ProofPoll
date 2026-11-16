@@ -1735,8 +1735,8 @@ dependencies = [
 
 [[package]]
 name = "flowsta-vault-client"
-version = "0.1.0"
-source = "git+https://github.com/WeAreFlowsta/flowsta-rust-sdk?rev=695b1895b56b499a58dd42c58ccdd2e1f9c1e055#695b1895b56b499a58dd42c58ccdd2e1f9c1e055"
+version = "0.2.0"
+source = "git+https://github.com/WeAreFlowsta/flowsta-rust-sdk?rev=a07ba43ec4eb0c6e9df3e84841aa677289e85ebe#a07ba43ec4eb0c6e9df3e84841aa677289e85ebe"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek",

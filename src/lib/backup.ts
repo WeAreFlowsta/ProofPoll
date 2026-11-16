@@ -13,7 +13,8 @@
 // covered automatically. Per-command scheduling is how backup freshness
 // drifts; keep new writes on the wrapper pattern.
 import { invoke } from "@tauri-apps/api/core";
-import { vaultLinkOptions } from "./signin";
+import { vaultRefusalMessage } from "./errors";
+import { CLIENT_ID, vaultLinkOptions } from "./signin";
 
 const DEBOUNCE_MS = 30_000;
 
@@ -84,7 +85,7 @@ async function runBackup() {
   }
   inFlight = true;
   try {
-    const clientId = import.meta.env.VITE_FLOWSTA_CLIENT_ID;
+    const clientId = CLIENT_ID;
     // The Rust side gates this payload twice: identity match, and the
     // escrow guard (never overwrite a backup escrowing a foreign seed).
     const payload = await invoke("build_canonical_backup", { clientId });
@@ -110,8 +111,9 @@ async function runBackup() {
     reportBackupOutcome(true, "saved", result.dataSize);
   } catch (e: any) {
     // Held or failed backups are a skip, not a failure - the hourly
-    // auto-backup and the next write both retry.
-    const message = e?.message ?? String(e);
+    // auto-backup and the next write both retry. A refusal about this
+    // app's connection is said in ProofPoll's words.
+    const message = vaultRefusalMessage(e) ?? e?.message ?? String(e);
     console.warn("[ProofPoll] write-triggered backup skipped:", message);
     reportBackupOutcome(false, message);
   } finally {
