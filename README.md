@@ -280,7 +280,7 @@ These identifiers **must** change or your app will conflict with ProofPoll:
 | npm package name | `package.json` | `proofpoll` | `yourapp` |
 | Bundled sidecars | `src-tauri/tauri.conf.json` (`externalBin`) | `binaries/proofpoll-holochain`, `binaries/proofpoll-lair-keystore-07` (0.7 line); `binaries/proofpoll-holochain-06`, `binaries/proofpoll-lair-keystore` (0.6 line, transition only) | `binaries/yourapp-…` (a 0.7-only fork keeps the first pair) |
 | Sidecar resolver calls | `src-tauri/src/conductor.rs` + `src-tauri/src/lair.rs` | `sidecar_path("proofpoll-…")` | `sidecar_path("yourapp-…")` |
-| Windows console markers | `src-tauri/src/process_ext.rs` (`SIDECAR_TITLE_MARKERS`) | `proofpoll-holochain`, `proofpoll-lair-keystore` | your sidecar names (or console windows stay visible on Windows) |
+| Sidecar names | `src-tauri/src/names.rs` (`SIDECARS`) | `proofpoll-holochain`, `proofpoll-lair-keystore` and their 0.7 pair | your sidecar names, one prefix (the startup sweep and the hidden consoles on Windows go by them) |
 | Bundled hApp resources | `src-tauri/tauri.conf.json` (`resources`) | `resources/proofpoll_v1_4_happ.happ` (+ `proofpoll_v1_3_happ.happ` during the transition) | your hApp filename(s) (in step with `HAPP_FILE_*` in `dna.rs`) |
 | App data directory | derived from the bundle ID | `com.proofpoll.app` (profiles, conductors, lairs, logs live under it) | follows your bundle ID; nothing to edit, but know where your users' data goes |
 | Flowsta client id | `.env` (`VITE_FLOWSTA_CLIENT_ID`; `.env` is not committed). The page and the Rust side are both built with it | ProofPoll's | yours from dev.flowsta.com (see Flowsta Integration Points) |
@@ -458,11 +458,11 @@ The `display_name`, `username`, and `profile_picture` scopes are optional — Pr
 3. Copy your `client_id` into `.env` as `VITE_FLOWSTA_CLIENT_ID`
 4. The selected scopes are fetched fresh from the Flowsta API each time a user goes through the linking flow, so scope changes take effect immediately — no app rebuild needed
 
-**What the user sees:** The Vault approval dialog lists every scope (except `openid`) in plain language before the user approves. The Vault will only serve those fields on `GET /status` at `localhost:27777`.
+**What the user sees:** The Vault approval dialog lists every scope (except `openid`) in plain language before the user approves. The Vault will only serve those fields on `GET /status`.
 
 ### How Identity Works at Runtime
 
-The Flowsta Vault is a separate desktop app that manages the user's identity. Your app communicates with it via HTTP on `localhost:27777`. The key design principle: **the Vault only needs to be running for the initial identity linking ceremony**. After that, your app works independently.
+The Flowsta Vault is a separate desktop app that manages the user's identity. Your app communicates with it via HTTP on this computer: port 27777, or the next one or two up when that port is taken (the SDK and `flowsta-vault-client` find it). The key design principle: **the Vault only needs to be running for the initial identity linking ceremony**. After that, your app works independently.
 
 **First launch (new user)**:
 1. User clicks "Sign in with Flowsta" → calls `linkFlowstaIdentity()` from `@flowsta/holochain` SDK
@@ -542,7 +542,7 @@ ProofPoll backs up the user's authored data to Flowsta Vault's encrypted local s
 | Value | Location | Purpose |
 |---|---|---|
 | `VITE_FLOWSTA_CLIENT_ID` | `.env` | Identifies your app to Flowsta |
-| `http://127.0.0.1:27777` | `layout.tsx`, `identity/index.tsx`, `commands.rs` | Flowsta Vault IPC server |
+| `http://127.0.0.1:27777` to `27779` | found by `src-tauri/src/vault_probe.rs` (Rust) and the SDK (page); no address is written into the app | Flowsta Vault IPC server |
 | `@flowsta/holochain` | `package.json`, `layout.tsx`, `identity/index.tsx` | Flowsta SDK for identity linking |
 | `flowsta-agent-linking` | `build.sh`, `dna.yaml` | Reusable Rust crate for DHT identity attestations |
 | `APP_NAME` (`"ProofPoll"`) | `src/lib/vault-link.ts` | App name shown in Vault approval dialog |
@@ -831,7 +831,8 @@ ProofPoll/
 │       ├── dna.rs              #   Multi-version DNA install + WebSocket setup
 │       ├── migration.rs        #   DNA migration orchestration
 │       ├── lair.rs             #   Lair keystore management
-│       ├── process_ext.rs      #   Windows console-window hygiene (sidecar markers)
+│       ├── names.rs            #   The app's own names: sidecars, ports, folders
+│       ├── vault_probe.rs      #   The one client for every Rust call to the Vault
 │       ├── sidecar.rs          #   Sidecar path resolution
 │       └── lib.rs              #   App setup, command registration, startup
 ├── src/                        # Qwik TypeScript frontend
