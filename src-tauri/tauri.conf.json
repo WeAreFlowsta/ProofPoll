@@ -59,6 +59,9 @@
       "hardenedRuntime": true
     },
     "windows": {
+      "nsis": {
+        "installerHooks": "windows/hooks.nsh"
+      },
       "signCommand": {
         "cmd": "pwsh",
         "args": [

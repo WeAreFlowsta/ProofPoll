@@ -91,9 +91,77 @@ pub fn restart_app(app: tauri::AppHandle, state: tauri::State<'_, std::sync::Arc
     app.restart();
 }
 
+/// Whether the unlocked Vault holds an identity other than the one this
+/// profile is connected under, when it will not say which. The Vault names
+/// its identity only to an app connected under it, so after the person
+/// switched to an identity ProofPoll has never been connected under, its
+/// status reads "unlocked" and names nobody. Asked about the identity this
+/// profile IS connected under, it answers plainly that it holds another.
+#[tauri::command]
+pub async fn vault_holds_another_identity(
+    app_agent_pub_key: String,
+    state: tauri::State<'_, std::sync::Arc<crate::commands::AppState>>,
+) -> Result<bool, String> {
+    let Some(link) = crate::commands::load_identity_link(&state.data_dir) else { return Ok(false) };
+    let Some(probe) = find_vault(Duration::from_millis(2000)).await else { return Ok(false) };
+    if !probe.unlocked || !probe.initialized || probe.agent_pub_key.is_some() {
+        return Ok(false);
+    }
+    let answer = client()
+        .get(&format!("{}/link-status", probe.url))
+        .query(&[("app_agent_pub_key", app_agent_pub_key.as_str()), ("expected_identity", link.vault_agent_pub_key.as_str())])
+        .timeout(Duration::from_secs(4))
+        .send()
+        .await;
+    let Ok(resp) = answer else { return Ok(false) };
+    let status = resp.status();
+    let body: serde_json::Value = resp.json().await.unwrap_or_default();
+    Ok(says_another_identity(status.as_u16(), &body))
+}
+
+/// The Vault's plain answer that it holds a different identity than the one asked about.
+fn says_another_identity(status: u16, body: &serde_json::Value) -> bool {
+    status == 409 && body.get("error").and_then(|e| e.as_str()) == Some("identity_mismatch")
+}
+
+/// The app is about to restart itself after installing an update: the
+/// next start brings its window to the front (macOS leaves a relaunched
+/// app behind the others).
+const RAISE_MARKER: &str = "raise-window-once";
+pub(crate) fn write_raise_marker(device_root: &std::path::Path) {
+    let _ = std::fs::write(device_root.join(RAISE_MARKER), b"1");
+}
+pub(crate) fn take_raise_marker(device_root: &std::path::Path) -> bool {
+    let p = device_root.join(RAISE_MARKER);
+    p.exists() && std::fs::remove_file(&p).is_ok()
+}
+
 /// The Vault the sign-in must use, when a test build pins one (`None` in
 /// every release build: the SDK then finds the Vault itself).
 #[tauri::command]
 pub fn test_vault_url() -> Option<String> {
     test_vault_port().map(|p| format!("http://127.0.0.1:{p}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_the_vaults_plain_answer_counts_as_another_identity() {
+        assert!(says_another_identity(409, &serde_json::json!({"error": "identity_mismatch"})));
+        assert!(!says_another_identity(409, &serde_json::json!({"error": "identity_unconfirmed"})));
+        assert!(!says_another_identity(200, &serde_json::json!({"linked": false})));
+        assert!(!says_another_identity(403, &serde_json::json!({"error": "invalid_link_token"})));
+        assert!(!says_another_identity(409, &serde_json::Value::Null));
+    }
+
+    #[test]
+    fn the_raise_marker_is_read_once() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!take_raise_marker(dir.path()));
+        write_raise_marker(dir.path());
+        assert!(take_raise_marker(dir.path()));
+        assert!(!take_raise_marker(dir.path()));
+    }
 }
