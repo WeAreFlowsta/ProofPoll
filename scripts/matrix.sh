@@ -42,6 +42,12 @@ wait_harness() { for i in $(seq 1 "${2:-60}"); do curl -s -m 2 "http://127.0.0.1
 # (this matrix, the UI suite) left running goes first, or its Vault answers.
 stop_all
 rm -rf "$HOME/.local/share/flowsta-vault-pp-vault" "$HOME/.local/share/proofpoll-test-pp-a" "$HOME/.local/share/proofpoll-test-pp-b" "$HOME/.local/share/proofpoll-test-pp-c" "$HOME/.local/share/proofpoll-test-pp-d"
+# The test Vault never locks itself: its window gets no mouse or keys here,
+# and it locks after 15 minutes without them. The legs before "adopt" take
+# about that long, so the lock landed on whichever leg came next (the same
+# legs failed "Vault is locked" on two nights running).
+mkdir -p "$HOME/.local/share/flowsta-vault-pp-vault"
+printf '{"auto_lock_minutes":0}\n' > "$HOME/.local/share/flowsta-vault-pp-vault/settings.json"
 (cd "$VAULT_REPO" && exec dbus-run-session -- scripts/run-test-instance.sh pp-vault) > "$LOGS/vault.log" 2>&1 &
 VPORT=""
 for i in $(seq 1 40); do
