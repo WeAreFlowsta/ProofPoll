@@ -249,6 +249,14 @@ export default component$(() => {
       // this app is linked would come back "no" and read as "someone else"
       // (seen 2026-09-28: a reset Vault raised the mismatch banner while
       // the Rust gate, correctly, still allowed writes). No banner.
+      // Unlocked and naming nobody: the Vault names its identity only to an
+      // app connected under it, so it may hold one this ProofPoll has never
+      // been connected under. Asked about the identity this profile IS
+      // connected under, it says plainly when it holds another.
+      if (vaultLive.unlocked && vaultLive.initialized !== false && !vaultLive.agent_pub_key && localLink) {
+        const another = await invoke<boolean>("vault_holds_another_identity", { appAgentPubKey: agentPubKey }).catch(() => false);
+        if (another) return "mismatch";
+      }
       if (!vaultLive.unlocked || vaultLive.initialized === false || !vaultLive.agent_pub_key) {
         return "offline";
       }
@@ -325,7 +333,9 @@ export default component$(() => {
                 autoSignInDone.value = true;
                 try {
                   const live = await invoke<VaultProbe | null>("probe_vault");
-                  if (live?.unlocked && live.agent_pub_key) {
+                  // The Vault names its identity only once ProofPoll is
+                  // connected under it: unlocked is enough to start.
+                  if (live?.unlocked && live.initialized !== false) {
                     setSignInIntent({ autoLink: true });
                     nav("/identity/");
                   }

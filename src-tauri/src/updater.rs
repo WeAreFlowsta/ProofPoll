@@ -447,6 +447,7 @@ pub fn dismiss_updated(app: tauri::AppHandle) {
 pub async fn restart_to_update(app: tauri::AppHandle) -> Result<(), String> {
     let data_dir = app.state::<std::sync::Arc<crate::commands::AppState>>().device_root.clone();
     let worker = app.clone();
+    let raise_dir = data_dir.clone();
     let installed = tauri::async_runtime::spawn_blocking(move || {
         install_ready(&worker, &data_dir, &|stage| {
             let _ = worker.emit("update-stage", stage);
@@ -455,7 +456,11 @@ pub async fn restart_to_update(app: tauri::AppHandle) -> Result<(), String> {
     .await
     .map_err(|e| format!("the install did not run: {e}"))?;
     match installed {
-        Ok(true) => app.restart(),
+        Ok(true) => {
+            // The new version's first start comes to the front.
+            crate::vault_probe::write_raise_marker(&raise_dir);
+            app.restart()
+        }
         Ok(false) => Ok(()),
         Err(e) => {
             log::warn!("[update] {}", e);

@@ -162,9 +162,22 @@ pub fn run() {
                 log::warn!("[instance] {} orphaned sidecar(s) from an earlier launch stopped", reaped);
             }
 
-            let live_identity = tauri::async_runtime::block_on(commands::vault_live_identity())
-                .and_then(|(unlocked, key)| if unlocked { key } else { None });
-            let profile_root = profiles::select_profile_root(&data_dir, live_identity.as_deref());
+            let live = tauri::async_runtime::block_on(commands::vault_live_identity());
+            let live_identity = live.clone().and_then(|(unlocked, key)| if unlocked { key } else { None });
+            // "Open as this identity" asked for this start (read once).
+            let relaunched = vault_probe::take_relaunch_marker(&data_dir);
+            // The Vault is unlocked and names nobody: it holds an identity
+            // ProofPoll has never been connected under. Asked to open as
+            // that identity, ProofPoll opens a profile no identity is bound
+            // to (a new, empty one beside the others) with the sign-in. On
+            // any other start it stays on the profile in use and says so.
+            let unnamed = matches!(live, Some((true, None)));
+            let profile_root = if relaunched && unnamed {
+                log::info!("The Vault holds an identity this ProofPoll is not connected under: opening a profile for it");
+                profiles::select_unbound_profile_root(&data_dir)
+            } else {
+                profiles::select_profile_root(&data_dir, live_identity.as_deref())
+            };
             log::info!("Profile root: {:?}", profile_root);
             if let Some(fix) = WEBVIEW_FIX.get() {
                 log::info!("[webview] {:?}", fix);
@@ -175,7 +188,7 @@ pub fn run() {
             link_token::open_profile(vault_probe::client(), &profile_root);
 
             let app_state = Arc::new(AppState::new_with_device_root(profile_root, data_dir.clone()));
-            let relaunched = vault_probe::take_relaunch_marker(&data_dir);
+            let after_update = vault_probe::take_raise_marker(&data_dir);
             app_state
                 .relaunched_into_identity
                 .store(relaunched, std::sync::atomic::Ordering::Relaxed);
@@ -185,7 +198,8 @@ pub fn run() {
             // The app's own updates: a first check after 90 s, then every
             // few hours.
             updater::spawn(app.handle().clone(), app_state.device_root.clone());
-            if relaunched {
+            app_state.raise_when_ready.store(relaunched || after_update, std::sync::atomic::Ordering::Relaxed);
+            if relaunched || after_update {
                 // app.restart() leaves focus with whatever was behind the
                 // old window (the Vault, mostly). Come back to the front now
                 // and again once the conductor is ready (below).
@@ -274,7 +288,7 @@ pub fn run() {
                         // platform: the relaunch must end up in front.
                         if cfg!(target_os = "windows")
                             || startup_state
-                                .relaunched_into_identity
+                                .raise_when_ready
                                 .load(std::sync::atomic::Ordering::Relaxed)
                         {
                             use tauri::Manager;
@@ -323,6 +337,7 @@ pub fn run() {
             commands::launch_vault,
             vault_probe::probe_vault,
             vault_probe::restart_app,
+            vault_probe::vault_holds_another_identity,
             vault_probe::test_vault_url,
             commands::restore_go_on,
             commands::restore_try_again,

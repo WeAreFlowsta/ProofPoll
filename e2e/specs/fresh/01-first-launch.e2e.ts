@@ -68,7 +68,15 @@ describe("creating a poll before signing in", () => {
     expect(await dialog.getText()).toContain("Sign in required");
     await shot("launch-home-create-asks-sign-in");
     await note("sign-in dialog from the home screen");
-    await click("home-signin-dialog-cancel");
+    // The dialog's sign-in picture can load a moment after the dialog
+    // shows and push Cancel down: a click aimed at where Cancel was then
+    // lands on the picture and signs in (seen 2026-11-16). Wait for the
+    // picture, and press Cancel itself.
+    await browser.waitUntil(() => browser.execute(() => {
+      const img = document.querySelector('[data-testid="home-signin-dialog"] img') as HTMLImageElement | null;
+      return !img || (img.complete && img.naturalWidth > 0);
+    }), { timeout: 10_000, timeoutMsg: "the sign-in picture never loaded" });
+    await browser.execute(() => (document.querySelector('[data-testid="home-signin-dialog-cancel"]') as HTMLElement | null)?.click());
     await dialog.waitForExist({ reverse: true, timeout: 10_000 });
   });
 

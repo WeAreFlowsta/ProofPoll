@@ -53,6 +53,12 @@ pub fn select_profile_root(device_root: &Path, live_identity: Option<&str>) -> P
     sdk::select_profile_root(device_root, live_identity, &LAYOUT)
 }
 
+/// The profile for an identity the Vault holds and does not name yet: the
+/// one no identity is bound to, or a new, empty one beside the others.
+pub fn select_unbound_profile_root(device_root: &Path) -> PathBuf {
+    sdk::select_unbound_profile_root(device_root, &LAYOUT)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

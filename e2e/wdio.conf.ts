@@ -92,6 +92,8 @@ function screenLocked(): boolean {
 
 /** A Vault test instance (the Vault repo beside this one, its test build)
  *  with a staging identity: the Vault the sign-in specs talk to. */
+/** The test Vault's password, kept for specs that lock it and unlock it again. */
+const VAULT_PASSWORD = `E2e-${Date.now()}!`;
 async function startVault(): Promise<number> {
   const dir = `${process.env.HOME}/.local/share/flowsta-vault-${VAULT_SUFFIX}`;
   rmSync(dir, { recursive: true, force: true });
@@ -108,7 +110,7 @@ async function startVault(): Promise<number> {
           const created = await fetch(`http://127.0.0.1:${p}/dev/setup-identity`, {
             method: "POST",
             headers: { "content-type": "application/json", origin: "https://ourtest.flowsta.com" },
-            body: JSON.stringify({ api_url: "https://auth-api-staging.flowsta.com", password: `E2e-${Date.now()}!`, email: `pp-e2e-${Date.now()}@example.com`, display_name: "ProofPoll E2E" }),
+            body: JSON.stringify({ api_url: "https://auth-api-staging.flowsta.com", password: VAULT_PASSWORD, email: `pp-e2e-${Date.now()}@example.com`, display_name: "ProofPoll E2E" }),
             signal: AbortSignal.timeout(300_000),
           });
           if (!created.ok) throw new SevereServiceError(`e2e: the Vault test instance did not create an identity (${created.status})`);
@@ -157,6 +159,7 @@ export const config: WebdriverIO.Config = {
     const port = await startVault();
     process.env.PROOFPOLL_E2E_VAULT_PORT = String(port);
     writeFileSync(resolve(PROFILE, "vault-port"), String(port));
+    writeFileSync(resolve(PROFILE, "vault-password"), VAULT_PASSWORD);
     console.log(`e2e: Vault test instance on ${port}`);
   },
   before: async function () { activateWindow(); },

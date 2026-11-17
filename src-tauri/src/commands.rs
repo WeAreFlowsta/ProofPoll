@@ -37,6 +37,9 @@ pub struct AppState {
     /// This launch came from "Open as this identity" (the page starts the
     /// sign-in for a profile that is not linked yet; the window refocuses).
     pub relaunched_into_identity: std::sync::atomic::AtomicBool,
+    /// This start brings the window to the front once the app is ready:
+    /// it follows "Open as this identity" or an update's own restart.
+    pub raise_when_ready: std::sync::atomic::AtomicBool,
     pub conductor_status: Mutex<ConductorStatus>,
     pub agent_pub_key: Mutex<Option<String>>,
     /// The key the 0.7 line (v1.4) runs as: the same as `agent_pub_key`
@@ -132,6 +135,7 @@ impl AppState {
             data_dir,
             device_root,
             relaunched_into_identity: std::sync::atomic::AtomicBool::new(false),
+            raise_when_ready: std::sync::atomic::AtomicBool::new(false),
             conductor_status: Mutex::new(ConductorStatus::Stopped),
             agent_pub_key: Mutex::new(None),
             agent_pub_key_07: Mutex::new(None),
