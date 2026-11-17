@@ -21,6 +21,7 @@ ProofPoll is built on **[Flowsta Vault](https://flowsta.com/vault/)**, which kee
 - **ProofPoll says when your Vault holds an identity it has never been connected to.** It opened as the last identity it knew and looked signed in. Now it says "Your Vault is signed in as someone else", and "Open as this identity" starts ProofPoll for that identity beside the first one, which stays as it was and opens again when your Vault holds it.
 - **After an update installs, ProofPoll's window comes to the front.** On a Mac it came back behind the other windows.
 - **Windows:** the update's installer waits for the program file to be free before it writes it. It could stop at "Error opening file for writing".
+- **For developers and forks:** ProofPoll uses `@flowsta/holochain` 3.12.0 and `flowsta-vault-client` 0.2.1.
 
 ### v0.6.0-beta.6 - 2026-11-17
 - **ProofPoll carries its own connection to your Vault.** With Flowsta Vault 1.8.0, connecting ProofPoll gives this install a private token, and ProofPoll presents it with every request to the Vault. The Vault then knows a request is ProofPoll's, whatever else on the computer presents the same address.
