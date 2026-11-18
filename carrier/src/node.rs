@@ -90,6 +90,12 @@ pub struct Seen {
     /// DNAs' own readers did not return (their link is gone, or has not
     /// arrived). Carried all the same.
     pub unlisted: u64,
+    /// v1.3 votes whose voter also has a vote on the same poll's copy that
+    /// was carried from v1.4 (the 0.5.0 move cast votes again there).
+    pub votes_cast_again: u64,
+    /// Of those, the v1.3 votes that carry the voter's name: the v1.4 vote
+    /// has none, so the name is not shown while the v1.4 one stands.
+    pub named_votes_cast_again: u64,
 }
 
 #[derive(Serialize, Default, Debug)]
@@ -613,6 +619,40 @@ async fn held_07(l: &Line07, pace: &Pace<'_>) -> Result<Held, String> {
     Ok(held)
 }
 
+/// A vote's name, when its voter gave one (public polls only).
+#[derive(Deserialize, Debug)]
+struct Named {
+    #[serde(default)]
+    display_name: Option<String>,
+}
+
+/// Which keys are one person, from the agent links this node holds: two
+/// keys are one person when they are the same key, linked to each other, or
+/// linked to a key in common (an install's key on each network is linked to
+/// the same identity).
+#[derive(Default)]
+struct People {
+    linked: HashMap<String, HashSet<String>>,
+}
+
+impl People {
+    fn link(&mut self, a: &str, b: &str) {
+        self.linked.entry(a.to_string()).or_default().insert(b.to_string());
+        self.linked.entry(b.to_string()).or_default().insert(a.to_string());
+    }
+    fn same(&self, a: &str, b: &str) -> bool {
+        if a == b {
+            return true;
+        }
+        match (self.linked.get(a), self.linked.get(b)) {
+            (Some(la), Some(lb)) => la.contains(b) || la.iter().any(|k| lb.contains(k)),
+            (Some(la), None) => la.contains(b),
+            (None, Some(lb)) => lb.contains(a),
+            (None, None) => false,
+        }
+    }
+}
+
 /// An agent link's two agents.
 #[derive(Deserialize, Debug)]
 struct IsSamePerson {
@@ -631,16 +671,21 @@ struct OnV15 {
 /// author its proof names, any other for its writer.
 struct OnCopy {
     by: HashSet<String>,
+    /// The original authors of the votes or flags here carried from v1.4.
+    from_v14: Vec<String>,
     /// Carried records: original hash → (record hash, writer).
     carried: Vec<(ActionHash, String, String)>,
 }
 
 async fn on_copy(v15: &AppClient, f: &str, copy: &ActionHash) -> Result<OnCopy, String> {
     let records = hc::records(Line::V07, &call(v15, f, copy).await?)?;
-    let mut out = OnCopy { by: HashSet::new(), carried: Vec::new() };
+    let mut out = OnCopy { by: HashSet::new(), from_v14: Vec::new(), carried: Vec::new() };
     for r in records {
         match r.entry_as::<OnV15>().ok().and_then(|e| e.carried_from) {
             Some(c) => {
+                if c.original_dna == "1.4" {
+                    out.from_v14.push(c.original_author.to_string());
+                }
                 out.by.insert(c.original_author.to_string());
                 out.carried.push((c.original_action_hash, r.action_hash.clone(), r.author.clone()));
             }
@@ -730,9 +775,11 @@ async fn pass(o: &Options, l06: Option<&Line06>, l07: &Line07, pace: &mut Pace<'
     let links: Vec<&Carried> = held14.links.iter().chain(held13.links.iter()).collect();
     r.seen.links = links.len() as u64;
     let mut linked: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut people = People::default();
     for c in links {
         let Some(pair) = fields::<IsSamePerson>(c) else { continue };
         let a = pair.agent_a.to_string();
+        people.link(&a, &pair.agent_b.to_string());
         if !linked.contains_key(&a) {
             pace.call().await?;
             let agents: Vec<AgentPubKey> = hc::decode(&call(v15, "get_carried_links", &pair.agent_a).await?)?;
@@ -900,6 +947,17 @@ async fn pass(o: &Options, l06: Option<&Line06>, l07: &Line07, pace: &mut Pace<'
             };
             for c in records {
                 let here = on.get_mut(&key).expect("read above");
+                // A v1.3 vote whose voter has a vote here carried from v1.4:
+                // counted, with whether the v1.3 one carries a name.
+                if getter == "get_poll_votes" && c.original_dna == "1.3" {
+                    let voter = c.original_author.to_string();
+                    if here.from_v14.iter().any(|k| people.same(k, &voter)) {
+                        r.seen.votes_cast_again += 1;
+                        if fields::<Named>(&c).and_then(|n| n.display_name).map(|n| !n.trim().is_empty()).unwrap_or(false) {
+                            r.seen.named_votes_cast_again += 1;
+                        }
+                    }
+                }
                 if here.by.contains(&c.original_author.to_string()) {
                     continue;
                 }
@@ -917,6 +975,9 @@ async fn pass(o: &Options, l06: Option<&Line06>, l07: &Line07, pace: &mut Pace<'
                     }
                 }
                 here.by.insert(c.original_author.to_string());
+                if c.original_dna == "1.4" {
+                    here.from_v14.push(c.original_author.to_string());
+                }
                 if getter == "get_poll_votes" {
                     r.carried.votes += 1;
                 } else {
@@ -989,6 +1050,21 @@ async fn pass(o: &Options, l06: Option<&Line06>, l07: &Line07, pace: &mut Pace<'
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Two keys are one person when linked to each other or to one identity.
+    #[test]
+    fn keys_linked_to_one_identity_are_one_person() {
+        let mut p = People::default();
+        p.link("key on v1.3", "identity");
+        p.link("key on v1.4", "identity");
+        p.link("someone else", "another identity");
+        assert!(p.same("key on v1.3", "key on v1.3"));
+        assert!(p.same("key on v1.3", "identity"));
+        assert!(p.same("key on v1.3", "key on v1.4"), "both linked to the same identity");
+        assert!(!p.same("key on v1.3", "someone else"));
+        assert!(!p.same("unlinked", "key on v1.3"));
+        assert!(p.same("unlinked", "unlinked"));
+    }
 
     fn made(n: u8, poll: Option<u8>) -> Carried {
         #[derive(Serialize)]
