@@ -123,7 +123,8 @@ fn from_record_07(r: &holochain_types_07::prelude::Record) -> Result<Option<Carr
 }
 
 /// An action's hash on its network: blake2b-256 of its encoded bytes.
-fn action_hash_of(encoded: &[u8]) -> ActionHash {
+/// The hash of an action from its encoded bytes (the same on both lines).
+pub(crate) fn action_hash_of(encoded: &[u8]) -> ActionHash {
     ActionHash::from_raw_32(holo_hash_07::encode::blake2b_256(encoded))
 }
 

@@ -449,11 +449,36 @@ async fn copy_of(v15: &AppClient, old: &ActionHash) -> Result<Option<ActionHash>
 }
 
 /// What this node holds of an older network: its agent links, and the
-/// hashes of what was deleted there.
+/// hashes of what was deleted there BY ITS OWN AUTHOR.
 #[derive(Default)]
 struct Held {
     links: Vec<Carried>,
     deleted: HashSet<ActionHash>,
+}
+
+/// The deletes seen on an older network, with who wrote each record and who
+/// wrote each delete. The older DNAs check no author on a delete, so anyone
+/// could write one for another person's poll, vote, flag or link; only a
+/// delete by the record's own author counts here. A delete of a record this
+/// node does not hold (its author is not known) does not count either: the
+/// copy stays, which loses nothing.
+#[derive(Default)]
+struct Deletes {
+    authors: HashMap<ActionHash, AgentPubKey>,
+    deletes: Vec<(ActionHash, AgentPubKey)>,
+}
+
+impl Deletes {
+    fn wrote(&mut self, record: ActionHash, author: AgentPubKey) {
+        self.authors.insert(record, author);
+    }
+    fn deleted(&mut self, record: ActionHash, by: AgentPubKey) {
+        self.deletes.push((record, by));
+    }
+    /// The records deleted by their own author.
+    fn by_author(&self) -> HashSet<ActionHash> {
+        self.deletes.iter().filter(|(record, by)| self.authors.get(record) == Some(by)).map(|(record, _)| record.clone()).collect()
+    }
 }
 
 async fn held_06(l: &Line06) -> Result<Held, String> {
@@ -461,14 +486,18 @@ async fn held_06(l: &Line06) -> Result<Held, String> {
     use holochain_types::prelude::{Action, EntryType, RecordEntry};
     let dump = l.admin.dump_full_state(l.cell.clone(), None).await.map_err(|e| format!("v1.3 dump: {e}"))?;
     let mut held = Held::default();
+    let mut deletes = Deletes::default();
     let mut seen = HashSet::new();
     for op in dump.integration_dump.integrated {
         let DhtOp::ChainOp(op) = op else { continue };
         let ChainOp::StoreRecord(signature, action, entry) = *op else { continue };
+        let author = AgentPubKey::from_raw_39(action.author().get_raw_39().to_vec());
         if let Action::Delete(d) = &action {
-            held.deleted.insert(ActionHash::from_raw_39(d.deletes_address.get_raw_39().to_vec()));
+            deletes.deleted(ActionHash::from_raw_39(d.deletes_address.get_raw_39().to_vec()), author);
             continue;
         }
+        let encoded = holochain_types::prelude::encode(&action).map_err(|e| format!("encode a v1.3 action: {e}"))?;
+        deletes.wrote(carried::action_hash_of(&encoded), author);
         let (Some(EntryType::App(def)), RecordEntry::Present(entry)) = (action.entry_type(), &entry) else { continue };
         if (def.zome_index.0, def.entry_index.0) != LINK {
             continue;
@@ -479,6 +508,7 @@ async fn held_06(l: &Line06) -> Result<Held, String> {
             held.links.push(c);
         }
     }
+    held.deleted = deletes.by_author();
     let deleted = held.deleted.clone();
     held.links.retain(|c| !deleted.contains(&c.original_action_hash));
     Ok(held)
@@ -489,6 +519,7 @@ async fn held_07(l: &Line07, pace: &Pace<'_>) -> Result<Held, String> {
     use holochain_types_07::prelude::{ActionData, EntryType};
     let mut held = Held::default();
     let Some((cell, _)) = &l.v14 else { return Ok(held) };
+    let mut deletes = Deletes::default();
     let mut seen = HashSet::new();
     let mut cursor = None;
     loop {
@@ -497,8 +528,11 @@ async fn held_07(l: &Line07, pace: &Pace<'_>) -> Result<Held, String> {
         for op in dump.integration_dump.integrated {
             let DhtOp::ChainOp(op) = op else { continue };
             match *op {
-                ChainOp::CreateRecord(signed, OpEntry::Present(entry)) => {
+                ChainOp::CreateRecord(signed, entry) => {
                     let action = signed.data();
+                    let encoded = holochain_types_07::prelude::encode(action).map_err(|e| format!("encode a v1.4 action: {e}"))?;
+                    deletes.wrote(carried::action_hash_of(&encoded), action.author().clone());
+                    let OpEntry::Present(entry) = entry else { continue };
                     let Some(EntryType::App(def)) = action.entry_type() else { continue };
                     if (def.zome_index.0, def.entry_index.0) != LINK {
                         continue;
@@ -511,7 +545,7 @@ async fn held_07(l: &Line07, pace: &Pace<'_>) -> Result<Held, String> {
                 }
                 ChainOp::DeleteRecord(signed) | ChainOp::DeleteEntry(signed) => {
                     if let ActionData::Delete(d) = &signed.data().data {
-                        held.deleted.insert(d.deletes_address.clone());
+                        deletes.deleted(d.deletes_address.clone(), signed.data().author().clone());
                     }
                 }
                 _ => {}
@@ -522,6 +556,7 @@ async fn held_07(l: &Line07, pace: &Pace<'_>) -> Result<Held, String> {
             None => break,
         }
     }
+    held.deleted = deletes.by_author();
     let deleted = held.deleted.clone();
     held.links.retain(|c| !deleted.contains(&c.original_action_hash));
     Ok(held)
@@ -897,6 +932,30 @@ async fn pass(o: &Options, l06: Option<&Line06>, l07: &Line07, pace: &mut Pace<'
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only a record's own author can have it left out or its copy removed:
+    /// the older DNAs let anyone write a delete for anyone's record.
+    #[test]
+    fn only_the_authors_own_delete_counts() {
+        let agent = |n: u8| AgentPubKey::from_raw_36(vec![n; 36]);
+        let record = |n: u8| ActionHash::from_raw_36(vec![n; 36]);
+        let (author, stranger) = (agent(1), agent(2));
+        let mut d = Deletes::default();
+        d.wrote(record(10), author.clone());
+        d.wrote(record(11), author.clone());
+        d.wrote(record(12), author.clone());
+        d.deleted(record(10), author.clone()); // its author's own delete
+        d.deleted(record(11), stranger.clone()); // a stranger's delete
+        d.deleted(record(12), stranger.clone()); // both: the author's counts
+        d.deleted(record(12), author.clone());
+        d.deleted(record(13), stranger.clone()); // of a record not held here
+        let counted = d.by_author();
+        assert!(counted.contains(&record(10)));
+        assert!(!counted.contains(&record(11)), "a stranger's delete of another person's record is ignored");
+        assert!(counted.contains(&record(12)));
+        assert!(!counted.contains(&record(13)), "the author is not known: the copy stays");
+        assert_eq!(counted.len(), 2);
+    }
 
     /// Every zome function this file names is in a grant's list, so no
     /// call is refused for a function the grant leaves out.
