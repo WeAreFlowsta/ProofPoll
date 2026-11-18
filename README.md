@@ -17,6 +17,10 @@ ProofPoll is built on **[Flowsta Vault](https://flowsta.com/vault/)**, which kee
 
 ## What's New
 
+### v0.6.0-beta.8 - 2026-11-19
+- **Disconnect works on every install.** On an install that signed in before 0.6.0, Disconnect could stop with "Entry not found" and leave you signed in. It now signs you out on this device at once, then removes the link on the networks, and tries again at the next start if a network does not answer.
+- **For developers and forks:** the README's DNA Migration section describes how records are carried to a new DNA version, and the DNA's tests and a front-end build run in CI.
+
 ### v0.6.0-beta.7 - 2026-11-18
 - **ProofPoll says when your Vault holds an identity it has never been connected to.** It opened as the last identity it knew and looked signed in. Now it says "Your Vault is signed in as someone else", and "Open as this identity" starts ProofPoll for that identity beside the first one, which stays as it was and opens again when your Vault holds it.
 - **After an update installs, ProofPoll's window comes to the front.** On a Mac it came back behind the other windows.
