@@ -385,13 +385,9 @@ Keep the migration functions and encrypted entry functions — they're generic.
 - `src/lib/context.ts` — Qwik signals for linked state
 - `src/lib/sanitize.ts` — XSS prevention
 
-### Step 5: Update Migration
+### Step 5: Decide How a DNA Change Reaches Your Users
 
-`src-tauri/src/migration.rs` exports data from the previous version and re-creates it on the current version. The source client is clearly marked — change one line to point to your previous version's client field.
-
-Replace the entry types and zome function names with your own. The orchestration pattern (export → create → register mapping → cast → retry loop) is identical for any data model.
-
-The state file name is auto-generated from `ACTIVE_APP_ID` — no hardcoded strings to update.
+A new app has one DNA version and nothing to move. When your DNA changes later, see [DNA Migration](#dna-migration): most changes need only a new coordinator, and a new integrity version carries each record with its proof.
 
 ---
 
@@ -566,86 +562,69 @@ ProofPoll backs up the user's authored data to Flowsta Vault's encrypted local s
 
 ## DNA Migration
 
-This app includes a complete migration system for upgrading between DNA versions. This section explains how it works and how to add your own versions.
+How ProofPoll gets from one DNA version to the next without losing what people wrote, and what a fork needs when its own DNA changes.
 
 ### The Problem
 
-Holochain DNA versions with different integrity zomes (new entry types, changed validation) get different DNA hashes, which means a **new DHT**. Old data lives on the old DHT. Each user runs their own conductor — there's no central server to orchestrate the upgrade.
-
-### The Solution: Anchor-Based Hash Mapping
-
-When a user upgrades to a new version:
-
-1. **Install new version** alongside the old (both stay installed)
-2. **Export** user's authored content and actions from the old DHT
-3. **Re-create** content on the new DHT (entries get new action hashes)
-4. **Publish migration mappings** — a `MigratedPoll` entry linked from a deterministic migration anchor maps old hashes to new hashes
-5. **Re-cast actions** (votes, etc.) where the target content's mapping exists
-6. **Queue pending actions** for content whose authors haven't upgraded yet
-7. **Background retry** — every 60 seconds, check if new mappings appeared and retry
-
-Other users discover the mappings via `get_links` on the migration anchor. As more users upgrade, the new DHT fills up via gossip.
+Holochain DNA versions with different integrity zomes (new entry types, changed validation) get different DNA hashes, which means a **new DHT**. Old data lives on the old DHT. Each user runs their own conductor, and there is no central server to orchestrate the upgrade.
 
 ### Three Tiers of Holochain App Upgrades
 
-| Tier | When | Migration Needed? | Example |
+| Tier | When | New network? | Example |
 |---|---|---|---|
-| **1. Coordinator-only** | Bug fixes, new queries, new link traversals | No — use `admin.updateCoordinators()` | Fix a query bug |
-| **2. Additive integrity** | New entry types, new link types | Yes — new DNA hash, new DHT | Adding EncryptedEntry (v1.3) |
-| **3. Breaking integrity** | Changed validation, restructured entries | Yes — with data transformation | Restructuring Poll fields |
+| **1. Coordinator-only** | Bug fixes, new queries, new link traversals | No: the new coordinator is delivered with the app (`admin.updateCoordinators()`) | Fix a query bug |
+| **2. Additive integrity** | New entry types, new link types | Yes: new DNA hash, new DHT | Adding EncryptedEntry (v1.3) |
+| **3. Breaking integrity** | Changed validation, restructured entries | Yes, with a transformation of the data | Restructuring Poll fields |
 
-**~70% of real-world upgrades are Tier 1** (no migration needed). Tier 2 is what ProofPoll demonstrates across v1.0→v1.3. Tier 3 follows the same pattern but adds a transformation step.
+Most upgrades are Tier 1 and need none of what follows.
 
-### Votes Survive Migration
+### What ProofPoll does now: carried records (v1.5, since 0.6.0)
 
-During migration, polls from older versions remain visible and functional:
+A record from an older network is written again on the new one **with its proof**: the original action exactly as its author signed it, the signature, and the original entry (`Carried` in the v1.5 integrity zome). Every peer on v1.5 checks that proof in validation, so a carried poll, vote, flag or agent link counts for the person who originally wrote it, whoever carried it.
 
-- `get_all_polls` queries ALL installed versions and deduplicates using migration mappings
-- Each poll carries a `dna_version` field so votes and flags are routed to the correct cell
-- If a poll author hasn't migrated, their poll stays on the old DHT — votes cast on it go to the old cell
-- Once the author migrates, the old copy is hidden and the new copy takes over
+That last part is the point. Because the proof is checked by the network and not taken on trust:
 
-No votes are ever lost. Users on different versions can still interact with content on the version where it lives.
+- **Nobody has to act for their data to arrive.** An updated install carries what it wrote (`src-tauri/src/carry_move.rs`). An always-on node carries the public records of people who have not updated yet (`carrier/`). Either way the result is the same record with the same author.
+- **A carry can be repeated safely.** Each carry function (`carry_poll`, `carry_vote`, `carry_flag`, `carry_link`) returns the copy already there, so a run that stops resumes where it was, and two carriers do not make two copies.
+- **Votes keep their voter and their time.** Nothing is cast again under a new key.
+- **Private data** (drafts, vote reasons) is encrypted to the install's own key, so only that install can move it: it is written again on v1.5 as it is.
 
-### Migration Key Files
+Older installs still on v1.4 see no change. Until a record has been carried, the readers show it from the older network (`get_all_polls` reads every installed version and shows each poll once).
+
+### What it did before, and why it changed (v1.1 to v1.4, until 0.5.0)
+
+Each install exported its own polls and votes, created them again on the new network, and published a mapping from old hash to new (`MigratedPoll`). Votes were cast again once the poll's author had upgraded, and waited in a retry queue until then. It worked, with three costs: a re-created record has a new author key and a new time unless the app carries them as plain fields nobody can check; a vote could wait indefinitely for an author who never upgraded; and every person had to open the new version for their data to move at all.
+
+`src-tauri/src/migration.rs` still holds that code. Since 0.6.0 it is compiled into the test build only, to make the shape a 0.5.0 install left behind, which the carry must handle for everyone updating from 0.5.0.
+
+### Key Files
 
 | File | Purpose |
 |---|---|
-| `src-tauri/src/migration.rs` | Migration orchestration (export, import, retry loop). Source client clearly marked for forkers |
-| `src-tauri/src/dna.rs` | Multi-version install, AppWebsocket setup per version |
-| `src-tauri/src/commands.rs` | `get_all_polls` multi-version merge with chained dedup |
-| `dna/v1.3/zomes/polls/coordinator/src/lib.rs` | `register_migrated_poll`, `get_migration_mapping` zome functions |
-| `dna/v1.3/zomes/polls/integrity/src/lib.rs` | `MigratedPoll` entry type, `MigrationIndex` link type |
+| `dna/v1.5/zomes/polls/integrity/src/lib.rs` | `Carried`, `LaterCopy`, `CarriedLink` and the validation that checks each proof |
+| `dna/v1.5/zomes/polls/coordinator/src/lib.rs` | `carry_poll`, `carry_vote`, `carry_flag`, `carry_link`, `map_later_copy` |
+| `src-tauri/src/carried.rs` | Builds a proof from a record read on the older DNA, and runs the network's checks first so nothing is submitted that would be refused |
+| `src-tauri/src/carry_move.rs` | The move itself: links, then polls, then votes and flags, then private data |
+| `carrier/` | `proofpoll-carrier`: one pass on a node that carries public records for everyone, then exits |
+| `dna/v1.5/tests/` | The rules on a real conductor, against real v1.3 and v1.4 signatures, including a stranger's coordinator whose writes must be refused |
 
-### Adding Your Own Version
+### When Your Fork's DNA Changes
 
-1. **Create `dna/vX.Y/`** — copy the latest version, update `network_seed` in `dna.yaml`
-2. **Add your integrity changes** — new entry types, link types, validation
-3. **Update coordinator** — keep all migration + encrypted entry functions, add your new zome functions
-4. **Update `src-tauri/src/dna.rs`** — add `APP_ID_VX_Y`, `HAPP_FILE_VX_Y`, update `ACTIVE_APP_ID`, add `app_client_vX_Y` to `AppState`
-5. **Update `src-tauri/src/migration.rs`** — change the source client field (one line, clearly marked with `// FORKING`)
-6. **Update `src-tauri/src/commands.rs`** — add your previous version to the `older_versions` array in `get_all_polls`
-7. **Update `build-all.sh`** — add the new build step
-8. **Test** — create data on the old version, upgrade, verify migration completes and all content is visible
+1. **Ask whether it is Tier 1.** If only the coordinator changes, ship the new coordinator and stop here.
+2. **Create `dna/vX.Y/`** from the latest version with a new `network_seed`, and make your integrity changes.
+3. **Keep the carried types and their validation**, and add the previous version as a source the proofs are checked against. A proof is the original signed action, so validation needs to know the older version's action encoding; `carried.rs` and the tests in `dna/v1.5/tests/` show the check on real records.
+4. **Point the move at the new version** (`carry_move.rs`) and add the previous version to the versions the readers merge.
+5. **Carry for people who have not updated**, if you run an always-on node: the carrier does that in one pass and can be run again.
+6. **Test with real older records**: write on the old version, update, and check that every record arrives once, under its original author, and that a forged proof is refused.
 
-The migration state file is auto-generated from `ACTIVE_APP_ID` — no hardcoded strings to update.
+A new integrity version is a new network for good: once a release has shipped a bundle, never rebuild it.
 
-### Staying Visible During Migration
+### Edge Cases
 
-During a migration all DNA cells are active simultaneously. `get_all_polls` queries every installed version and deduplicates:
-
-1. **Collect migration mappings** from ALL versions into one set (chains across multi-hop migrations)
-2. **Query each version** — skip any poll whose hash appears in the migrated set
-3. **Return merged list** — each item carries `dna_version` so votes and flags are routed to the correct cell
-
-This means content is never missing from the UI, even if only one user on the network has upgraded so far.
-
-### Migration Edge Cases
-
-- **First user on new version**: Their own content migrates fine. References to others' content go to pending (retried every 60s).
-- **Content author never upgrades**: Content stays on the old DHT and remains visible. Actions (votes) cast on it go to the old cell. Users can "abandon pending votes" to clean up.
-- **Crash during migration**: State file is written after each entry. Restart picks up where it left off.
-- **Fresh install (no previous version)**: Installs latest directly. No migration needed.
+- **Fresh install (no previous version)**: installs the latest directly. Nothing to carry.
+- **A run that stops part way**: the next run finds what is already there and continues.
+- **The author never updates**: their public records are carried by a node if one runs the carrier; otherwise they stay visible from the older network while the app still installs it.
+- **A poll whose first record cannot be read yet**: its votes wait for a later run; they are shown from the older network meanwhile.
 
 ---
 
