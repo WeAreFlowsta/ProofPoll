@@ -420,8 +420,13 @@ struct MigratedPollV14 {
 /// in 0.7's) by `author` as entry `entry_index` of the polls zome, signed by
 /// `author`'s key in `conductor`'s keystore.
 async fn written_by(conductor: &SweetConductor, author: &AgentPubKey, dna: &str, entry_index: u8, entry: Vec<u8>, at: Timestamp) -> Carried {
+    written_in(conductor, author, dna, polls_integrity::POLLS_ZOME, entry_index, entry, at).await
+}
+
+/// The same for an entry of any zome of the older DNA (`zome_index`).
+async fn written_in(conductor: &SweetConductor, author: &AgentPubKey, dna: &str, zome_index: u8, entry_index: u8, entry: Vec<u8>, at: Timestamp) -> Carried {
     let entry_hash = EntryHash::with_data_sync(&Entry::App(AppEntryBytes(SerializedBytes::from(UnsafeBytes::from(entry.clone())))));
-    let entry_type = EntryType::App(AppEntryDef::new(entry_index.into(), polls_integrity::POLLS_ZOME.into(), EntryVisibility::Public));
+    let entry_type = EntryType::App(AppEntryDef::new(entry_index.into(), zome_index.into(), EntryVisibility::Public));
     let prev_action = ActionHash::from_raw_32(vec![0x11; 32]);
     let action = match dna {
         "1.3" => holochain_serialized_bytes::encode(&Action06::Create(Create06 { author: author.clone(), timestamp: at, action_seq: 7, prev_action, entry_type, entry_hash })),
@@ -495,6 +500,64 @@ async fn a_later_copy_under_a_new_key_needs_the_first_keys_vouch() {
     assert_eq!((via_later.as_ref(), via_first.as_ref()), (Some(&copy), Some(&copy)), "both keys' hashes open the one copy");
     let all: Vec<Record> = conductor.call(&zome, "get_all_polls", ()).await;
     assert_eq!(all.len(), 1, "one poll, not one per key");
+}
+
+/// The agent-linking zome's entry as it encodes.
+#[derive(serde::Serialize, Debug)]
+struct IsSamePersonEntry {
+    agent_a: AgentPubKey,
+    signature_a: Signature,
+    agent_b: AgentPubKey,
+    signature_b: Signature,
+    created_at: i64,
+}
+
+/// An identity link between `me` and `other` as v1.3 held it, written by `me`.
+async fn link_on_v13(conductor: &SweetConductor, me: &AgentPubKey, other: &AgentPubKey, at_us: i64) -> Carried {
+    let (a, b) = if me < other { (me, other) } else { (other, me) };
+    let payload: Vec<u8> = [a.get_raw_39(), b.get_raw_39()].concat();
+    let keystore = conductor.keystore();
+    let entry = holochain_serialized_bytes::encode(&IsSamePersonEntry {
+        agent_a: a.clone(),
+        signature_a: keystore.sign(a.clone(), payload.clone().into()).await.unwrap(),
+        agent_b: b.clone(),
+        signature_b: keystore.sign(b.clone(), payload.into()).await.unwrap(),
+        created_at: at_us / 1_000_000,
+    })
+    .unwrap();
+    written_in(conductor, me, "1.3", polls_integrity::AGENT_LINKING_ZOME, polls_integrity::IS_SAME_PERSON_ENTRY, entry, Timestamp::from_micros(at_us)).await
+}
+
+/// Disconnect on an install whose identity link was made on an older DNA:
+/// `remove_carried_link` removes the carried copies between the caller and
+/// the identity it names, leaves a link to any other identity, and says
+/// none when there is nothing left to remove.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_carried_link_is_removed_by_one_of_its_agents_and_only_the_one_named() {
+    let mut conductor = SweetConductor::standard().await;
+    let app = conductor.setup_app("proofpoll", [&dna().await]).await.unwrap();
+    let zome = app.cells()[0].zome(ZOME);
+    let me = app.agent().clone();
+    let keystore = conductor.keystore();
+    let (identity, another) = (SweetAgents::one(keystore.clone()).await, SweetAgents::one(keystore.clone()).await);
+
+    let at = carried_records().v13[0].timestamp_us;
+    let _: ActionHash = conductor.call(&zome, "carry_link", CarryInput { carried: link_on_v13(&conductor, &me, &identity, at).await }).await;
+    let _: ActionHash = conductor.call(&zome, "carry_link", CarryInput { carried: link_on_v13(&conductor, &me, &another, at + 1_000).await }).await;
+    let mut linked: Vec<AgentPubKey> = conductor.call(&zome, "get_carried_links", me.clone()).await;
+    linked.sort();
+    let mut both = vec![identity.clone(), another.clone()];
+    both.sort();
+    assert_eq!(linked, both, "both links carried");
+
+    let removed: u32 = conductor.call(&zome, "remove_carried_link", identity.clone()).await;
+    assert_eq!(removed, 1, "the link to the identity named");
+    let left: Vec<AgentPubKey> = conductor.call(&zome, "get_carried_links", me.clone()).await;
+    assert_eq!(left, vec![another.clone()], "the link to the other identity stays");
+    let from_identity: Vec<AgentPubKey> = conductor.call(&zome, "get_carried_links", identity.clone()).await;
+    assert!(from_identity.is_empty(), "nothing is filed under the identity any more");
+    let again: u32 = conductor.call(&zome, "remove_carried_link", identity).await;
+    assert_eq!(again, 0, "nothing left to remove is not an error");
 }
 
 /// The bundle with the test coordinator (`tests/hostile`, built in its own
