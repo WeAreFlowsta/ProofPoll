@@ -20,7 +20,7 @@
 //!   5. a copy this node made of a poll or flag its author deleted is
 //!      deleted too.
 
-use crate::carried::{self, fields, Carried, CarryInput, LaterCopy, MapLaterCopyInput, Mapping, LINK};
+use crate::carried::{self, fields, Carried, CarryInput, LaterCopy, MapLaterCopyInput, Mapping, OnPoll, FLAG, LINK, MAPPING, POLL, VOTE};
 use crate::hc::{self, AppClient, Line};
 use holochain_types_07::prelude::{ActionHash, AgentPubKey};
 use serde::{Deserialize, Serialize};
@@ -86,6 +86,10 @@ pub struct Seen {
     pub flags: u64,
     pub links: u64,
     pub deletes: u64,
+    /// Polls, mappings, votes and flags this node holds that the older
+    /// DNAs' own readers did not return (their link is gone, or has not
+    /// arrived). Carried all the same.
+    pub unlisted: u64,
 }
 
 #[derive(Serialize, Default, Debug)]
@@ -454,7 +458,45 @@ async fn copy_of(v15: &AppClient, old: &ActionHash) -> Result<Option<ActionHash>
 struct Held {
     links: Vec<Carried>,
     deleted: HashSet<ActionHash>,
+    /// Every poll, mapping, vote and flag this node holds, by kind. The
+    /// older DNAs' readers follow links, and those DNAs accept a link
+    /// delete from anyone, so a record whose link someone else deleted is
+    /// missing from a reader's answer; it is still here, signed.
+    records: Vec<((u8, u8), Carried)>,
 }
+
+impl Held {
+    /// `got` (a reader's answer) with the records of `kind` held here that
+    /// it left out. Returns how many were added.
+    fn add_to(&self, got: &mut Vec<Carried>, kind: (u8, u8), on_poll: Option<&ActionHash>) -> u64 {
+        let mut have: HashSet<ActionHash> = got.iter().map(|c| c.original_action_hash.clone()).collect();
+        let mut added = 0;
+        for (k, c) in &self.records {
+            if *k != kind || have.contains(&c.original_action_hash) {
+                continue;
+            }
+            if let Some(poll) = on_poll {
+                if fields::<OnPoll>(c).map(|f| &f.poll_action_hash != poll).unwrap_or(true) {
+                    continue;
+                }
+            }
+            have.insert(c.original_action_hash.clone());
+            got.push(c.clone());
+            added += 1;
+        }
+        added
+    }
+
+    /// After the reads: drop what its own author deleted.
+    fn settle(&mut self, deleted: HashSet<ActionHash>) {
+        self.links.retain(|c| !deleted.contains(&c.original_action_hash));
+        self.records.retain(|(_, c)| !deleted.contains(&c.original_action_hash));
+        self.deleted = deleted;
+    }
+}
+
+/// The kinds read from what the node holds, beside agent links.
+const HELD_KINDS: [(u8, u8); 4] = [POLL, VOTE, FLAG, MAPPING];
 
 /// The deletes seen on an older network, with who wrote each record and who
 /// wrote each delete. The older DNAs check no author on a delete, so anyone
@@ -499,18 +541,24 @@ async fn held_06(l: &Line06) -> Result<Held, String> {
         let encoded = holochain_types::prelude::encode(&action).map_err(|e| format!("encode a v1.3 action: {e}"))?;
         deletes.wrote(carried::action_hash_of(&encoded), author);
         let (Some(EntryType::App(def)), RecordEntry::Present(entry)) = (action.entry_type(), &entry) else { continue };
-        if (def.zome_index.0, def.entry_index.0) != LINK {
+        let kind = (def.zome_index.0, def.entry_index.0);
+        // A poll, mapping, vote or flag is its create record (the older
+        // DNAs never update one).
+        let wanted = kind == LINK || (HELD_KINDS.contains(&kind) && matches!(action, Action::Create(_)));
+        if !wanted {
             continue;
         }
         let Some(bytes) = entry.as_app_entry() else { continue };
         let c = carried::from_v13(&action, &signature, bytes.as_ref().bytes(), None)?;
         if seen.insert(c.original_action_hash.clone()) {
-            held.links.push(c);
+            if kind == LINK {
+                held.links.push(c);
+            } else {
+                held.records.push((kind, c));
+            }
         }
     }
-    held.deleted = deletes.by_author();
-    let deleted = held.deleted.clone();
-    held.links.retain(|c| !deleted.contains(&c.original_action_hash));
+    held.settle(deletes.by_author());
     Ok(held)
 }
 
@@ -534,13 +582,18 @@ async fn held_07(l: &Line07, pace: &Pace<'_>) -> Result<Held, String> {
                     deletes.wrote(carried::action_hash_of(&encoded), action.author().clone());
                     let OpEntry::Present(entry) = entry else { continue };
                     let Some(EntryType::App(def)) = action.entry_type() else { continue };
-                    if (def.zome_index.0, def.entry_index.0) != LINK {
+                    let kind = (def.zome_index.0, def.entry_index.0);
+                    if kind != LINK && !HELD_KINDS.contains(&kind) {
                         continue;
                     }
                     let Some(bytes) = entry.as_app_entry() else { continue };
                     let c = carried::from_v14(action, signed.signature(), bytes.as_ref().bytes(), None)?;
                     if seen.insert(c.original_action_hash.clone()) {
-                        held.links.push(c);
+                        if kind == LINK {
+                            held.links.push(c);
+                        } else {
+                            held.records.push((kind, c));
+                        }
                     }
                 }
                 ChainOp::DeleteRecord(signed) | ChainOp::DeleteEntry(signed) => {
@@ -556,9 +609,7 @@ async fn held_07(l: &Line07, pace: &Pace<'_>) -> Result<Held, String> {
             None => break,
         }
     }
-    held.deleted = deletes.by_author();
-    let deleted = held.deleted.clone();
-    held.links.retain(|c| !deleted.contains(&c.original_action_hash));
+    held.settle(deletes.by_author());
     Ok(held)
 }
 
@@ -652,14 +703,14 @@ async fn pass(o: &Options, l06: Option<&Line06>, l07: &Line07, pace: &mut Pace<'
     let held14 = held_07(l07, pace).await?;
     let deleted: HashSet<ActionHash> = held13.deleted.union(&held14.deleted).cloned().collect();
     r.seen.deletes = deleted.len() as u64;
-    let polls13 = match l06 {
+    let mut polls13 = match l06 {
         Some(l) => {
             pace.call().await?;
             carried::from_records("1.3", &call(&l.v13, "get_all_polls", &()).await?)?
         }
         None => Vec::new(),
     };
-    let (polls14, maps14) = match &l07.v14 {
+    let (mut polls14, mut maps14) = match &l07.v14 {
         Some((_, c)) => {
             pace.call().await?;
             let polls = carried::from_records("1.4", &call(c, "get_all_polls", &()).await?)?;
@@ -668,6 +719,10 @@ async fn pass(o: &Options, l06: Option<&Line06>, l07: &Line07, pace: &mut Pace<'
         }
         None => (Vec::new(), Vec::new()),
     };
+    // What the readers left out and this node holds (see `Held::records`).
+    r.seen.unlisted += held13.add_to(&mut polls13, POLL, None);
+    r.seen.unlisted += held14.add_to(&mut polls14, POLL, None);
+    r.seen.unlisted += held14.add_to(&mut maps14, MAPPING, None);
     r.seen.polls_v13 = polls13.len() as u64;
     r.seen.polls_v14 = polls14.len() as u64;
 
@@ -807,7 +862,9 @@ async fn pass(o: &Options, l06: Option<&Line06>, l07: &Line07, pace: &mut Pace<'
     for (getter, carry, remove, what) in [("get_poll_votes", "carry_vote", None, "a vote"), ("get_poll_flags", "carry_flag", Some("remove_flag"), "a flag")] {
         for (client, p) in &polls {
             pace.call().await?;
-            let records = carried::from_records(&p.original_dna, &call(client, getter, &p.original_action_hash).await?)?;
+            let mut records = carried::from_records(&p.original_dna, &call(client, getter, &p.original_action_hash).await?)?;
+            let held = if p.original_dna == "1.3" { &held13 } else { &held14 };
+            r.seen.unlisted += held.add_to(&mut records, if getter == "get_poll_votes" { VOTE } else { FLAG }, Some(&p.original_action_hash));
             if getter == "get_poll_votes" {
                 r.seen.votes += records.len() as u64;
             } else {
@@ -932,6 +989,52 @@ async fn pass(o: &Options, l06: Option<&Line06>, l07: &Line07, pace: &mut Pace<'
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn made(n: u8, poll: Option<u8>) -> Carried {
+        #[derive(Serialize)]
+        struct Entry {
+            poll_action_hash: ActionHash,
+        }
+        let hash = |n: u8| ActionHash::from_raw_36(vec![n; 36]);
+        Carried {
+            original_dna: "1.4".into(),
+            original_action_hash: hash(n),
+            original_author: AgentPubKey::from_raw_36(vec![n; 36]),
+            original_timestamp: holochain_types_07::prelude::Timestamp::from_micros(0),
+            original_action: Vec::new(),
+            original_signature: holochain_types_07::prelude::Signature([0; 64]),
+            original_entry: poll.map(|p| rmp_serde::to_vec_named(&Entry { poll_action_hash: hash(p) }).unwrap()).unwrap_or_default(),
+            poll_mapping: None,
+        }
+    }
+
+    /// A record this node holds is carried even when the older DNA's reader
+    /// left it out (anyone could delete its link there), once, and a vote
+    /// only on its own poll. What its author deleted stays out.
+    #[test]
+    fn what_the_node_holds_is_added_to_what_the_readers_return() {
+        let hash = |n: u8| ActionHash::from_raw_36(vec![n; 36]);
+        let mut held = Held::default();
+        held.records.push((POLL, made(1, None)));
+        held.records.push((POLL, made(2, None)));
+        held.records.push((VOTE, made(10, Some(1))));
+        held.records.push((VOTE, made(11, Some(2))));
+        held.records.push((VOTE, made(12, Some(1))));
+        held.settle([hash(12)].into_iter().collect());
+
+        // The reader returned poll 1 only: poll 2 is added, poll 1 is not doubled.
+        let mut polls = vec![made(1, None)];
+        assert_eq!(held.add_to(&mut polls, POLL, None), 1);
+        assert_eq!(polls.iter().map(|c| c.original_action_hash.clone()).collect::<Vec<_>>(), vec![hash(1), hash(2)]);
+
+        // Poll 1's votes: the reader returned none. Vote 10 is added; vote
+        // 11 is on another poll; vote 12 was deleted by its author.
+        let mut votes = Vec::new();
+        assert_eq!(held.add_to(&mut votes, VOTE, Some(&hash(1))), 1);
+        assert_eq!(votes[0].original_action_hash, hash(10));
+        // Asked again, nothing more is added.
+        assert_eq!(held.add_to(&mut votes, VOTE, Some(&hash(1))), 0);
+    }
 
     /// Only a record's own author can have it left out or its copy removed:
     /// the older DNAs let anyone write a delete for anyone's record.
