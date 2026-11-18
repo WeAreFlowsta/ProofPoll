@@ -708,6 +708,35 @@ pub fn carry_link(input: CarryInput) -> ExternResult<ActionHash> {
     Ok(link_hash)
 }
 
+/// Remove the carried links between the caller and `other` (Disconnect on
+/// an install whose identity link was made on an older DNA). Either of a
+/// link's two agents may remove it, whoever carried it: the integrity rules
+/// check that. Returns how many were removed; none is not an error.
+#[hdk_extern]
+pub fn remove_carried_link(other: AgentPubKey) -> ExternResult<u32> {
+    let me = agent_info()?.agent_initial_pubkey;
+    let mut removed = 0;
+    for (hash, carried) in carried_links_from(&me)? {
+        let Ok(entry) = original_fields::<IsSamePerson>(&carried) else { continue };
+        let pair = (&entry.agent_a, &entry.agent_b);
+        if pair != (&me, &other) && pair != (&other, &me) {
+            continue;
+        }
+        // The two filing links first (one under each agent), then the record.
+        for agent in [&entry.agent_a, &entry.agent_b] {
+            let links = get_links(LinkQuery::try_new(agent.clone(), LinkTypes::AgentToCarriedLink)?, GetStrategy::default())?;
+            for link in links {
+                if ActionHash::try_from(link.target).ok().as_ref() == Some(&hash) {
+                    delete_link(link.create_link_hash, GetOptions::default())?;
+                }
+            }
+        }
+        delete_entry(hash)?;
+        removed += 1;
+    }
+    Ok(removed)
+}
+
 /// The carried links filed under `agent`, with their records' hashes.
 fn carried_links_from(agent: &AgentPubKey) -> ExternResult<Vec<(ActionHash, Carried)>> {
     let links = get_links(LinkQuery::try_new(agent.clone(), LinkTypes::AgentToCarriedLink)?, GetStrategy::default())?;

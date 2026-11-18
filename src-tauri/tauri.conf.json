@@ -45,7 +45,8 @@
     "resources": [
       "resources/proofpoll_v1_3_happ.happ",
       "resources/proofpoll_v1_4_happ.happ",
-      "resources/proofpoll_v1_5_happ.happ"
+      "resources/proofpoll_v1_5_happ.happ",
+      "resources/polls_coordinator_v1_5.wasm"
     ],
     "icon": [
       "icons/32x32.png",

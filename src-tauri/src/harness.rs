@@ -378,6 +378,8 @@ async fn op(Ax(app): Ax<tauri::AppHandle>, Json(body): Json<Value>) -> Reply {
         "link" => link(&app, state, s(&body, "client_id")).await,
         // A sign-in as 0.4.x made it: the link on v1.3 only.
         "v13_link" => v13_link(state, s(&body, "client_id")).await,
+        // Disconnect, as the identity page's button calls it.
+        "disconnect" => to_value(commands::revoke_identity_link(state.clone()).await.map(|_| Value::Null)),
         // The layout's check: v1.5 links the key the active network runs
         // as to the signed-in identity (own or carried link).
         "linked_active" => {

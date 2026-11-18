@@ -714,30 +714,33 @@ pub fn get_identity_link(
     load_identity_link(&state.data_dir)
 }
 
+/// Disconnect (disconnect.rs). It always completes on this device: the
+/// link and the cached profile go first, then the link is removed on the
+/// networks; what a network refuses is tried again at the next starts and
+/// never leaves the person signed in with an error.
 #[tauri::command]
 pub async fn revoke_identity_link(
     state: tauri::State<'_, std::sync::Arc<AppState>>,
 ) -> Result<(), String> {
     let Some(link_data) = load_identity_link(&state.data_dir) else {
-        // Already unlinked locally — nothing to do.
+        // Already unlinked locally: finish anything still owed on the networks.
+        crate::disconnect::settle(state.inner()).await;
         return Ok(());
     };
+    crate::disconnect::owe(
+        &state.data_dir,
+        crate::disconnect::Owed { vault_agent_pub_key: link_data.vault_agent_pub_key.clone(), entry_action_hash: link_data.entry_action_hash.clone() },
+    );
 
-    // Call revoke_link on the agent_linking zome
-    let action_hash = ActionHash::try_from(link_data.entry_action_hash.clone())
-        .map_err(|e| format!("Invalid action hash: {:?}", e))?;
-
-    let client = state.app_client.lock().await;
-    let client = client.as_ref().ok_or("Conductor not ready")?;
-
-    let payload = crate::hc::encode(&action_hash)?;
-    call_zome(client, AGENT_LINKING_ZOME, "revoke_link", payload).await?;
-
-    // Delete local persistence - INCLUDING the profile cache, or the next
-    // link under a different identity could publish the previous person's
+    // This device first - INCLUDING the profile cache, or the next link
+    // under a different identity could publish the previous person's
     // name/photo on their first public vote.
     delete_identity_link(&state.data_dir);
     flowsta_vault_client::identity::delete_cached_profile(&state.data_dir);
+    log::info!("[disconnect] this device no longer holds the link to the identity");
+
+    // Then the networks.
+    crate::disconnect::settle(state.inner()).await;
 
     // Telling the Vault happens from the WEBVIEW (the identity page, through
     // the SDK's `revokeFlowstaIdentity`), not here: the page waits for the
