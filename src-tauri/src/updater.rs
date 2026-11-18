@@ -424,8 +424,11 @@ pub fn set_update_prefs(app: tauri::AppHandle, auto: bool) -> UpdateStatus {
     saved.auto = Some(auto);
     save(&data_dir, &saved);
     if !auto {
-        // Off stops the check itself; a download already waiting is dropped.
+        // Off stops the check itself; a download already waiting is dropped,
+        // and the window is told so: "Restart to update" stayed in the
+        // header and failed when pressed.
         *READY.lock().unwrap() = None;
+        let _ = app.emit("update-ready", serde_json::Value::Null);
     }
     status_of(&data_dir)
 }

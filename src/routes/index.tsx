@@ -420,8 +420,8 @@ export default component$(() => {
                     {p.poll.description}
                   </p>
                 )}
-                <div class="text-xs text-gray-500 flex items-center gap-2">
-                  <span>{p.poll.options.length} options</span>
+                <div class="text-xs text-gray-500 flex items-center gap-2" data-testid="home-poll-meta">
+                  <span>{p.poll.options.length} option{p.poll.options.length !== 1 ? "s" : ""}</span>
                   {(flagCounts.value.get(p.hash) ?? 0) > 0 && (
                     <span class="text-amber-500">
                       {flagCounts.value.get(p.hash)} flag{(flagCounts.value.get(p.hash) ?? 0) !== 1 ? "s" : ""}

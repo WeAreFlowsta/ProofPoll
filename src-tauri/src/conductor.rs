@@ -648,7 +648,7 @@ pub async fn start_holochain(
 
     let retry_passphrase = if is_hmac_error {
         log::warn!("[start_holochain] SQLCipher hmac mismatch on first attempt — performing full state reset: {}", first_err);
-        let _ = app_handle.emit("conductor-status", ConductorStatus::Starting { message: "Recovering from corrupted state — full reset...".into() });
+        let _ = app_handle.emit("conductor-status", ConductorStatus::Starting { message: "Recovering from corrupted state. Setting up again...".into() });
         crate::commands::nuke_state_and_regenerate_passphrase(&data_dir, &app_state)
     } else {
         log::warn!("[start_holochain] first attempt failed: {} — auto-restarting", first_err);

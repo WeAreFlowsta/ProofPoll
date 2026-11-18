@@ -306,7 +306,7 @@ export default component$(() => {
         {p.description && (
           <p class="text-gray-400 mb-3">{p.description}</p>
         )}
-        <div class="text-xs text-gray-500">
+        <div class="text-xs text-gray-500" data-testid="poll-counts">
           {totalVotes} vote{totalVotes !== 1 ? "s" : ""}
           {flags.value.length > 0 && (
             <span>

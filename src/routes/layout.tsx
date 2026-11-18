@@ -138,7 +138,8 @@ export default component$(() => {
         updatedFrom.value = st.updated;
       })
       .catch(() => {});
-    listen<NonNullable<typeof updateReady.value>>("update-ready", (event) => {
+    // Null when the waiting download was dropped (automatic updates switched off).
+    listen<typeof updateReady.value>("update-ready", (event) => {
       updateReady.value = event.payload;
     }).then((unlisten) => unlistenMigration.push(unlisten));
     listen<"password" | "installing" | "restarting">("update-stage", (event) => {
@@ -849,7 +850,7 @@ export default component$(() => {
         ) : (
           <>
             {migration.value && !migrationDismissed.value && (
-              <div class="bg-indigo-900/30 border border-indigo-800/50 rounded-lg px-4 py-2 mb-4 flex items-center justify-between">
+              <div class="bg-indigo-900/30 border border-indigo-800/50 rounded-lg px-4 py-2 mb-4 flex items-center justify-between" data-testid="nav-migration-banner" data-polls={migration.value.polls_migrated.length}>
                 <div class="text-sm text-indigo-300">
                   <span>Bringing your polls and votes over to this version... ({migration.value.polls_migrated.length} poll{migration.value.polls_migrated.length !== 1 ? "s" : ""} so far)</span>
                 </div>
