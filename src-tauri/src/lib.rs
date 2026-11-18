@@ -44,6 +44,7 @@ mod profiles;
 // Carried records: the move to v1.5 builds and checks them.
 mod carried;
 mod carry_move;
+mod disconnect;
 mod vault_probe;
 mod link_token;
 mod webview_fix;
@@ -320,6 +321,9 @@ pub fn run() {
                         // nothing is left (carry_move.rs). It replaces the
                         // v1.3 to v1.4 move, which wrote records again.
                         carry_move::spawn(startup_state.clone());
+                        // A Disconnect a network refused last time is
+                        // finished now (disconnect.rs).
+                        disconnect::spawn(startup_state.clone());
                     }
                     Err(e) => {
                         log::error!("Failed to start conductor: {}", e);

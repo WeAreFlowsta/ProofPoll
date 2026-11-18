@@ -32,6 +32,14 @@ for (const name of bundled) {
 }
 for (const k of kitFiles) if (!bundled.includes(k.name)) problems.push(`${k.name}: in a kit, but not bundled (tauri.conf.json)`);
 
+// The v1.5 bundle and its coordinator: the app's copies are the committed
+// pack's, byte for byte, and the coordinator the app hot-swaps onto an
+// installed cell is bundled and is the one inside that pack.
+const same = (a, b) => existsSync(a) && existsSync(b) && readFileSync(a).equals(readFileSync(b));
+if (!same("src-tauri/resources/proofpoll_v1_5_happ.happ", "dna/v1.5/workdir/proofpoll_v1_5_happ.happ")) problems.push("proofpoll_v1_5_happ.happ: the app's copy is not dna/v1.5/workdir's");
+if (!same("src-tauri/resources/polls_coordinator_v1_5.wasm", "dna/v1.5/workdir/polls_coordinator.wasm")) problems.push("polls_coordinator_v1_5.wasm: the app's copy is not dna/v1.5/workdir's");
+if (!(conf.bundle?.resources || []).includes("resources/polls_coordinator_v1_5.wasm")) problems.push("polls_coordinator_v1_5.wasm: not bundled (tauri.conf.json)");
+
 if (problems.length) {
   console.error("bundle-sync: the bundled hApp files do not agree:\n  " + problems.join("\n  "));
   process.exit(1);

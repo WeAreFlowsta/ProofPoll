@@ -3,7 +3,7 @@
 # identity (the Vault repo beside this one, its test binary built), ProofPoll
 # test instances A and B (scripts/build-test-binary.sh), the legs in order;
 # C and D join for the restore (its quorum: two peers agreeing on the chain head).
-# Usage: scripts/matrix.sh [log dir]     (LEGS="fresh signin polls migration devices offline watch adopt short")
+# Usage: scripts/matrix.sh [log dir]     (LEGS="fresh disconnect13 signin polls migration devices offline watch adopt short")
 # `watch`: A restarts its lines for their memory by itself, and a conductor
 # that is killed is started again (each line in turn).
 # `short` (a restore that comes back shorter than the backup, then whole) runs
@@ -16,7 +16,7 @@ cd "$(dirname "$0")/.."
 PP="$PWD"
 VAULT_REPO="${VAULT_REPO:-$PP/../flowsta-vault}"
 LOGS="${1:-$HOME/.cache/proofpoll-matrix/run-$(date -u +%m%d-%H%M)}"; mkdir -p "$LOGS"
-LEGS="${LEGS:-fresh signin polls migration devices offline watch adopt short}"
+LEGS="${LEGS:-fresh disconnect13 signin polls migration devices offline watch adopt short}"
 ORIGIN=https://ourtest.flowsta.com
 CLIENT_ID="$(grep -o 'VITE_FLOWSTA_CLIENT_ID=[^ \\]*' scripts/build-test-binary.sh | cut -d= -f2-)"
 rc=0

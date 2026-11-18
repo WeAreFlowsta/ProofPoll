@@ -774,6 +774,33 @@ pub async fn wait_for_restore_07(
     }
 }
 
+/// The v1.5 cell's `polls` coordinator revision. A coordinator is not part
+/// of the DNA hash: a change to it reaches the same network, delivered with
+/// the app. Rev 2 (0.6.0): `remove_carried_link`, so Disconnect can remove
+/// an identity link made on an older DNA and carried to v1.5.
+pub const POLLS_COORDINATOR_REV_V1_5: u32 = 2;
+const POLLS_COORDINATOR_WASM_V1_5: &str = "polls_coordinator_v1_5.wasm";
+
+/// Hot-swap the v1.5 cell's `polls` coordinator to the bundled one. Run at
+/// every start: the call is cheap and repeatable, and an install that got
+/// v1.5 from an earlier build keeps that build's coordinator otherwise. A
+/// failure is logged and tried again at the next start.
+pub async fn ensure_polls_coordinator_07(admin_port: u16, resource_dir: &Path) -> Result<(), String> {
+    let wasm = std::fs::read(resource_dir.join(POLLS_COORDINATOR_WASM_V1_5)).map_err(|e| format!("read {}: {}", POLLS_COORDINATOR_WASM_V1_5, e))?;
+    let admin = admin_07(admin_port).await?;
+    let apps = admin.list_apps().await.map_err(|e| format!("list_apps: {}", e))?;
+    let Some(app) = apps.iter().find(|a| a.app_id == APP_ID_V1_5) else {
+        return Ok(());
+    };
+    let cell = app.first_cell().ok_or("no provisioned v1.5 cell")?;
+    admin
+        .update_coordinators(cell, flowsta_hc_lines::CoordinatorZome { name: "polls", wasm })
+        .await
+        .map_err(|e| format!("update_coordinators: {}", e))?;
+    log::info!("[0.7] polls coordinator ensured at rev {} on {}", POLLS_COORDINATOR_REV_V1_5, APP_ID_V1_5);
+    Ok(())
+}
+
 /// The library's admin client on the 0.7 conductor.
 async fn admin_07(admin_port: u16) -> Result<flowsta_hc_lines::AdminClient, String> {
     flowsta_hc_lines::AdminClient::connect(crate::hc::Line::V07, admin_port, &crate::conductor::node_origin())

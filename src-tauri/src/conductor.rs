@@ -493,6 +493,12 @@ impl PpLines {
             self.say("Restarting Holochain once after setup...");
             return Ok(Setup { app_port: 0, restart: true });
         }
+        // The v1.5 cell runs the coordinator this build bundles (a cell from
+        // an earlier build keeps that build's otherwise). Not fatal: without
+        // it only Disconnect's removal of a carried link waits.
+        if let Err(e) = crate::dna::ensure_polls_coordinator_07(process.admin_port, &self.resource_dir).await {
+            log::warn!("[0.7] the polls coordinator was not updated: {}", e);
+        }
         let (app_port, client, client_v1_4) =
             crate::dna::setup_app_interface_07(process.admin_port, &lair_client_07).await.map_err(|e| format!("App interface setup (0.7) failed: {}", e))?;
         let mut out = self.out.lock().await;

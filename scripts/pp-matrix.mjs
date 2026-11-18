@@ -12,7 +12,7 @@
  */
 
 import { LEG, A, B, C, D, VAULT, CLIENT_ID, record, until, status, op, waitReady, nowS, sleep, signin, summary } from './matrix-lib.mjs';
-import { polls, migration, carrier } from './matrix-polls.mjs';
+import { polls, migration, carrier, disconnect13 } from './matrix-polls.mjs';
 
 // ───────────────────────── legs ─────────────────────────
 
@@ -337,7 +337,7 @@ async function watch(state) {
 
 // ───────────────────────── main ─────────────────────────
 
-const legs = { fresh, signin: () => signin(), polls, migration, carrier };
+const legs = { fresh, signin: () => signin(), polls, migration, carrier, disconnect13 };
 try {
   const withState = { devices, offline, watch, adopt, adopted, 'short-write': shortWrite, 'short-adopt': shortAdopt, 'short-waits': shortWaits, 'short-whole': shortWhole, 'short-go-on': shortGoOn };
   if (withState[LEG]) {

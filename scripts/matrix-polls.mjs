@@ -96,6 +96,33 @@ export async function migration() {
   record('A: v1.5 links its key to the identity (its own link from the sign-in)', aLinked.ok && aLinked.data === true, aLinked.error || JSON.stringify(aLinked.data));
 }
 
+/** Disconnect on an install that signed in before 0.6.0: its identity link
+ * was made on v1.3 and reaches v1.5 as a carried copy with another hash. Run
+ * on an instance that has not signed in yet (LEGS="fresh disconnect13"). */
+export async function disconnect13() {
+  console.log('\n── Disconnect on an install that signed in before 0.6.0');
+  record('A: ready', await waitReady(A));
+  const linked13 = await op(A, { op: 'v13_link', client_id: CLIENT_ID });
+  record('A: signed in on v1.3 as 0.4.x did (its only link there)', linked13.ok, linked13.error);
+  const mv = await op(A, { op: 'move15' }, 600);
+  const rep = mv.data?.report || {};
+  record('A: the move to v1.5 runs to the end', mv.ok && mv.data?.complete === true && rep.failed === 0, mv.error || JSON.stringify(rep));
+  record('A: v1.5 links its key to the identity (the carried link)', await until(async () => (await op(A, { op: 'linked_active' })).data === true, 120, 5000));
+  const held = await op(A, { op: 'identity' });
+  record('A: the app holds its link', held.ok && !!held.data?.vault_agent_pub_key, held.error || JSON.stringify(held.data));
+  const gone = await op(A, { op: 'disconnect' }, 180);
+  record('A: Disconnect completes', gone.ok, gone.error || JSON.stringify(gone.data));
+  const after = await op(A, { op: 'identity' });
+  record('A: the app holds no link afterwards', after.ok && !after.data, after.error || JSON.stringify(after.data));
+  record('A: v1.5 no longer links its key to the identity', await until(async () => (await op(A, { op: 'linked_active' })).data === false, 120, 5000));
+  // The move runs again at every start: with the original revoked on v1.3,
+  // it must not carry the link back.
+  const again = await op(A, { op: 'move15' }, 600);
+  record('A: the move, run again, carries no link back', again.ok && (again.data?.report?.links ?? 0) === 0 && (await op(A, { op: 'linked_active' })).data === false, again.error || JSON.stringify(again.data?.report));
+  const twice = await op(A, { op: 'disconnect' }, 60);
+  record('A: Disconnect pressed again is harmless', twice.ok, twice.error);
+}
+
 /** The node's carrier: ProofPoll 0.4.x data on v1.3 by installs that never
  * update (each instance holds its own move: PROOFPOLL_TEST_HOLD_MOVE), carried
  * to v1.5 by the carrier binary against D's conductors, D standing for the
