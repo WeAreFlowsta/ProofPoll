@@ -1,0 +1,52 @@
+name: DNA tests
+
+# The DNA v1.5 tests on a real Holochain 0.7.1 conductor: every validation
+# rule, carried records checked against real v1.3 and v1.4 signatures, and
+# a stranger's own coordinator whose writes the rules must refuse. They load
+# the committed bundle (dna/v1.5/workdir/proofpoll_v1_5.dna), so a pass says
+# the bundle the app ships behaves this way.
+
+on:
+  push:
+    branches: [main, stable-channel-release, "proofpoll-*"]
+    paths:
+      - "dna/v1.5/**"
+      - ".github/workflows/dna.yml"
+  pull_request:
+    paths:
+      - "dna/v1.5/**"
+      - ".github/workflows/dna.yml"
+  workflow_dispatch:
+
+jobs:
+  dna-v1-5:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential cmake clang pkg-config libssl-dev perl golang-go
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            dna/v1.5/tests
+            dna/v1.5/tests/hostile
+
+      # The stranger's coordinator, built into its own target folder with
+      # the DNA's flags (tests/hostile.rs loads it from there).
+      - name: Build the hostile test coordinator
+        working-directory: dna/v1.5/tests/hostile
+        env:
+          RUSTFLAGS: --cfg getrandom_backend="custom"
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cargo build --release --target wasm32-unknown-unknown
+
+      - name: DNA v1.5 tests
+        working-directory: dna/v1.5/tests
+        run: cargo test -- --test-threads=2
