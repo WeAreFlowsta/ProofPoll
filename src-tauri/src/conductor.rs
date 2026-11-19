@@ -272,10 +272,20 @@ fn tuning(line: Line) -> NetworkTuning {
             t.request_timeout_s = Some(60);
             t.db_sync_level = Some("Normal".into());
             t.gossip_max_op_bytes = None;
+            t.connect_timeout_s = Some(CONNECT_TIMEOUT_S);
         }
     }
     t
 }
+
+/// How long the conductor waits to connect to one peer (Kitsune2's own wait
+/// is 60 s). Every conductor start has a new network address, and the one
+/// before it stays in other peers' lists for a while: each try at it held a
+/// peer's sync for the whole wait. Measured with two devices of one identity
+/// in Flowsta Vault (2026-11-19): after one restarted, a record written on
+/// the other arrived in 40 to 214 s and once not within ten minutes at 60 s;
+/// in 2 to 111 s at 15 s. A peer that is there answers in under a second.
+const CONNECT_TIMEOUT_S: u32 = 15;
 
 /// A line's rendezvous as this start uses it: with its auth when it answers
 /// (or there is none to carry), without it when nothing answers.
@@ -1032,6 +1042,8 @@ mod tests {
     fn the_lines_keep_their_settings_and_07_carries_no_gossip_cap() {
         let t7 = tuning(Line::V07);
         assert_eq!((t7.gossip_max_op_bytes, t7.request_timeout_s, t7.db_sync_level.as_deref()), (None, Some(60), Some("Normal")));
+        assert_eq!(t7.connect_timeout_s, Some(15));
+        assert_eq!(tuning(Line::V06).connect_timeout_s, None, "the 0.6 line has no such setting");
         let t6 = tuning(Line::V06);
         assert_eq!((t6.db_sync_strategy.as_deref(), t6.request_timeout_s), (Some("Resilient"), None));
     }
