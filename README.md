@@ -17,6 +17,13 @@ ProofPoll is built on **[Flowsta Vault](https://flowsta.com/vault/)**, which kee
 
 ## What's New
 
+### v0.6.0-beta.9 - 2026-11-20
+- **After a restart, what others did arrives sooner.** A poll or vote made elsewhere could take several minutes to show after ProofPoll had just started or updated. In our tests it now arrives within two minutes, often within seconds.
+- **macOS: after a crash or a forced quit, syncing stops with ProofPoll.** The parts that sync and hold your keys kept running until the next launch. They now end when ProofPoll does.
+- **"Restart to update" goes away when you switch automatic updates off.** It stayed in the header and failed when pressed.
+- Smaller fixes to wording: a backup under 1 KB is shown as "(under 1 KB)", a poll with one option says "1 option", and the message after a recovery at start reads plainly.
+- **For developers and forks:** the write rules are tested in CI against the DNA inside the pack the app ships, and the tests check that what each screen says makes sense.
+
 ### v0.6.0-beta.8 - 2026-11-19
 - **Disconnect works on every install.** On an install that signed in before 0.6.0, Disconnect could stop with "Entry not found" and leave you signed in. It now signs you out on this device at once, then removes the link on the networks, and tries again at the next start if a network does not answer.
 - **For developers and forks:** the README's DNA Migration section describes how records are carried to a new DNA version, and the DNA's tests and a front-end build run in CI.
