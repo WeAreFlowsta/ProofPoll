@@ -416,7 +416,9 @@ export default component$(() => {
                 {backupOutcome.value.ok
                   ? `Last backup saved ${formatWhen(backupOutcome.value.at)}${
                       backupOutcome.value.bytes
-                        ? ` (${Math.round(backupOutcome.value.bytes / 1024)} KB)`
+                        ? backupOutcome.value.bytes < 1024
+                          ? " (under 1 KB)"
+                          : ` (${Math.round(backupOutcome.value.bytes / 1024)} KB)`
                         : ""
                     }.`
                   : `Last backup attempt ${formatWhen(backupOutcome.value.at)}: ${backupOutcome.value.message}`}

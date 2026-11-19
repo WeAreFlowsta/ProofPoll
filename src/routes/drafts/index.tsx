@@ -58,7 +58,7 @@ export default component$(() => {
     return (
       <div class="max-w-xl mx-auto text-center py-16">
         <h1 class="text-2xl font-bold mb-4">Drafts</h1>
-        <p class="text-gray-400">Sign in with Flowsta to view your draft polls.</p>
+        <p class="text-gray-400" data-testid="drafts-signed-out">Sign in with Flowsta to view your draft polls.</p>
       </div>
     );
   }

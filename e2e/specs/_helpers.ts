@@ -1,4 +1,5 @@
 // Shared helpers for the UI specs (ported from Flowsta Vault's e2e).
+import { senseProblems, type Shown } from "../../src/lib/sense";
 import { resolve } from "node:path";
 import { SHOTS } from "../wdio.conf";
 
@@ -130,4 +131,84 @@ export async function copyProblemsOutside(where: string, userContentIds: string[
     return t;
   }, userContentIds);
   return copyProblemsIn(text, where);
+}
+
+
+// ── Does what is on the screen make sense? ──────────────────────────────
+// The rulebook is src/lib/sense.ts. Here it reads the real window: the
+// header, the banners and each page read the same facts through separate
+// reads and timers, so they can tell two stories at once.
+
+/** What the window shows right now, as far as the rulebook reads it. */
+export async function shownNow(): Promise<Shown> {
+  return (await browser.execute(() => {
+    const q = (id: string, root: ParentNode = document) => root.querySelector(`[data-testid="${id}"]`) as HTMLElement | null;
+    const all = (id: string) => Array.from(document.querySelectorAll(`[data-testid="${id}"]`)) as HTMLElement[];
+    const text = (el: Element | null | undefined) => ((el as HTMLElement | null)?.innerText || "").replace(/\s+/g, " ").trim();
+    const up = (id: string) => !!q(id);
+    const out: Record<string, unknown> = {};
+    const name = q("nav-profile-name");
+    // The header is there once the app is past its start screens.
+    if (up("nav-settings")) {
+      out.header = { signIn: up("nav-signin"), name: name ? text(name) : null, nameStruck: !!name && /line-through/.test(name.className), drafts: up("nav-drafts"), restartToUpdate: up("nav-restart-to-update") };
+      const migration = q("nav-migration-banner");
+      out.banners = { mismatch: up("nav-mismatch-banner"), relink: up("nav-relink-banner"), reconnect: up("nav-reconnect-banner"), confirm: up("nav-link-banner"), migrationPolls: migration ? Number(migration.getAttribute("data-polls")) : null };
+    }
+    if (up("identity-linked") || up("identity-signed-out")) {
+      out.identity = { signedIn: up("identity-linked"), signedOut: up("identity-signed-out"), name: q("identity-display-name") ? text(q("identity-display-name")) : null };
+    }
+    if (up("home-poll-list") || up("home-loading") || up("home-syncing") || up("home-empty")) {
+      out.home = { rows: all("home-poll-row").length, loading: up("home-loading"), syncing: up("home-syncing"), empty: up("home-empty") };
+    }
+    const results = q("poll-results");
+    if (results) {
+      const total = /Results \((\d+) total\)/.exec(text(results));
+      const counts = Array.from(results.querySelectorAll('[data-testid^="poll-result-count-"]')).map((el) => Number(/^(\d+)/.exec(text(el))?.[1] ?? 0));
+      out.poll = { total: total ? Number(total[1]) : null, noVotesYet: /No votes yet/.test(text(results)), counts, voted: up("poll-voted"), voteForm: up("poll-vote-form") };
+    }
+    if (up("drafts-list") || up("drafts-empty") || up("drafts-signed-out")) {
+      out.drafts = { signedOutLine: up("drafts-signed-out"), rows: all("drafts-row").length, empty: up("drafts-empty") };
+    }
+    const auto = q("updates-auto");
+    if (auto) out.updates = { autoOn: auto.getAttribute("aria-checked") === "true" };
+    // The app's own wording only (a poll's title or a name is the person's).
+    const own = ["nav-starting", "nav-connecting", "nav-connection-lost", "nav-restoring", "nav-restoring-short", "nav-restoring-slow", "nav-restoring-retry-wait", "nav-migration-banner", "nav-mismatch-banner", "nav-relink-banner", "nav-reconnect-banner", "nav-link-banner", "nav-updated", "identity-backups", "poll-counts", "updates-card", "home-syncing", "home-empty"];
+    out.texts = [...own.flatMap((id) => all(id)), ...all("home-poll-meta")].map((el) => text(el)).filter(Boolean);
+    if (results) (out.texts as string[]).push(...Array.from(results.querySelectorAll("h2, [data-testid^=\"poll-result-count-\"]")).map((el) => text(el)));
+    return out;
+  })) as Shown;
+}
+
+/** What does not make sense and stays that way: a problem counts only when
+ *  every look over the next while still shows it (the header re-reads the
+ *  connection every 15 s, the home page its polls every 30 s). */
+export async function senseProblemsOn(where: string): Promise<string[]> {
+  const first = await shownNow();
+  const h = first.header;
+  console.log(`e2e: sense check ${where}: ${h ? (h.signIn ? "signed out" : `signed in as "${h.name}"${h.nameStruck ? " (struck)" : ""}`) : "a start screen"}${first.identity ? ", Identity page" : ""}${first.home ? `, home with ${first.home.rows} poll(s)` : ""}${first.poll ? `, a poll with ${first.poll.total} vote(s)` : ""}${first.drafts ? `, Drafts with ${first.drafts.rows}` : ""}${first.updates ? ", Updates" : ""}`);
+  let standing = senseProblems(first);
+  for (let look = 0; look < 8 && standing.length > 0; look++) {
+    await browser.pause(5_000);
+    const now = senseProblems(await shownNow());
+    standing = standing.filter((p) => now.includes(p));
+  }
+  return standing.map((p) => `${where}: ${p}`);
+}
+
+// After every test of every spec the window is checked where the test left
+// it; the spec fails at its end if anything did not make sense.
+const senseSeen: string[] = [];
+if (typeof afterEach === "function" && typeof after === "function") {
+  afterEach(async function () {
+    try {
+      senseSeen.push(...(await senseProblemsOn(`after "${this.currentTest?.title ?? "a test"}"`)));
+    } catch {
+      /* the window is gone or mid-navigation: nothing to read */
+    }
+  });
+  after(function () {
+    // PROOFPOLL_E2E_SENSE_SELFTEST=1 proves the spec fails when something is found.
+    if (process.env.PROOFPOLL_E2E_SENSE_SELFTEST) senseSeen.push("self-test: a made-up problem");
+    if (senseSeen.length > 0) throw new Error(`The screen showed things that do not make sense:\n  ${[...new Set(senseSeen)].join("\n  ")}`);
+  });
 }
