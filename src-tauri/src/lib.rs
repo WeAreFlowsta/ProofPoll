@@ -92,6 +92,20 @@ fn log_target(app: &tauri::App) -> (tauri_plugin_log::TargetKind, Option<String>
 
 static WEBVIEW_FIX: std::sync::OnceLock<webview_fix::Outcome> = std::sync::OnceLock::new();
 
+/// Whether the main window has had the focus since this launch.
+static WINDOW_HAD_FOCUS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Show the main window, in front and with the focus, and say so in the log.
+fn bring_to_front(app: &tauri::AppHandle, when: &str) {
+    if let Some(win) = app.get_webview_window("main") {
+        let had_focus = WINDOW_HAD_FOCUS.load(std::sync::atomic::Ordering::Relaxed);
+        let _ = win.show();
+        let _ = win.unminimize();
+        let _ = win.set_focus();
+        log::info!("[window] brought to the front {when} (it had {} the focus since launch)", if had_focus { "had" } else { "not had" });
+    }
+}
+
 pub fn run() {
     // Started as the library's stop helper (`--hc-lines-interrupt <pid>`,
     // Windows): raise Ctrl-C in that sidecar's console and exit, before
@@ -118,6 +132,11 @@ pub fn run() {
     let builder = builder.plugin(tauri_plugin_wdio_webdriver::init());
     builder
         .plugin(tauri_plugin_shell::init())
+        .on_window_event(|_window, event| {
+            if let tauri::WindowEvent::Focused(true) = event {
+                WINDOW_HAD_FOCUS.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        })
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let data_dir = match test_data_dir() {
@@ -206,14 +225,13 @@ pub fn run() {
             // few hours.
             updater::spawn(app.handle().clone(), app_state.device_root.clone());
             app_state.raise_when_ready.store(relaunched || after_update, std::sync::atomic::Ordering::Relaxed);
-            if relaunched || after_update {
-                // app.restart() leaves focus with whatever was behind the
-                // old window (the Vault, mostly). Come back to the front now
-                // and again once the conductor is ready (below).
-                if let Some(win) = app.get_webview_window("main") {
-                    let _ = win.show();
-                    let _ = win.set_focus();
-                }
+            // app.restart() leaves focus with whatever was behind the old
+            // window (the Vault, mostly): come back to the front now and
+            // again once the conductor is ready (below). On a Mac, every
+            // launch: opened from Launchpad, ProofPoll came up behind the
+            // other windows and its Dock icon had to be clicked (0.6.0-beta.9).
+            if relaunched || after_update || cfg!(target_os = "macos") {
+                bring_to_front(app.handle(), "at launch");
             }
 
             // SIGTERM / SIGINT (Ctrl+C, shutdown, `kill <pid>`, a package
@@ -293,16 +311,16 @@ pub fn run() {
                         // No-op on non-Windows platforms.
                         // Also after "Open as this identity" on every
                         // platform: the relaunch must end up in front.
+                        // On a Mac, only when the window has not had the
+                        // focus at all since this launch: a person who was
+                        // in ProofPoll and went elsewhere is left there.
                         if cfg!(target_os = "windows")
                             || startup_state
                                 .raise_when_ready
                                 .load(std::sync::atomic::Ordering::Relaxed)
+                            || (cfg!(target_os = "macos") && !WINDOW_HAD_FOCUS.load(std::sync::atomic::Ordering::Relaxed))
                         {
-                            use tauri::Manager;
-                            if let Some(win) = monitor_handle.get_webview_window("main") {
-                                let _ = win.show();
-                                let _ = win.set_focus();
-                            }
+                            bring_to_front(&monitor_handle, "once ready");
                         }
 
                         conductor::apply_started(&startup_state, &monitor_handle, result).await;
