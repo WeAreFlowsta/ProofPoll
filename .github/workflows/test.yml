@@ -12,6 +12,7 @@ on:
       - "vite.config.ts"
       - "adapters/**"
       - "scripts/**"
+      - "dna/v1.5/**"
       - ".github/workflows/test.yml"
   pull_request:
     paths:
@@ -23,6 +24,7 @@ on:
       - "vite.config.ts"
       - "adapters/**"
       - "scripts/**"
+      - "dna/v1.5/**"
       - ".github/workflows/test.yml"
 
 jobs:
@@ -147,3 +149,50 @@ jobs:
       - name: Release-profile check
         working-directory: src-tauri
         run: cargo check --release
+
+  # The network's write rules, on a real conductor: who may write a poll, a
+  # vote, a flag or a carried record, and that a stranger's own coordinator
+  # is refused. Run against the DNA inside the pack the app ships, never a
+  # fresh build (a rebuild is another DNA hash, another network).
+  write-rules:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: The pack is the one the app pins
+        run: |
+          want=$(grep -o 'name: "proofpoll_v1_5_happ.happ", sha256: "[0-9a-f]*"' src-tauri/src/kits.rs | grep -o '[0-9a-f]\{64\}')
+          have=$(sha256sum src-tauri/resources/proofpoll_v1_5_happ.happ | cut -d' ' -f1)
+          echo "pinned $want"; echo "found  $have"
+          [ -n "$want" ] && [ "$want" = "$have" ]
+
+      - name: The DNA from the shipped pack
+        run: node scripts/extract-shipped-dna.mjs src-tauri/resources/proofpoll_v1_5_happ.happ proofpoll_v1_5.dna dna/v1.5/workdir/proofpoll_v1_5.dna
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            dna/v1.5/tests
+            dna/v1.5/tests/hostile
+
+      # A stranger's own coordinator beside the real integrity zome: two
+      # tests load it. Test only, never bundled.
+      - name: The stranger's coordinator
+        working-directory: dna/v1.5/tests/hostile
+        # The flags the DNA's own build uses (dna/v1.5/build.sh).
+        env:
+          RUSTFLAGS: --cfg getrandom_backend="custom"
+        run: cargo build --release --target wasm32-unknown-unknown
+
+      # One test at a time here (the crate's own setting is two): on a
+      # two-core runner the unoptimized conductor is slow enough that, with
+      # two running, a signed zome call expired before it ran (BadNonce
+      # "Expired", the first full run of this job).
+      - name: Write-rule tests
+        working-directory: dna/v1.5/tests
+        env:
+          RUST_TEST_THREADS: "1"
+        run: cargo test
+
