@@ -186,7 +186,13 @@ jobs:
           RUSTFLAGS: --cfg getrandom_backend="custom"
         run: cargo build --release --target wasm32-unknown-unknown
 
+      # One test at a time here (the crate's own setting is two): on a
+      # two-core runner the unoptimized conductor is slow enough that, with
+      # two running, a signed zome call expired before it ran (BadNonce
+      # "Expired", the first full run of this job).
       - name: Write-rule tests
         working-directory: dna/v1.5/tests
+        env:
+          RUST_TEST_THREADS: "1"
         run: cargo test
 
