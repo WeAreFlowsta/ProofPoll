@@ -181,6 +181,9 @@ jobs:
       # tests load it. Test only, never bundled.
       - name: The stranger's coordinator
         working-directory: dna/v1.5/tests/hostile
+        # The flags the DNA's own build uses (dna/v1.5/build.sh).
+        env:
+          RUSTFLAGS: --cfg getrandom_backend="custom"
         run: cargo build --release --target wasm32-unknown-unknown
 
       - name: Write-rule tests
