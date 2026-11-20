@@ -15,7 +15,7 @@ ProofPoll is built on **[Flowsta Vault](https://flowsta.com/vault/)**, which kee
 
 On 0.5.0 or earlier? Those versions do not update by themselves. Download the latest release and install it over your copy, once; from 0.6.0 on ProofPoll updates itself.
 
-> **Built to be forked.** ProofPoll is also a complete, working template for *any* desktop Holochain app — swap polls for reviews, proposals, a task tracker, a social feed. The genuinely hard parts (conductor lifecycle, identity linking, DNA migration, encrypted private data, running an always-on node) are solved and documented. See the [Forking Guide](#forking-guide).
+> **Building your own Holochain desktop app? Start from the [Holochain Desktop Starter](https://github.com/WeAreFlowsta/holochain-desktop-starter).** It is the template built from this app: the parts that run Holochain, Flowsta sign-in, Vault backups, signed updates and a test suite, with a small notes app in place of polls and none of the history ProofPoll carries. ProofPoll stays the full example: a real app with five DNA versions, two Holochain lines and a network of people on it. Its [Forking Guide](#forking-guide) is for when you want to build on ProofPoll itself.
 
 ## What's New
 
@@ -38,6 +38,7 @@ On 0.5.0 or earlier? Those versions do not update by themselves. Download the la
 - **Linux with the NVIDIA driver:** the window no longer crashes when you change pages.
 - **Security and build:** updated networking and runtime libraries; every downloaded Holochain program is checked against a pinned SHA-256.
 - **For node operators:** `proofpoll-carrier`, attached to each release for Linux, copies a node's polls, votes, flags and identity links to the new network version in one pass, with the same checks the app runs; `--dry-run` writes nothing.
+- **A template for your own app.** The [Holochain Desktop Starter](https://github.com/WeAreFlowsta/holochain-desktop-starter) is the template built from ProofPoll, and the place to start a new Holochain desktop app from now on. ProofPoll stays the full worked example.
 - **For developers and forks:** running Holochain now comes from [flowsta-hc-lines](https://github.com/WeAreFlowsta/flowsta-hc-lines), and the Flowsta side from [flowsta-rust-sdk](https://github.com/WeAreFlowsta/flowsta-rust-sdk) (`flowsta-vault-client` 0.2.1, with `@flowsta/holochain` 3.12.0 on the page). The poll code has a folder of its own, every name a fork changes is in `names.rs`, and `scripts/rename-app.mjs` rewrites it. A headless test run (`scripts/matrix.sh`) and a UI suite (`npm run e2e`) come with the code, the write rules are tested in CI against the DNA the app ships, and the README's DNA Migration section describes how records are carried to a new DNA version.
 
 ### v0.6.0-rc.1 - 2026-11-20
@@ -316,6 +317,8 @@ Polls can be flagged by signed-in users for: Spam, Misleading, Off Topic, or Ina
 ---
 
 ## Forking Guide
+
+**For a new app, start from the [Holochain Desktop Starter](https://github.com/WeAreFlowsta/holochain-desktop-starter) instead.** It has everything below that a new app needs and nothing a new app has to remove: one Holochain line, one DNA version, no migration code. Fork ProofPoll itself when you want what only it has: polls and votes as they are, encrypted private data, community flagging, or a worked example of carrying records across DNA versions and Holochain lines.
 
 This section is for developers (and AIs) who want to fork ProofPoll into a completely different app — a review platform, a task tracker, a social feed, anything. The architecture is app-agnostic; the poll/vote specifics are easy to swap out.
 
