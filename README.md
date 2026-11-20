@@ -17,6 +17,10 @@ ProofPoll is built on **[Flowsta Vault](https://flowsta.com/vault/)**, which kee
 
 ## What's New
 
+### v0.6.0-rc.1 - 2026-11-20
+Release candidate for 0.6.0.
+- **macOS: ProofPoll's window comes to the front when it starts.** After "Restart to update" it could come back behind other windows, so it looked as if it had not reopened.
+
 ### v0.6.0-beta.9 - 2026-11-20
 - **After a restart, what others did arrives sooner.** A poll or vote made elsewhere could take several minutes to show after ProofPoll had just started or updated. In our tests it now arrives within two minutes, often within seconds.
 - **macOS: after a crash or a forced quit, syncing stops with ProofPoll.** The parts that sync and hold your keys kept running until the next launch. They now end when ProofPoll does.
