@@ -159,6 +159,15 @@ static READY: Mutex<Option<Ready>> = Mutex::new(None);
 /// Something the person should know that the updater cannot do for them
 /// (install another version first, an MSI install).
 static NOTICE: Mutex<Option<String>> = Mutex::new(None);
+/// The newest release found while automatic updates are off: said in
+/// Settings > Updates, and never downloaded.
+static OUT_WHILE_OFF: Mutex<Option<String>> = Mutex::new(None);
+
+/// What Settings > Updates says when a newer release is out and this copy
+/// has automatic updates switched off.
+pub(crate) fn out_while_off_notice(version: &str) -> String {
+    format!("ProofPoll {version} is out. Automatic updates are off: switch them on to get it, or download it from the ProofPoll releases page.")
+}
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
 pub struct UpdateStatus {
@@ -223,9 +232,10 @@ async fn fetch_manifest(client: &reqwest::Client, channel: &str) -> Option<Vec<u
 /// info level, Err for warn (it found something that did not verify).
 async fn check_once(app: &tauri::AppHandle, data_dir: &Path) -> Result<String, String> {
     let mut saved = load(data_dir);
-    if !saved.auto() {
-        return Ok("automatic updates are off".into());
-    }
+    // Off means nothing is downloaded or installed. The check itself still
+    // runs (two public files, read without saying anything about this
+    // copy), so Settings > Updates can say that a newer version is out.
+    let auto = saved.auto();
     if READY.lock().unwrap().is_some() {
         return Ok("an update is already waiting to install".into());
     }
@@ -273,6 +283,7 @@ async fn check_once(app: &tauri::AppHandle, data_dir: &Path) -> Result<String, S
         }
     }
     let Some((channel, release)) = best else {
+        *OUT_WHILE_OFF.lock().unwrap() = None;
         let on = channels.join(", ");
         return if let Some(first) = install_first {
             Ok(format!("a newer release updates only from {} or later: install that one first", first))
@@ -286,6 +297,11 @@ async fn check_once(app: &tauri::AppHandle, data_dir: &Path) -> Result<String, S
             Ok(format!("up to date ({}; {})", version, on))
         };
     };
+    if !auto {
+        *OUT_WHILE_OFF.lock().unwrap() = Some(release.version.to_string());
+        return Ok(format!("{} is out; automatic updates are off, so it is not downloaded", release.version));
+    }
+    *OUT_WHILE_OFF.lock().unwrap() = None;
     let channel = channel.to_string();
     let Some(file) = release.file(platform, kind).cloned() else {
         return Ok(format!("{} {} has no {} for {}", APP_ID, release.version, kind, platform));
@@ -405,7 +421,7 @@ fn status_of(data_dir: &Path) -> UpdateStatus {
         channel: channels_for(env!("CARGO_PKG_VERSION"))[0].into(),
         version: env!("CARGO_PKG_VERSION").into(),
         ready: READY.lock().unwrap().as_ref().map(ReadyInfo::of),
-        notice: NOTICE.lock().unwrap().clone(),
+        notice: NOTICE.lock().unwrap().clone().or_else(|| if saved.auto() { None } else { OUT_WHILE_OFF.lock().unwrap().as_deref().map(out_while_off_notice) }),
         updated,
         can_update: platform().is_some() && matches!(kind(), Some(k) if k != "msi"),
     }
@@ -424,7 +440,8 @@ pub fn set_update_prefs(app: tauri::AppHandle, auto: bool) -> UpdateStatus {
     saved.auto = Some(auto);
     save(&data_dir, &saved);
     if !auto {
-        // Off stops the check itself; a download already waiting is dropped,
+        // Off: nothing is downloaded from here on (the check goes on and
+        // only says what is out); a download already waiting is dropped,
         // and the window is told so: "Restart to update" stayed in the
         // header and failed when pressed.
         *READY.lock().unwrap() = None;
@@ -480,6 +497,15 @@ pub async fn restart_to_update(app: tauri::AppHandle) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_release_found_while_updates_are_off_is_said_and_names_both_ways_to_get_it() {
+        let said = out_while_off_notice("1.9.0");
+        assert!(said.contains("1.9.0 is out."));
+        assert!(said.contains("Automatic updates are off"));
+        assert!(said.contains("switch them on"));
+        assert!(said.contains("releases page"));
+    }
 
     /// The updater compares versions by semver, where a pre-release part
     /// that mixes letters and digits is compared as text: "beta10" sorts
